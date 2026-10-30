@@ -131,6 +131,24 @@ struct Spec {
     port: u16,
     path: &'static str,
 }
+/// A process needs a moment to open its port, so an early failed check is not yet news.
+fn still_starting(healthy: Option<bool>, ok: bool, running_for: Duration) -> bool {
+    !ok && healthy.is_none() && running_for < Duration::from_secs(15)
+}
+#[cfg(test)]
+mod startup_grace {
+    use super::*;
+    #[test]
+    fn only_an_early_first_failure_is_ignored() {
+        let early = Duration::from_secs(2);
+        let late = Duration::from_secs(16);
+        assert!(still_starting(None, false, early));
+        assert!(!still_starting(None, false, late));
+        assert!(!still_starting(None, true, early));
+        // Once a process has been healthy, losing health is reported straight away.
+        assert!(!still_starting(Some(true), false, early));
+    }
+}
 impl Spec {
     /// What people call this process; `key` holds internal ids and never reaches the activity feed.
     fn label(&self) -> &'static str {
@@ -320,6 +338,9 @@ impl Supervisor {
                     match process.try_wait() {
                         Ok(None) => {
                             let ok = http_ok(spec.port, spec.path).await;
+                            if still_starting(healthy, ok, started.elapsed()) {
+                                continue;
+                            }
                             if healthy != Some(ok) {
                                 // A first pass is the normal start, so only a change of health is news.
                                 let recovered = healthy == Some(false);

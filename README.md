@@ -2,7 +2,7 @@
 
 Host static websites from your Windows PC. Pick a folder or ZIP, preview it locally, connect a domain on Cloudflare, and publish over HTTPS — no router changes, no public IP.
 
-**Status: 0.2.0, unsigned.** Local hosting, the installer, upgrade, uninstall and background hosting are verified on one Windows 11 machine. A successful public HTTPS publish with the current verifier is **not yet proven**. See [docs/VERIFICATION.md](docs/VERIFICATION.md).
+**Status: 0.2.0, unsigned.** Local hosting, the installer, upgrade, uninstall and background hosting are verified on one Windows 11 machine, and publishing over HTTPS has succeeded on one real domain. A real Windows restart and a clean machine are not yet tested. See [docs/VERIFICATION.md](docs/VERIFICATION.md).
 
 ## Install
 
@@ -52,7 +52,8 @@ Layout: `src/` React UI (`src/lib/api.ts` is the only IPC caller; it uses an in-
 | Forced engine kill leaves no orphaned Caddy; upgrade and reinstall keep data | **Verified** |
 | Cloudflare client and publish state machine | Unit-tested against mock servers |
 | Public verifier's DNS, TLS and marker checks | **Verified** read-only against the real internet |
-| **Publish to a real domain with HTTPS** | **Not verified** with this version; a person must press Publish |
+| **Publish to a real domain with HTTPS** | **Verified** on one domain, from the publishing PC; not yet from another network |
+| Forced engine kill while published | **Verified**: public site back in 9.1 s |
 | **Windows reboot / sign-in recovery** | Not verified with a real reboot |
 | Clean-VM install, code signing | Not verified / not done |
 | Network-loss and tunnel-reconnect behavior against real Cloudflare | Not verified |

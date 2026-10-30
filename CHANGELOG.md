@@ -10,6 +10,8 @@
 - Waiting never deletes anything. After 30 minutes without success, publishing pauses as "recovery required", keeps every resource, and offers Check again and Unpublish.
 - Publishing has explicit, saved stages and resumes after a restart. Only an interrupted provisioning step is rolled back, and only the resources that attempt created.
 - Added retry and safe cancel.
+- Fixed published websites showing a blank page. Each site answered only to `127.0.0.1`, so requests arriving through the tunnel with your real hostname got an empty 200 response. Sites now answer whatever the hostname and still listen only on this PC.
+- A failed IPv6 connection no longer hides the real result from IPv4 in the diagnostics.
 
 ### Interface
 
@@ -22,6 +24,7 @@
 ### Engine and security
 
 - The control pipe answers during startup recovery; startup no longer blocks on the connector.
+- A process gets 15 seconds to start before a failed health check counts, which removes a false warning at every start.
 - Added limits on control-pipe sessions and read time, statistics caching, and retention for activity and deployment history.
 - Added stricter import checks: Windows device names, long paths and importing a folder into itself.
 - Removing a website refuses non-UUID ids and keeps deployments whose Cloudflare cleanup is unfinished.

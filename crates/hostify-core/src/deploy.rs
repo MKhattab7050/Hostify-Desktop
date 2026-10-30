@@ -296,10 +296,21 @@ impl Deployer {
                 params![
                     Utc::now().to_rfc3339(),
                     d.site_id,
-                    verify::state_message(
-                        d.state.as_str(),
-                        d.hostname.as_deref().unwrap_or("this website")
-                    )
+                    match (r.unpublishing, d.state.as_str()) {
+                        // Unpublish passes through "failed" so cleanup can resume after a restart.
+                        (true, "failed") => format!(
+                            "Unpublishing {}",
+                            d.hostname.as_deref().unwrap_or("this website")
+                        ),
+                        (true, "rolled_back") => format!(
+                            "Unpublished {}",
+                            d.hostname.as_deref().unwrap_or("this website")
+                        ),
+                        (_, state) => verify::state_message(
+                            state,
+                            d.hostname.as_deref().unwrap_or("this website")
+                        ),
+                    }
                 ],
             )?;
         }

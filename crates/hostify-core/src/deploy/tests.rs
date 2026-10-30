@@ -1190,6 +1190,29 @@ async fn all_evidence_failures_have_specific_classes_states_and_ordered_checks()
         );
     }
 }
+#[tokio::test]
+async fn unpublishing_is_not_reported_as_a_failed_publish() {
+    let f = setup(99, false, true).await;
+    let d = f.deployer.deploy(f.q.clone(), &|_| {}).await.unwrap();
+    f.deployer.unpublish(&d.id, &|_| {}).await.unwrap();
+    let db = f.deployer.db.lock().unwrap();
+    let mut query = db
+        .prepare("SELECT message FROM activity_logs ORDER BY id")
+        .unwrap();
+    let messages: Vec<String> = query
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(
+        !messages.iter().any(|m| m.contains("failed")),
+        "{messages:?}"
+    );
+    assert!(
+        messages.iter().any(|m| m.starts_with("Unpublished ")),
+        "{messages:?}"
+    );
+}
 /// Production case: IPv4 answers 200 with an empty body (Caddy matched no site for the public
 /// Host) while the PC has no IPv6 route, so every IPv6 address fails to connect.
 struct EmptyBodyOnIpv4 {

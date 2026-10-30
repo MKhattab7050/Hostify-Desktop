@@ -4,7 +4,9 @@ Run on 2026-10-30 on one Windows 11 Pro machine that already had Hostify install
 
 ## Bottom line
 
-**Public HTTPS publishing has not been proven with the new verifier.** Every layer below it has been tested, but a real publish has not succeeded yet. It needs one person to press Publish on a real domain, because automated changes to DNS were blocked in the test environment.
+**Public HTTPS publishing works on a real domain.** `niga.online` reached **Published** through the new verifier, and a separate `curl` request received the full page over validated TLS. That request came from the publishing PC. A check from another network and a real Windows restart are still outstanding.
+
+The first real publish found a bug no earlier test could: published sites were blank, because Caddy answered 200 with an empty body to any hostname other than `127.0.0.1`. The marker check refused to call that published. The real Caddy test now sends a public hostname.
 
 ## Tested
 
@@ -15,7 +17,7 @@ Run on 2026-10-30 on one Windows 11 Pro machine that already had Hostify install
 | TypeScript, ESLint | Clean |
 | `cargo fmt --check` | Clean |
 | Clippy | 0 errors, style warnings remain |
-| Rust unit and integration tests | 123 passed |
+| Rust unit and integration tests | 126 passed |
 | Live read-only network tests (`--ignored`) | 3 of 3 passed |
 | UI tests on the production frontend, mock data | 15 of 15 passed |
 | `pnpm audit --prod` | No known vulnerabilities |
@@ -29,6 +31,20 @@ The UI tests prove interface behaviour only. They do not exercise the engine or 
 - Rejected the marker on an unrelated site that returned a non-matching response (cloudflare.com, 301).
 - Refused wrong-host, expired and self-signed certificates (badssl.com).
 - Reached a pinned address when the system resolver failed.
+
+### Real publish, `niga.online`
+
+| Check | Result |
+|---|---|
+| Zone, DNS record, connector (4 connections), public DNS | Passed |
+| TLS, HTTP and exact one-time marker | Passed at 104.21.3.188 |
+| Public page compared with the local page | Identical, 71,358 bytes |
+| `/.env` on the public address | 404 |
+| Site port listens only on loopback | `127.0.0.1:9001` |
+| Marker removed after success | Passed |
+| Connector reconnects after an upgrade while publishing is paused | Passed, 4 connections |
+| Engine force-killed while published, restarted by its task | Public site back in 9.1 s; still published, same tunnel, 4 Caddy processes, no orphans |
+| PC with no IPv6 | Passed over IPv4 |
 
 ### Installed app, real engine, real Caddy, real data
 
@@ -51,17 +67,16 @@ The UI tests prove interface behaviour only. They do not exercise the engine or 
 
 ## Not tested
 
-- A successful public HTTPS publish with the new verifier.
+- Opening the published site from another network.
 - A real Windows restart and sign-in.
 - Installation on a clean VM or a second machine.
 - Losing and regaining the internet with a live connector.
-- An engine crash while a live tunnel is connected.
+- Unpublishing `niga.online` with this build. The earlier attempt was undone on the previous build.
 - Delete-my-data on uninstall (the checkbox has no silent-mode path, so it needs a person).
 - High contrast, screen readers and display scaling on real hardware.
 
 ## Blocked
 
-- **Real publish:** changing real DNS requires a person to press Publish.
 - **Code signing:** needs a certificate, which is a paid service. Windows SmartScreen warns about the unsigned installer.
 
 ## Known limitations
@@ -75,7 +90,5 @@ See [AUDIT.md](AUDIT.md) for the area-by-area audit.
 
 ## To finish verification
 
-1. Open Hostify, go to **Websites**, choose a website and select **Publish this website**.
-2. Enter your hostname, review the DNS record, tick consent and publish.
-3. Wait for **Published**, then open the HTTPS address from another network, such as a phone on mobile data.
-4. Restart Windows, sign in without opening Hostify, and check the address again.
+1. Open the HTTPS address from another network, such as a phone on mobile data.
+2. Restart Windows, sign in without opening Hostify, and check the address again.
