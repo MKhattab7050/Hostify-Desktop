@@ -93,15 +93,26 @@ async fn session(
     let mut reader = BufReader::new(r);
     let mut events = engine.store.events.subscribe();
     let mut subscribed = false;
+    // Runtime downloads can take minutes. Keep reading this shared shell connection
+    // and forwarding progress while an install is pending, with a bounded queue.
+    let mut installs = tokio::task::JoinSet::new();
     loop {
         // Keep the read future alive while events arrive: cancelling it would discard
         // the prefix of a request already consumed from the pipe.
         let bytes = {
-            let read = tokio::time::timeout(std::time::Duration::from_secs(60), line(&mut reader));
+            let idle_timeout = if installs.is_empty() { 60 } else { 1860 };
+            let read = tokio::time::timeout(
+                std::time::Duration::from_secs(idle_timeout),
+                line(&mut reader),
+            );
             tokio::pin!(read);
             loop {
                 tokio::select! {
                  _ = shutdown.changed()=>return Ok(()),
+                 response=installs.join_next(),if !installs.is_empty()=>{
+                    let response=response.ok_or_else(||io::Error::other("Runtime task unavailable"))?.map_err(io::Error::other)?;
+                    write(&mut w,&response).await?;
+                 },
                  event=events.recv(),if subscribed=>match event{Ok(v)=>write(&mut w,&v).await?,Err(broadcast::error::RecvError::Lagged(_))=>return Err(io::Error::other("Event client fell behind; reconnect and refresh state")),Err(_)=>return Ok(())},
                  bytes=&mut read=>break bytes.map_err(|_|io::Error::new(io::ErrorKind::TimedOut,"Pipe request timed out"))?,
                 }
@@ -121,6 +132,20 @@ async fn session(
                     subscribed = true;
                 }
                 let id = r.id;
+                if r.method == "install_runtime" {
+                    if installs.len() >= 8 {
+                        write(&mut w,&json!({"id":id,"error":"Too many pending runtime installations. Wait for an installation to finish."})).await?;
+                        continue;
+                    }
+                    let engine = engine.clone();
+                    installs.spawn(async move {
+                        match engine.dispatch(&r.method, r.params).await {
+                            Ok(result) => json!({"id":id,"result":result}),
+                            Err(error) => json!({"id":id,"error":error.to_string()}),
+                        }
+                    });
+                    continue;
+                }
                 match engine.dispatch(&r.method, r.params).await {
                     Ok(result) => json!({"id":id,"result":result}),
                     Err(error) => json!({"id":id,"error":error.to_string()}),

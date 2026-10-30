@@ -68,3 +68,23 @@ interface DomainCheck { zoneName:string; zoneId:string; canManageDns:boolean; pr
 | pick_path | {kind:'directory'\|'zip'} | string \| null (native dialog) |
 
 Events: `site-status` (Site), `deployment-update` (Deployment), `activity` (ActivityEntry), `components-progress` ({name, percent}).
+
+## Runtime and environment IPC (Task 11)
+
+`Site` additionally exposes `kind: string` (existing websites default to `static`) and `runtimeVersion: string | null`. The import argument `kind: 'directory'|'zip'` retains its existing meaning.
+
+| command | args | returns |
+|---|---|---|
+| list_runtimes | - | `{kind,version,installed,ready,error?,sizeBytes?,path?,usedBy:string[]}[]` |
+| install_runtime | `{kind,version}` | null after successful installation; errors are plain text |
+| remove_runtime | `{kind,version}` | null; refuses website use or existing MySQL data |
+| list_env_vars | `{siteId}` | `{name,secret,value?}[]`; secret values are always omitted |
+| set_env_var | `{siteId,name,value,secret}` | `{restartRequired:boolean}` |
+| delete_env_var | `{siteId,name}` | `{restartRequired:boolean}` |
+| reveal_env_var | `{siteId,name}` | one explicit value as a string |
+| import_env | `{siteId,text}` | `{imported:number,errors:{line:number,message:string}[],restartRequired:boolean}` |
+| export_env | `{siteId}` | dotenv string with secret names in an omission comment |
+
+Event: `runtime-progress {kind,version,phase:'download'|'verify'|'extract'|'check',done:number,total:number|null}`. `done` and `total` are bytes for download/verify/extract, and 0/1 for the executable check; an unknown total is null. Runtime sizes are measured installed bytes or absent, never the manifest's planning estimates. Installs hold only their runtime's lock; other pipe sessions and unrelated engine requests remain available. A second operation for the same runtime receives an already-in-progress error. Runtime installs complete independently of later requests on the same shared pipe; other commands keep their existing ordering. A disconnected caller does not cancel an engine-owned install. The shell retains its existing 120-second request timeout, so after that timeout refresh the runtime list; the installation continues in the engine.
+
+Environment edits require a restart when a non-static website has an active or unhealthy running state (`starting`, `running`, or `error`). An import with no successful assignments reports false. Dotenv supports `export`, whitespace/comments, literal single quotes, double quotes and escaped newlines; errors report line numbers without source text or values. Import commits valid assignments and reports invalid lines individually. Names with SECRET, TOKEN, PASSWORD, PASS, KEY, PRIVATE or CREDENTIAL default to secret. Explicit reveal is the only command that returns a secret. A restored secret that cannot decrypt names the variable and asks the user to set it again under the current Windows user. Environment commands do not append their parameters or values to activity/logs.

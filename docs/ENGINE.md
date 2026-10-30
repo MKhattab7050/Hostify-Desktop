@@ -138,3 +138,54 @@ The marker lives at `<data>/run/verify/<siteId>/<nonce>`, outside public website
 Startup rolls back interrupted provisioning, starts local sites and connectors for all retained/public deployments regardless of `auto_start`, and resumes waiting verification with a fresh attempt. A future deadline is preserved; an expired deadline receives a new budget. `recovery_required` retains its resources without automatically resuming checks.
 
 Offline regressions use fake observations, SQLite and loopback Cloudflare fixtures. The installed Caddy binary is also validated and exercised for marker serving, hidden paths and disabled listing; when absent, that test prints a skip reason. Live Cloudflare, public DNS, production TLS and real cloudflared connectivity require external verification and are not certified by these tests.
+
+## Runtime manager, environment vault, and supervisor groundwork (Task 11)
+
+Schema v4 adds website kind, runtime version and app-config JSON with static-compatible defaults, plus `env_vars`. The v4 alterations and table creation share one transaction; constraints require exactly one plaintext/ciphertext value and enforce the secret flag. Website removal explicitly deletes environment rows before deleting the website. The v3 migration regression preserves a website and a published deployment.
+
+The runtime manifest pins exactly the five Node/PHP/MySQL releases and SHA-256 hashes in V2-PLAN.md. Production downloads require HTTPS, including redirects. PHP/MySQL archive URLs follow a 404 or transport error; integrity failure never selects a fallback. Per-entry download limits, installed-space estimates and a 100 MiB safety margin feed a Win32 data-volume free-space check. These are conservative planning bounds, not measured installed sizes. Streamed downloads hash each chunk while writing `.partial/<kind>-<version>.zip`; extraction starts only after hash verification. ZIP extraction shares import's path validation, rejects links and duplicate paths, limits entry count and expanded bytes, and strips a sole wrapper directory when present (PHP's unwrapped ZIP stays unwrapped).
+
+Installation probes the expected executable with a five-second, bounded-output, hidden-window version command and checks the pinned version (PHP excludes the packaging suffix). Missing VCRUNTIME140 or Windows loader exit code 0xC0000135 identifies the absent Microsoft Visual C++ runtime and links Microsoft's x64 redistributable; Hostify does not install it. A validated staging directory is renamed into place; an old version directory is moved aside first and restored if promotion fails. Startup clears `.partial` before requests are accepted. Failed attempts clean staging/download files and preserve the final installation. Runtime operations serialize per manifest entry and do not hold publishing/operations locks. The pipe continues reading requests and sending progress while installs run. Installs belong to the engine background-task set, so losing a caller does not release their lock or interrupt extraction; engine shutdown ends those tasks, and startup removes interrupted partial files. Installed sizes are measured in blocking workers and cached for 60 seconds, invalidated after install/remove. `resolve` validates kind/version before constructing paths. Removal names website IDs using a version; MySQL also refuses existing managed data roots (`mysql/data`, `mysql/<version>/data`, `databases/mysql`, or installation-local `data`). Future database work must retain this guard when choosing its data layout.
+
+The vault calls user-scoped CryptProtectData/CryptUnprotectData with fixed Hostify entropy and UI forbidden. Returned native allocations are cleared and released with LocalFree; owned intermediate buffers and resolved secret strings clear themselves where practical. Non-Windows vault calls fail explicitly. There is no plaintext fallback if DPAPI is unavailable. Environment values are bounded to 64 KiB and reject NUL; identifiers obey the documented ASCII rule and reject Hostify-controlled names. Lists and exports omit secret values, while export comments name omitted variables. The engine-only process-resolution/redaction helpers return strings that clear their owned bytes on drop. Pipe and shell transport were inspected: neither logs request parameters for environment commands; import/parser/storage errors do not include values.
+
+Supervisor specifications support cwd, explicit environment and a redaction set. Any cwd or explicit environment selects env_clear plus the task's Windows allowlist, followed by the specification's values. Legacy empty-spec Caddy/cloudflared environment behavior stays compatible. Log pumps replace token and redaction strings, longest first. Five consecutive exits within 30 seconds of starting end automatic restarts with the last exit code in site status/activity; a stable run resets the streak and manual start creates a fresh worker. Connectors keep retrying indefinitely. Legacy Caddy for retained/published websites is also exempt so the limit cannot strand a public static site. A real hidden `cmd.exe /C exit 7` fixture exercises the limit and manual restart using temporary engine data, without starting a Hostify engine or touching live installation data.
+
+Offline tests cover fixture runtime install and measured sizes, bad hash with no fallback/preservation of the old install, 404 archive fallback, truncated HTTP, traversal, partial cleanup, same-runtime serialization, unknown versions, low disk space and removal guards. Windows DPAPI round-trip/tamper and SQLite/pipe secret-at-rest tests are present and intentionally fail rather than silently skip when the executing account lacks DPAPI support. Validation results and execution limitations follow below.
+
+### Task 11 validation on 2026-10-30
+
+Actual command summaries from this Windows workspace (all Cargo compilation/test commands offline):
+
+```text
+cargo fmt --all
+cargo fmt --all exit code: 0
+
+cargo build --workspace --offline
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.20s
+EXIT CODE: 0
+
+cargo test --workspace --offline
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.16s
+test result: FAILED. 106 passed; 2 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.48s
+EXIT CODE: 101
+
+cargo test --workspace --offline --no-fail-fast
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.79s
+test result: FAILED. 106 passed; 2 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.46s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.38s
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s
+error: 2 targets failed:
+EXIT CODE: 101
+
+cargo clippy --workspace --all-targets --offline
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.83s
+EXIT CODE: 0
+```
+
+The no-fail-fast run executes every test target: 140 passed, 3 failed, 3 ignored (plus empty binary/doc-test targets). Failures are `vault::tests::round_trip_and_tamper`, `env_vars::tests::secret_is_ciphertext_and_never_listed`, and `environment_secrets_are_not_in_pipe_errors_or_activity`. Each stops at real user-scope DPAPI sealing with `The system cannot find the file specified. (os error 2)`. An independent .NET `ProtectedData.Protect(...CurrentUser)` probe also fails and reports that the executing user context may lack a loaded profile. These tests remain enabled; this is not a passing definition of done. Real DPAPI round-trip, tamper rejection and secret-at-rest/reveal success must be rerun in a Windows user context with working DPAPI. The nonsecret/decryption-error regression, all fixture runtime tests and the real short-lived-child test pass.
+
+Clippy reports existing warnings (core lib 13 / tests 14, desktop 4, engine lib 9 / tests 10), with no errors and no diagnostics in the new runtime/environment/vault modules. No broad lint cleanup was attempted. `git diff --check` passes. Workspace formatting was executed; unrelated/protected source formatting was preserved to respect file ownership. No new dependencies or lockfile changes remain. Existing documentation is preserved as an exact normalized prefix, with only Task 11 sections appended.
+
+Real publisher downloads, real Node/PHP/MySQL executables, the Visual C++ loader-failure path and full installed-app flows were not exercised. Production HTTPS/redirect enforcement is implemented; fixture HTTP tests do not certify real TLS. Final test commands set LOCALAPPDATA to an isolated workspace test path so the existing optional real-Caddy test skips its installed-binary lookup; three existing live-network tests remain ignored. Windows import tests may retain their pre-existing privilege-dependent symlink skip. No real Hostify engine was started/stopped, no live installation data was modified, and no commit, push or branch switch was performed.

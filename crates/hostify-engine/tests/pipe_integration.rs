@@ -349,3 +349,208 @@ async fn engine_status_observes_immediate_external_empty_replace_and_delete() {
         assert_eq!(status[name]["ready"], false);
     }
 }
+#[tokio::test]
+async fn environment_secrets_are_not_in_pipe_errors_or_activity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    store.db().unwrap().execute("INSERT INTO websites(id,name,source_path,local_port,created_at,updated_at,kind,runtime_version) VALUES('s','s','x',9010,'now','now','node','24.22.2')",[]).unwrap();
+    store.status("s", "running", None).unwrap();
+    let engine = Engine::new(store.clone(), Arc::new(Fake::default()), false);
+    let name = format!(r"\\.\pipe\hostify-env-test-{}", uuid::Uuid::new_v4());
+    let (stop, rx) = tokio::sync::watch::channel(false);
+    let server_name = name.clone();
+    let server = tokio::spawn(async move { pipe::serve(server_name, engine, rx).await });
+    let mut connected = None;
+    for _ in 0..100 {
+        match tokio::net::windows::named_pipe::ClientOptions::new().open(&name) {
+            Ok(client) => {
+                connected = Some(client);
+                break;
+            }
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+        }
+    }
+    let mut client = BufReader::new(connected.unwrap());
+    let secret = "super-private-pipe-secret-987654";
+    assert_eq!(
+        call(
+            &mut client,
+            1,
+            "set_env_var",
+            json!({"siteId":"s","name":"TOKEN","value":secret,"secret":true})
+        )
+        .await["restartRequired"],
+        true
+    );
+    let listed = call(&mut client, 2, "list_env_vars", json!({"siteId":"s"})).await;
+    assert_eq!(listed, json!([{"name":"TOKEN","secret":true}]));
+    assert_eq!(
+        call(
+            &mut client,
+            3,
+            "reveal_env_var",
+            json!({"siteId":"s","name":"TOKEN"})
+        )
+        .await,
+        secret
+    );
+    let imported=call(&mut client,4,"import_env",json!({"siteId":"s","text":format!("BROKEN=\"{secret}\nPUBLIC=ok\nAPI_KEY=another-secret")})).await;
+    assert_eq!(imported["errors"][0]["line"], 1);
+    assert!(!imported.to_string().contains(secret));
+    let exported = call(&mut client, 5, "export_env", json!({"siteId":"s"})).await;
+    assert!(exported.as_str().unwrap().contains("PUBLIC=\"ok\""));
+    assert!(!exported.to_string().contains(secret));
+    assert!(!exported.to_string().contains("another-secret"));
+    // Exercise the actual transport error path after a restored/corrupt ciphertext.
+    store
+        .db()
+        .unwrap()
+        .execute(
+            "UPDATE env_vars SET sealed_value=x'0000' WHERE name='TOKEN'",
+            [],
+        )
+        .unwrap();
+    let request = json!({"id":6,"method":"reveal_env_var","params":{"siteId":"s","name":"TOKEN"}});
+    client
+        .get_mut()
+        .write_all(format!("{request}\n").as_bytes())
+        .await
+        .unwrap();
+    let mut response = String::new();
+    client.read_line(&mut response).await.unwrap();
+    assert!(response.contains("Could not decrypt variable TOKEN"));
+    assert!(!response.contains(secret));
+    let rows: Vec<String> = {
+        let db = store.db().unwrap();
+        let mut st = db.prepare("SELECT message FROM activity_logs").unwrap();
+        st.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    assert!(!rows.join(" ").contains(secret));
+    let raw = std::fs::read(store.root.join("hostify.db")).unwrap();
+    assert!(
+        !raw.windows(secret.len())
+            .any(|window| window == secret.as_bytes())
+    );
+    // Removing a stopped site explicitly removes env rows.
+    call(
+        &mut client,
+        7,
+        "remove_site",
+        json!({"id":"s","deleteFiles":false}),
+    )
+    .await;
+    assert_eq!(
+        store
+            .db()
+            .unwrap()
+            .query_row("SELECT count(*) FROM env_vars", [], |r| r.get::<_, u64>(0))
+            .unwrap(),
+        0
+    );
+    stop.send(true).unwrap();
+    server.await.unwrap().unwrap();
+}
+#[tokio::test]
+async fn environment_nonsecret_and_decryption_errors_without_a_dpapi_profile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    store.db().unwrap().execute("INSERT INTO websites(id,name,source_path,local_port,created_at,updated_at,kind) VALUES('s','s','x',9010,'now','now','node')",[]).unwrap();
+    store.status("s", "running", None).unwrap();
+    let engine = Engine::new(store.clone(), Arc::new(Fake::default()), false);
+    assert_eq!(
+        engine
+            .dispatch(
+                "set_env_var",
+                json!({"siteId":"s","name":"NAME","value":"hello","secret":false})
+            )
+            .await
+            .unwrap()["restartRequired"],
+        true
+    );
+    let result = engine
+        .dispatch(
+            "import_env",
+            json!({"siteId":"s","text":"INVALID=\"never-echo-this-value\nPUBLIC=ok"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["imported"], 1);
+    assert_eq!(result["errors"][0]["line"], 1);
+    assert!(!result.to_string().contains("never-echo-this-value"));
+    store.db().unwrap().execute("INSERT INTO env_vars(site_id,name,secret,sealed_value,updated_at) VALUES('s','TOKEN',1,x'0000','now')",[]).unwrap();
+    let listed = engine
+        .dispatch("list_env_vars", json!({"siteId":"s"}))
+        .await
+        .unwrap();
+    assert_eq!(listed[2], json!({"name":"TOKEN","secret":true}));
+    let error = engine
+        .dispatch("reveal_env_var", json!({"siteId":"s","name":"TOKEN"}))
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Could not decrypt variable TOKEN")
+    );
+    let exported = engine
+        .dispatch("export_env", json!({"siteId":"s"}))
+        .await
+        .unwrap();
+    assert!(
+        exported
+            .as_str()
+            .unwrap()
+            .contains("# Secrets omitted: TOKEN")
+    );
+    let runtimes = engine.dispatch("list_runtimes", json!({})).await.unwrap();
+    assert_eq!(runtimes.as_array().unwrap().len(), 5);
+    assert!(runtimes[0].get("sizeBytes").is_none());
+    let site = engine
+        .dispatch("get_site", json!({"id":"s"}))
+        .await
+        .unwrap();
+    assert_eq!(site["kind"], "node");
+    assert_eq!(site["runtimeVersion"], Value::Null);
+    engine
+        .dispatch("delete_env_var", json!({"siteId":"s","name":"NAME"}))
+        .await
+        .unwrap();
+    engine
+        .dispatch("remove_site", json!({"id":"s","deleteFiles":false}))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .db()
+            .unwrap()
+            .query_row("SELECT count(*) FROM env_vars", [], |r| r.get::<_, u64>(0))
+            .unwrap(),
+        0
+    );
+}
+#[tokio::test]
+async fn runtime_ipc_rejects_unknown_versions_without_global_locks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let engine = Engine::new(store.clone(), Arc::new(Fake::default()), false);
+    let operations = engine.operations.lock().await;
+    let publishing = engine.publishing.lock().await;
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        engine.dispatch(
+            "install_runtime",
+            json!({"kind":"node","version":"../../escape"}),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(error.to_string().contains("Unknown runtime"));
+    assert!(!store.root.join("runtimes").exists());
+    drop(operations);
+    drop(publishing);
+    engine.shutdown().await;
+}

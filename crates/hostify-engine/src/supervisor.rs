@@ -127,6 +127,9 @@ struct Spec {
     exe: PathBuf,
     args: Vec<String>,
     token: Option<String>,
+    cwd: Option<PathBuf>,
+    env: Vec<(String, String)>,
+    redact: Vec<String>,
     log: PathBuf,
     port: u16,
     path: &'static str,
@@ -157,6 +160,40 @@ impl Spec {
         } else {
             "The Cloudflare connector"
         }
+    }
+}
+fn retained_static(store: &Store, spec: &Spec) -> bool {
+    spec.cwd.is_none()
+        && spec.env.is_empty()
+        && spec
+            .site
+            .as_deref()
+            .and_then(|id| store.site(id).ok())
+            .is_some_and(|site| {
+                matches!(
+                    site.publish_state.as_deref(),
+                    Some(
+                        "published"
+                            | "waiting_dns"
+                            | "waiting_tls"
+                            | "verifying_public"
+                            | "recovery_required"
+                    )
+                )
+            })
+}
+#[derive(Default)]
+struct CrashLoop {
+    short_exits: u32,
+}
+impl CrashLoop {
+    fn exited(&mut self, duration: Duration) -> bool {
+        self.short_exits = if duration < Duration::from_secs(30) {
+            self.short_exits.saturating_add(1)
+        } else {
+            0
+        };
+        self.short_exits >= 5
     }
 }
 struct Worker {
@@ -229,6 +266,9 @@ impl Supervisor {
                     "run".into(),
                 ],
                 token: Some(token.into()),
+                cwd: None,
+                env: vec![],
+                redact: vec![],
                 log: self
                     .store
                     .root
@@ -258,6 +298,33 @@ impl Supervisor {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if spec.cwd.is_some() || !spec.env.is_empty() {
+            cmd.env_clear();
+            for name in [
+                "SystemRoot",
+                "SystemDrive",
+                "WINDIR",
+                "ComSpec",
+                "PATHEXT",
+                "TEMP",
+                "TMP",
+                "USERPROFILE",
+                "APPDATA",
+                "LOCALAPPDATA",
+                "PROGRAMDATA",
+                "NUMBER_OF_PROCESSORS",
+                "PROCESSOR_ARCHITECTURE",
+                "OS",
+            ] {
+                if let Some(value) = std::env::var_os(name) {
+                    cmd.env(name, value);
+                }
+            }
+            cmd.envs(spec.env.iter().map(|(key, value)| (key, value)));
+        }
+        if let Some(cwd) = &spec.cwd {
+            cmd.current_dir(cwd);
+        }
         if let Some(token) = &spec.token {
             cmd.env("TUNNEL_TOKEN", token);
         } else {
@@ -289,18 +356,32 @@ impl Supervisor {
             }
         }
         if let Some(stdout) = child.stdout.take() {
-            pump(stdout, spec.log.clone(), spec.token.clone());
+            pump_redacted(
+                stdout,
+                spec.log.clone(),
+                spec.token.clone(),
+                spec.redact.clone(),
+            );
         }
         if let Some(stderr) = child.stderr.take() {
-            pump(stderr, spec.log.clone(), spec.token.clone());
+            pump_redacted(
+                stderr,
+                spec.log.clone(),
+                spec.token.clone(),
+                spec.redact.clone(),
+            );
         }
         Ok(child)
     }
     async fn launch(self: &Self, spec: Spec) -> Result<bool, String> {
         let mut workers = self.workers.lock().await;
-        if workers.contains_key(&spec.key) {
+        if workers
+            .get(&spec.key)
+            .is_some_and(|worker| !worker.task.is_finished())
+        {
             return Ok(false);
         }
+        workers.remove(&spec.key);
         if !port_available(spec.port) {
             return Err(format!(
                 "Port {} is already in use. Stop the other application and retry.",
@@ -325,6 +406,7 @@ impl Supervisor {
         let task = tokio::spawn(async move {
             let mut child = Some(child);
             let mut failures = 0u32;
+            let mut crash_loop = CrashLoop::default();
             let mut next = tokio::time::Instant::now();
             let mut started = tokio::time::Instant::now();
             let mut healthy = None;
@@ -381,10 +463,33 @@ impl Supervisor {
                             }
                             continue;
                         }
-                        Ok(Some(_)) | Err(_) => {
+                        result => {
+                            let code = match result {
+                                Ok(Some(status)) => status
+                                    .code()
+                                    .map(|c| c.to_string())
+                                    .unwrap_or_else(|| "unknown".into()),
+                                Err(e) => format!("unknown ({e})"),
+                                _ => unreachable!(),
+                            };
+                            let last_exit = format!("exit code {code}");
                             let _ = process.kill();
                             let _ = process.wait();
                             child = None;
+                            if crash_loop.exited(started.elapsed())
+                                && spec.site.is_some()
+                                && !retained_static(&store, &spec)
+                            {
+                                let message = format!(
+                                    "{} stopped after five exits within 30 seconds of starting ({last_exit}). Start the website manually to try again.",
+                                    spec.label()
+                                );
+                                if let Some(id) = &spec.site {
+                                    let _ = store.status(id, "error", Some(message.clone()));
+                                }
+                                let _ = store.activity("error", spec.site.as_deref(), &message);
+                                break;
+                            }
                             failures = failures.saturating_add(1);
                             next = tokio::time::Instant::now() + restart_delay(failures);
                             if let Some(id) = &spec.site {
@@ -392,7 +497,7 @@ impl Supervisor {
                                     id,
                                     "error",
                                     Some(format!(
-                                        "{} stopped unexpectedly. Restarting in {} seconds.",
+                                        "{} stopped unexpectedly ({last_exit}). Restarting in {} seconds.",
                                         spec.label(),
                                         restart_delay(failures).as_secs()
                                     )),
@@ -402,7 +507,7 @@ impl Supervisor {
                                 "warn",
                                 spec.site.as_deref(),
                                 &format!(
-                                    "{} stopped unexpectedly. Restarting in {} seconds.",
+                                    "{} stopped unexpectedly ({last_exit}). Restarting in {} seconds.",
                                     spec.label(),
                                     restart_delay(failures).as_secs()
                                 ),
@@ -503,19 +608,31 @@ impl Supervisor {
         }
     }
 }
+#[cfg(test)]
 fn pump(
     input: impl std::io::Read + Send + 'static,
     path: PathBuf,
     secret: Option<String>,
 ) -> std::thread::JoinHandle<()> {
+    pump_redacted(input, path, secret, vec![])
+}
+fn pump_redacted(
+    input: impl std::io::Read + Send + 'static,
+    path: PathBuf,
+    secret: Option<String>,
+    mut redact: Vec<String>,
+) -> std::thread::JoinHandle<()> {
+    if let Some(value) = &secret {
+        redact.push(value.clone());
+    }
+    redact.retain(|v| !v.is_empty());
+    redact.sort_by_key(|v| std::cmp::Reverse(v.len()));
     std::thread::spawn(move || {
         for line in std::io::BufReader::new(input).lines() {
             match line {
                 Ok(mut line) => {
-                    if let Some(secret) = &secret {
-                        if !secret.is_empty() {
-                            line = line.replace(secret, "[redacted]");
-                        }
+                    for value in &redact {
+                        line = line.replace(value, "[redacted]");
                     }
                     let _ = append_log(&path, &line);
                 }
@@ -561,6 +678,9 @@ impl SiteRuntime for Supervisor {
                     "caddyfile".into(),
                 ],
                 token: None,
+                cwd: None,
+                env: vec![],
+                redact: vec![],
                 log: self
                     .store
                     .root
@@ -776,6 +896,9 @@ mod ownership_tests {
                 "supervisor::ownership_tests::waiting_child_fixture".into(),
             ],
             token: None,
+            cwd: None,
+            env: vec![],
+            redact: vec![],
             log: dir.path().join("child.log"),
             port,
             path: "/",
@@ -813,5 +936,102 @@ mod ownership_tests {
         if std::env::var("TUNNEL_TOKEN").as_deref() == Ok("test") {
             std::thread::sleep(Duration::from_secs(30));
         }
+    }
+}
+#[cfg(test)]
+mod runtime_groundwork_tests {
+    use super::*;
+    #[test]
+    fn rapid_exits_reset_after_stable_run_and_redaction_handles_overlaps() {
+        let mut crashes = CrashLoop::default();
+        for _ in 0..4 {
+            assert!(!crashes.exited(Duration::from_millis(10)));
+        }
+        assert!(!crashes.exited(Duration::from_secs(30)));
+        for _ in 0..4 {
+            assert!(!crashes.exited(Duration::from_millis(10)));
+        }
+        assert!(crashes.exited(Duration::from_millis(10)));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        pump_redacted(
+            std::io::Cursor::new(b"token abcdef abc\n".to_vec()),
+            path.clone(),
+            Some("token".into()),
+            vec!["abc".into(), "abcdef".into()],
+        )
+        .join()
+        .unwrap();
+        assert_eq!(
+            tail_logs(&path, 1).unwrap(),
+            ["[redacted] [redacted] [redacted]"]
+        );
+    }
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn real_short_lived_child_hits_limit_and_manual_start_resets() {
+        struct Ready;
+        impl hostify_core::components::ProbeRunner for Ready {
+            fn version(&self, _: &Path, _: &str) -> Result<String, String> {
+                Ok("test version".into())
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open_with_probe(tmp.path().into(), Arc::new(Ready)).unwrap();
+        std::fs::write(
+            tmp.path().join("bin/caddy.exe"),
+            b"probe fixture, never executed",
+        )
+        .unwrap();
+        store.db().unwrap().execute("INSERT INTO websites(id,name,source_path,local_port,created_at,updated_at) VALUES('s','s','x',9010,'now','now')",[]).unwrap();
+        let supervisor = Supervisor::new(store.clone()).unwrap();
+        let spec = Spec {
+            key: "site:s".into(),
+            site: Some("s".into()),
+            exe: PathBuf::from(std::env::var_os("ComSpec").unwrap()),
+            args: vec!["/D".into(), "/C".into(), "exit 7".into()],
+            token: None,
+            cwd: Some(tmp.path().into()),
+            env: vec![("HOSTIFY_TEST".into(), "ok".into())],
+            redact: vec![],
+            log: tmp.path().join("child.log"),
+            port: std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port(),
+            path: "/",
+        };
+        assert!(supervisor.launch(spec.clone()).await.unwrap());
+        tokio::time::timeout(Duration::from_secs(40), async {
+            loop {
+                if store
+                    .site("s")
+                    .unwrap()
+                    .status_detail
+                    .unwrap_or_default()
+                    .contains("five exits")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let detail = store.site("s").unwrap().status_detail.unwrap();
+        assert!(detail.contains("exit code 7"));
+        let message: String = store
+            .db()
+            .unwrap()
+            .query_row(
+                "SELECT message FROM activity_logs ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(message.contains("exit code 7"));
+        assert!(supervisor.launch(spec).await.unwrap());
+        supervisor.shutdown().await;
     }
 }

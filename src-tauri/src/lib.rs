@@ -25,6 +25,15 @@ macro_rules! forward {
 }
 forward! {
     engine_status(); system_stats(); list_sites();
+    list_runtimes();
+    install_runtime(kind: String => "kind", version: String => "version");
+    remove_runtime(kind: String => "kind", version: String => "version");
+    list_env_vars(site_id: String => "siteId");
+    set_env_var(site_id: String => "siteId", name: String => "name", value: String => "value", secret: bool => "secret");
+    delete_env_var(site_id: String => "siteId", name: String => "name");
+    reveal_env_var(site_id: String => "siteId", name: String => "name");
+    import_env(site_id: String => "siteId", text: String => "text");
+    export_env(site_id: String => "siteId");
     get_site(id: String => "id");
     validate_source(path: String => "path", kind: String => "kind");
     add_site(name: String => "name", source_path: String => "sourcePath", kind: String => "kind");
@@ -137,6 +146,15 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            list_runtimes,
+            install_runtime,
+            remove_runtime,
+            list_env_vars,
+            set_env_var,
+            delete_env_var,
+            reveal_env_var,
+            import_env,
+            export_env,
             engine_status,
             ensure_components,
             system_stats,

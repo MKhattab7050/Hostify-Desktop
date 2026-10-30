@@ -3,7 +3,7 @@ use rusqlite::{Connection, Result};
 /// Apply migrations in one transaction. A newer schema is never silently downgraded.
 pub fn migrate(connection: &mut Connection) -> Result<()> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version > 3 {
+    if version > 4 {
         return Err(rusqlite::Error::InvalidQuery);
     }
     if version == 0 {
@@ -32,6 +32,24 @@ UPDATE activity_logs SET message='Website stopped' WHERE message='stop_site';
 UPDATE activity_logs SET message='Website restarted' WHERE message='restart_site';
 UPDATE activity_logs SET message='Hostify engine started' WHERE message LIKE 'Hostify engine started (data:%';
 PRAGMA user_version=3;")?;
+        tx.commit()?;
+    }
+    if version < 4 {
+        let tx = connection.transaction()?;
+        tx.execute_batch(
+            "ALTER TABLE websites ADD COLUMN kind TEXT NOT NULL DEFAULT 'static';
+ALTER TABLE websites ADD COLUMN runtime_version TEXT;
+ALTER TABLE websites ADD COLUMN app_config_json TEXT NOT NULL DEFAULT '{}';
+CREATE TABLE env_vars (
+ site_id TEXT NOT NULL REFERENCES websites(id) ON DELETE CASCADE,
+ name TEXT NOT NULL, secret INTEGER NOT NULL DEFAULT 0,
+ plain_value TEXT, sealed_value BLOB, updated_at TEXT NOT NULL,
+ PRIMARY KEY(site_id,name),
+ CHECK ((plain_value IS NOT NULL) != (sealed_value IS NOT NULL)),
+ CHECK ((secret=0 AND plain_value IS NOT NULL) OR (secret=1 AND sealed_value IS NOT NULL))
+);
+PRAGMA user_version=4;",
+        )?;
         tx.commit()?;
     }
     connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -68,6 +86,7 @@ mod legacy_migration {
             )
             .unwrap();
         }
+        db.execute_batch("DROP TABLE env_vars; ALTER TABLE websites DROP COLUMN kind; ALTER TABLE websites DROP COLUMN runtime_version; ALTER TABLE websites DROP COLUMN app_config_json;").unwrap();
         db.pragma_update(None, "user_version", 2).unwrap();
         super::migrate(&mut db).unwrap();
         let mut query = db
@@ -94,6 +113,7 @@ mod legacy_migration {
         super::migrate(&mut db).unwrap();
         db.execute("INSERT INTO websites(id,name,source_path,local_port,created_at,updated_at) VALUES('s','s','x',9000,'now','now')",[]).unwrap();
         db.execute("INSERT INTO deployments(id,site_id,state,snapshot_json,started_at) VALUES('d','s','live','{\"state\":\"live\"}','now')",[]).unwrap();
+        db.execute_batch("DROP TABLE env_vars; ALTER TABLE websites DROP COLUMN kind; ALTER TABLE websites DROP COLUMN runtime_version; ALTER TABLE websites DROP COLUMN app_config_json;").unwrap();
         db.pragma_update(None, "user_version", 1).unwrap();
         super::migrate(&mut db).unwrap();
         let (state, snapshot): (String, String) = db
@@ -184,6 +204,43 @@ mod retention_tests {
             )
             .unwrap(),
             "10"
+        );
+    }
+}
+#[cfg(test)]
+mod runtime_migration_tests {
+    #[test]
+    fn v3_sites_and_deployments_survive_v4() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        super::migrate(&mut db).unwrap();
+        db.execute_batch("DROP TABLE env_vars; ALTER TABLE websites DROP COLUMN kind; ALTER TABLE websites DROP COLUMN runtime_version; ALTER TABLE websites DROP COLUMN app_config_json; PRAGMA user_version=3; INSERT INTO websites(id,name,source_path,local_port,created_at,updated_at) VALUES('s','legacy','x',9000,'then','then'); INSERT INTO deployments(id,site_id,state,snapshot_json,started_at) VALUES('d','s','published','{}','then');").unwrap();
+        super::migrate(&mut db).unwrap();
+        let row: (String, String, Option<String>, String) = db
+            .query_row(
+                "SELECT name,kind,runtime_version,app_config_json FROM websites WHERE id='s'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("legacy".into(), "static".into(), None, "{}".into()));
+        assert_eq!(
+            db.query_row("SELECT state FROM deployments WHERE id='d'", [], |r| r
+                .get::<_, String>(
+                0
+            ))
+            .unwrap(),
+            "published"
+        );
+        assert!(
+            db.execute("INSERT INTO env_vars VALUES('s','X',0,NULL,NULL,'now')", [])
+                .is_err()
+        );
+        assert!(
+            db.execute(
+                "INSERT INTO env_vars VALUES('s','X',0,'plain',x'01','now')",
+                []
+            )
+            .is_err()
         );
     }
 }

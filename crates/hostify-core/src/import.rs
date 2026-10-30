@@ -30,7 +30,7 @@ pub struct SourceReport {
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
 }
-fn safe_name(name: &str) -> Result<PathBuf, ImportError> {
+pub(crate) fn safe_name(name: &str) -> Result<PathBuf, ImportError> {
     if name.encode_utf16().count() > 240 {
         return Err(ImportError::Invalid("Import path is too long".into()));
     }

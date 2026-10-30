@@ -18,6 +18,8 @@ pub type Database = Arc<Mutex<Connection>>;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Site {
+    pub kind: String,
+    pub runtime_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -63,6 +65,7 @@ impl Default for Settings {
     }
 }
 pub struct Store {
+    pub runtimes: hostify_core::runtimes::Runtimes,
     pub detection: hostify_core::components::Detection,
     pub db: Database,
     pub root: PathBuf,
@@ -83,7 +86,10 @@ impl Store {
         let mut db = Connection::open(root.join("hostify.db"))?;
         hostify_core::db::migrate(&mut db)?;
         let (events, _) = broadcast::channel(512);
+        let runtimes = hostify_core::runtimes::Runtimes::new(&root).map_err(|e| anyhow!(e))?;
+        runtimes.clean_partial().map_err(|e| anyhow!(e))?;
         Ok(Arc::new(Self {
+            runtimes,
             detection: hostify_core::components::Detection::new(root.join("bin"), runner),
             db: Arc::new(Mutex::new(db)),
             root,
@@ -99,12 +105,14 @@ impl Store {
     }
     pub fn sites(&self) -> Result<Vec<Site>> {
         let db = self.db()?;
-        let mut st=db.prepare("SELECT w.id,w.name,w.source_path,w.local_port,w.auto_start,w.file_count,w.size_bytes,w.created_at,w.updated_at,d.id,d.hostname,d.https_verified FROM websites w LEFT JOIN domains d ON d.site_id=w.id ORDER BY w.created_at,w.id")?;
+        let mut st=db.prepare("SELECT w.id,w.name,w.source_path,w.local_port,w.auto_start,w.file_count,w.size_bytes,w.created_at,w.updated_at,d.id,d.hostname,d.https_verified,w.kind,w.runtime_version FROM websites w LEFT JOIN domains d ON d.site_id=w.id ORDER BY w.created_at,w.id")?;
         let rows = st.query_map([], |r| {
             let port: u16 = r.get(3)?;
             let hostname: Option<String> = r.get(10)?;
             let verified: Option<bool> = r.get(11)?;
             Ok(Site {
+                kind: r.get(12)?,
+                runtime_version: r.get(13)?,
                 publish_state: None,
                 publish_deployment_id: None,
                 publish_hostname: None,
@@ -569,9 +577,126 @@ impl Engine {
         }
         Ok(())
     }
+    fn runtime_usage(&self) -> Result<HashMap<(String, String), Vec<String>>> {
+        let db = self.store.db()?;
+        let mut st = db.prepare(
+            "SELECT id,kind,runtime_version FROM websites WHERE runtime_version IS NOT NULL",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut usage: HashMap<(String, String), Vec<String>> = HashMap::new();
+        for row in rows {
+            let (id, kind, version) = row?;
+            usage.entry((kind, version)).or_default().push(id);
+        }
+        Ok(usage)
+    }
     pub async fn dispatch(self: &Arc<Self>, method: &str, p: Value) -> Result<Value> {
         let s = &self.store;
         match method {
+            "list_runtimes" => {
+                let usage = self.runtime_usage()?;
+                Ok(json!(s.runtimes.list(usage).await.map_err(|e| anyhow!(e))?))
+            }
+            "install_runtime" => {
+                let kind = arg(&p, "kind")?.to_owned();
+                let version = arg(&p, "version")?.to_owned();
+                let store = s.clone();
+                let (reply, result) = tokio::sync::oneshot::channel();
+                // A disconnected client must not interrupt extraction or release the
+                // runtime lock while a blocking worker still writes its staging tree.
+                let task = tokio::spawn(async move {
+                    let events = store.clone();
+                    let k = kind.clone();
+                    let v = version.clone();
+                    let result = store.runtimes.install(&kind, &version, Arc::new(move |phase,done,total| {
+                        events.emit("runtime-progress", json!({"kind":k,"version":v,"phase":phase,"done":done,"total":total}));
+                    })).await;
+                    if let Err(error) = &result {
+                        let _ = store.activity(
+                            "error",
+                            None,
+                            &format!("Runtime installation failed: {error}"),
+                        );
+                    }
+                    let _ = reply.send(result);
+                });
+                {
+                    let mut tasks = self
+                        .background
+                        .lock()
+                        .map_err(|_| anyhow!("Background tasks unavailable"))?;
+                    tasks.retain(|task| !task.is_finished());
+                    tasks.push(task);
+                }
+                result
+                    .await
+                    .map_err(|_| anyhow!("Runtime installation stopped. Retry the installation."))?
+                    .map_err(|e| anyhow!(e))?;
+                Ok(Value::Null)
+            }
+            "remove_runtime" => {
+                let kind = arg(&p, "kind")?;
+                let version = arg(&p, "version")?;
+                let usage = self.runtime_usage()?;
+                let used = usage
+                    .get(&(kind.into(), version.into()))
+                    .cloned()
+                    .unwrap_or_default();
+                s.runtimes
+                    .remove(kind, version, &used)
+                    .await
+                    .map_err(|e| anyhow!(e))?;
+                Ok(Value::Null)
+            }
+            "list_env_vars" | "set_env_var" | "delete_env_var" | "reveal_env_var"
+            | "import_env" | "export_env" => {
+                use hostify_core::env_vars;
+                let id = arg(&p, "siteId")?;
+                let site = s.site(id)?;
+                let db = s.db()?;
+                let restart = site.kind != "static"
+                    && matches!(site.status.as_str(), "running" | "starting" | "error");
+                let result: std::result::Result<Value, String> = (|| match method {
+                    "list_env_vars" => Ok(json!(env_vars::list(&db, id)?)),
+                    "reveal_env_var" => Ok(json!(env_vars::reveal(
+                        &db,
+                        id,
+                        arg(&p, "name").map_err(|_| "Variable name is required.")?
+                    )?)),
+                    "export_env" => Ok(json!(env_vars::export_nonsecret(&db, id)?)),
+                    "set_env_var" => {
+                        let name = arg(&p, "name").map_err(|_| "Variable name is required.")?;
+                        let value = arg(&p, "value").map_err(|_| "Variable value must be text.")?;
+                        let secret =
+                            boolean(&p, "secret").map_err(|_| "Secret must be a boolean.")?;
+                        env_vars::set(&db, id, name, value, secret)?;
+                        Ok(json!({"restartRequired":restart}))
+                    }
+                    "delete_env_var" => {
+                        env_vars::delete(
+                            &db,
+                            id,
+                            arg(&p, "name").map_err(|_| "Variable name is required.")?,
+                        )?;
+                        Ok(json!({"restartRequired":restart}))
+                    }
+                    _ => {
+                        let text =
+                            arg(&p, "text").map_err(|_| "Environment file text is required.")?;
+                        let imported = env_vars::import_dotenv(&db, id, text, &[])?;
+                        Ok(
+                            json!({"imported":imported.imported,"errors":imported.errors,"restartRequired":restart && imported.imported>0}),
+                        )
+                    }
+                })();
+                result.map_err(|e| anyhow!(e))
+            }
             "ping" => Ok(json!("pong")),
             "subscribe" => Ok(Value::Null),
             "engine_status" => Ok(self.engine_status().await),
@@ -746,6 +871,7 @@ impl Engine {
                     let tx = db.transaction()?;
                     tx.execute("UPDATE domains SET site_id=NULL WHERE site_id=?1", [id])?;
                     tx.execute("DELETE FROM deployments WHERE site_id=?1", [id])?;
+                    tx.execute("DELETE FROM env_vars WHERE site_id=?1", [id])?;
                     tx.execute("DELETE FROM websites WHERE id=?1", [id])?;
                     tx.commit()?;
                 }
