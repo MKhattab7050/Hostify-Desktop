@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Offline vendoring (regenerate with scripts/vendor.ps1)
+/vendor/
+/.cargo/
+/target/

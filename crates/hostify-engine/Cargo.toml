@@ -3,5 +3,25 @@ name = "hostify-engine"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "hostify-engine"
+path = "src/main.rs"
+
 [dependencies]
 hostify-core = { path = "../hostify-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process", "net", "io-util", "fs", "signal"] }
+async-trait = "0.1"
+sysinfo = "0.33"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+anyhow = "1"
+windows-service = "0.7"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Pipes", "Win32_System_Console", "Win32_System_SystemServices", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+
+[dev-dependencies]
+tempfile = "3"

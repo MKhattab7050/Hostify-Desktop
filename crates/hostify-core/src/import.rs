@@ -58,7 +58,7 @@ fn extract_zip(source: &Path, dest: &Path, report: &mut SourceReport) -> Result<
         let file = archive.by_index(i)?;
         let path = safe_name(file.name())?;
         if let Some(mode) = file.unix_mode() { let kind = mode & 0o170000; if kind != 0 && kind != 0o100000 && kind != 0o040000 { return Err(ImportError::Invalid("Archive links or special files are not allowed".into())); } }
-        if file.size() > 0 && (file.compressed_size() == 0 || file.size() / file.compressed_size().max(1) > MAX_RATIO) { return Err(ImportError::Invalid("Archive compression ratio exceeds limit".into())); }
+        if file.size() > 0 && (file.compressed_size() == 0 || file.size() > file.compressed_size().saturating_mul(MAX_RATIO)) { return Err(ImportError::Invalid("Archive compression ratio exceeds limit".into())); }
         let mut components = path.components(); if let Some(first) = components.next() { top.insert(first.as_os_str().to_owned()); }
         if components.next().is_none() && !file.is_dir() { root_file = true; }
         entries.push((path, file.is_dir(), file.size()));
@@ -105,3 +105,10 @@ pub fn import(source: &Path, kind: &str, site_dir: &Path) -> Result<SourceReport
     #[test] fn imports_and_keeps_release() { let t = tempfile::tempdir().expect("temp"); let src = t.path().join("src"); fs::create_dir(&src).expect("dir"); fs::write(src.join("index.html"), "one").expect("write"); let site = t.path().join("site"); assert!(import(&src, "directory", &site).expect("import").has_index); fs::write(src.join("index.html"), "two").expect("write"); import(&src, "directory", &site).expect("second"); assert_eq!(fs::read_to_string(site.join("current/index.html")).expect("read"), "two"); assert_eq!(fs::read_dir(site.join("releases")).expect("releases").count(), 1); }
 }
 
+#[cfg(test)] mod adversarial_tests {
+ use super::*; use zip::{write::SimpleFileOptions,CompressionMethod};
+ fn archive(name:&str, data:&[u8], mode:Option<u32>) -> (tempfile::TempDir,PathBuf) { let dir=tempfile::tempdir().expect("dir"); let path=dir.path().join("a.zip"); let f=File::create(&path).expect("file"); let mut z=zip::ZipWriter::new(f); let mut options=SimpleFileOptions::default().compression_method(CompressionMethod::Deflated); if let Some(m)=mode { options=options.unix_permissions(m); } z.start_file(name,options).expect("entry"); z.write_all(data).expect("write"); z.finish().expect("finish"); (dir,path) }
+ #[test] fn rejects_zip_slip() { let (dir,p)=archive("../escape",b"bad",None); assert!(import(&p,"zip",&dir.path().join("site")).is_err()); assert!(!dir.path().join("escape").exists()); }
+ #[test] fn rejects_compression_bomb() { let (dir,p)=archive("index.html",&vec![0;1_000_000],None); assert!(import(&p,"zip",&dir.path().join("site")).is_err()); }
+ #[cfg(unix)] #[test] fn rejects_directory_symlink() { use std::os::unix::fs::symlink; let dir=tempfile::tempdir().expect("dir"); let src=dir.path().join("src"); fs::create_dir(&src).expect("mkdir"); symlink(dir.path(),src.join("link")).expect("symlink"); assert!(import(&src,"directory",&dir.path().join("site")).is_err()); }
+}

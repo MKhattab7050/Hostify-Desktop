@@ -1,21 +1,23 @@
 # Hostify engine implementation status
 
-This is an incomplete backend foundation, not a usable or secure release. The engine binary exits with an error and does not start hosting. The Tauri scaffold does not yet forward IPC commands. Do not use the import code with untrusted input until the issues below are resolved and tested.
+The engine and Tauri shell are not yet connected to the core and do not provide a working hosting product. The core work in this pass is incomplete and must not be used for production deployment.
 
-## Implemented foundation
+## Core work
 
-The workspace contains `hostify-core`, `hostify-engine`, and the existing Tauri crate. Core contains the initial SQLite schema migration, local data paths, an import staging/swap implementation, and Caddyfile and port selection helpers. The database stores credential references, not credentials. Port selection is advisory: another process can claim the port before Caddy binds it.
+Core contains SQLite migration, paths, staged directory and ZIP import, Caddyfile generation and port selection, a keyring-backed secret store, a Cloudflare API client, checksum-gated component downloads, and a deployment implementation with SQLite snapshots and rollback. Public verification compares a successful HTTPS response body with the local index file hash. The Caddyfile also emits an `X-Hostify-Verify` header. Cloudflare and component unit tests use mocks rather than the network.
 
-The import code checks archive paths, entry types, compression ratio and size limits, and stages files before swapping the current release. It has not been security audited. In particular, directory traversal currently checks metadata before opening files and is susceptible to a concurrent filesystem replacement (TOCTOU); managed destination ancestors are not checked for reparse points. ZIP extraction and Windows filename corner cases also need further adversarial tests. These issues must be addressed before importing untrusted sources.
+## Known gaps
 
-## Missing work
+Deployment is not yet safe to run: ownership cannot be reliably recovered if a process stops between a remote create operation and saving its result, and automatic tunnel deletion is withheld because the implementation cannot establish that a newly created tunnel is unused by other actors. Reusing a tunnel replaces its ingress and failure rollback does not restore its former configuration. Recovery currently rolls back running deployments only; incomplete rollback after a failure is not retried automatically. Full success, every failure step, and interruption recovery are not yet tested. SiteRuntime implementations must return whether they actually started a resource, to avoid stopping a previously running one.
 
-Cloudflare API, credential storage, component downloads and pinned verification, deployment persistence and rollback, HTTP verification, the supervisor and child Job Object, named pipe ACL and JSON-RPC server, event forwarding, service and scheduled-task management, tray behavior, installer hooks, and the contract commands are not implemented. The existing UI shell is still the initial scaffold. No DNS or external state is changed by this code.
+The import code has not been security audited. Directory traversal checks metadata before opening files and is susceptible to concurrent filesystem replacement (TOCTOU); managed destination ancestors are not checked for reparse points. ZIP symlink behavior and Windows filename edge cases need further adversarial tests. Do not import untrusted sources.
 
-## Running and testing
+Component acquisition expects a cloudflared `.sha256` asset; it fails closed when unavailable. Real release asset formats and installation replacement on Windows have not been verified. Component downloads do not yet report byte-level progress. Caddy and cloudflared binary execution has not been tested.
 
-Add `%USERPROFILE%\.cargo\bin` to `PATH`, then run `cargo build --workspace` and `cargo test --workspace` from the repository root. Dependencies must be available from crates.io or a populated Cargo cache. The initial attempt in this environment could not reach crates.io and `rusqlite` was not cached, so neither build nor tests were verified. `cargo fmt` was also unavailable because the rustfmt component was not installed.
+The engine supervisor and child Job Object, named pipe ACL and JSON-RPC server, event forwarding, service and scheduled-task management, tray behavior, installer hooks, and IPC commands remain unimplemented. Port selection is advisory and can race with another process.
 
-## Not verified
+## Verification
 
-Nothing has been verified against real Cloudflare, an installed Caddy or cloudflared, a Windows reboot, a Windows Service, a scheduled task, an NSIS installer, or real user credentials. The core implementation and tests could not be compiled in the current environment.
+Run `cargo build -p hostify-core --offline` and `cargo test -p hostify-core --offline` with `%USERPROFILE%\.cargo\bin` on PATH. Tests use local mocks and no real credentials. Rustfmt is unavailable in the current toolchain.
+
+No operation has been verified against real Cloudflare, release downloads, Windows Credential Manager, installed Caddy or cloudflared, a Windows reboot, Windows Service, scheduled task, or installer. The API behavior, permissions, release checksum availability, and public propagation need real integration verification before release.
