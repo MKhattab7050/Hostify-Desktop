@@ -1671,6 +1671,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "hostify-core",
+ "rusqlite",
  "serde",
  "serde_json",
  "sysinfo",

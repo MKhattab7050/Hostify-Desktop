@@ -1,0 +1,10 @@
+memory allocation of 167952 bytes failed
+stack backtrace:
+   0:     0x7ff8062ff329 - <unknown>
+   1:     0x7ff806328b0e - <unknown>
+   2:     0x7ff80630f3c4 - <unknown>
+   3:     0x7ff8062f0a8c - <unknown>
+   4:     0x7ff8062d46fc - <unknown>
+   5:     0x7ff8062d0c0f - <unknown>
+   6:     0x7ff8062f0b2b - <unknown>
+ 

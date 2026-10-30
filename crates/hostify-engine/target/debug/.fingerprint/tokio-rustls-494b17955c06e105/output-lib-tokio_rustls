@@ -1,0 +1,19 @@
+memory allocation of 57344 bytes failed
+stack backtrace:
+   0:     0x7ff8062ff329 - <unknown>
+   1:     0x7ff806328b0e - <unknown>
+   2:     0x7ff80630f3c4 - <unknown>
+   3:     0x7ff8062f0a8c - <unknown>
+   4:     0x7ff8062d46fc - <unknown>
+   5:     0x7ff8062d0c0f - <unknown>
+   6:     0x7ff8062f0b2b - <unknown>
+   7:     0x7ff8062d5528 - <unknown>
+   8:     0x7ff80a2c4a98 - <unknown>
+   9:     0x7ff80a2c4ab5 - <unknown>
+  10:     0x7ff8064bcfea - <unknown>
+  11:     0x7ff8064cede0 - <unknown>
+  12:     0x7ff806f33ff3 - <unknown>
+  13:     0x7ff806e577ee - <unknown>
+  14:     0x7ff806f34047 - <unknown>
+  15:     0x7ff8064b4369 - <unknown>
+  16:     0x7ff8064cede0 - <unknown>

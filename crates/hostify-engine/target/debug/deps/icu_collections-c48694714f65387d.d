@@ -1,0 +1,19 @@
+D:\Hostify-Desktop\crates/hostify-engine/target\debug\deps\icu_collections-c48694714f65387d.d: D:\Hostify-Desktop\vendor\icu_collections\src\lib.rs D:\Hostify-Desktop\vendor\icu_collections\src\char16trie\mod.rs D:\Hostify-Desktop\vendor\icu_collections\src\char16trie\trie.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointinvlist\mod.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointinvlist\cpinvlist.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointinvlist\utils.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointinvliststringlist\mod.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\mod.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\cptrie.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\error.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\impl_const.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\planes.rs D:\Hostify-Desktop\vendor\icu_collections\src\iterator_utils.rs
+
+D:\Hostify-Desktop\crates/hostify-engine/target\debug\deps\libicu_collections-c48694714f65387d.rlib: D:\Hostify-Desktop\vendor\icu_collections\src\lib.rs D:\Hostify-Desktop\vendor\icu_collections\src\char16trie\mod.rs D:\Hostify-Desktop\vendor\icu_collections\src\char16trie\trie.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointinvlist\mod.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointinvlist\cpinvlist.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointinvlist\utils.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointinvliststringlist\mod.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\mod.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\cptrie.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\error.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\impl_const.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\planes.rs D:\Hostify-Desktop\vendor\icu_collections\src\iterator_utils.rs
+
+D:\Hostify-Desktop\crates/hostify-engine/target\debug\deps\libicu_collections-c48694714f65387d.rmeta: D:\Hostify-Desktop\vendor\icu_collections\src\lib.rs D:\Hostify-Desktop\vendor\icu_collections\src\char16trie\mod.rs D:\Hostify-Desktop\vendor\icu_collections\src\char16trie\trie.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointinvlist\mod.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointinvlist\cpinvlist.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointinvlist\utils.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointinvliststringlist\mod.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\mod.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\cptrie.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\error.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\impl_const.rs D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\planes.rs D:\Hostify-Desktop\vendor\icu_collections\src\iterator_utils.rs
+
+D:\Hostify-Desktop\vendor\icu_collections\src\lib.rs:
+D:\Hostify-Desktop\vendor\icu_collections\src\char16trie\mod.rs:
+D:\Hostify-Desktop\vendor\icu_collections\src\char16trie\trie.rs:
+D:\Hostify-Desktop\vendor\icu_collections\src\codepointinvlist\mod.rs:
+D:\Hostify-Desktop\vendor\icu_collections\src\codepointinvlist\cpinvlist.rs:
+D:\Hostify-Desktop\vendor\icu_collections\src\codepointinvlist\utils.rs:
+D:\Hostify-Desktop\vendor\icu_collections\src\codepointinvliststringlist\mod.rs:
+D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\mod.rs:
+D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\cptrie.rs:
+D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\error.rs:
+D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\impl_const.rs:
+D:\Hostify-Desktop\vendor\icu_collections\src\codepointtrie\planes.rs:
+D:\Hostify-Desktop\vendor\icu_collections\src\iterator_utils.rs:
