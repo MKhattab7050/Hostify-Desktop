@@ -1,4 +1,4 @@
-import { Activity, Globe2, LayoutDashboard, Plus, Settings, Server } from "lucide-react";
+import { Activity, Boxes, Database, Globe2, LayoutDashboard, Plus, Rocket, Settings, Server } from "lucide-react";
 import { useStore, type Page } from "../store";
 import { cx } from "./ui";
 import { isTauri } from "../lib/api";
@@ -6,7 +6,10 @@ import { isTauri } from "../lib/api";
 const NAV: { id: Page; label: string; icon: typeof Activity }[] = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "websites", label: "Websites", icon: Server },
+  { id: "deployments", label: "Deployments", icon: Rocket },
   { id: "domains", label: "Domains", icon: Globe2 },
+  { id: "databases", label: "Databases", icon: Database },
+  { id: "runtimes", label: "Runtimes", icon: Boxes },
   { id: "activity", label: "Activity & Logs", icon: Activity },
   { id: "settings", label: "Settings", icon: Settings },
 ];

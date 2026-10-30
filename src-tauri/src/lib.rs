@@ -24,6 +24,15 @@ macro_rules! forward {
     )*};
 }
 forward! {
+    mysql_setup(version: String => "version"); mysql_status(); mysql_start(); mysql_stop(); mysql_restart();
+    list_databases();
+    create_database(name: String => "name", site_id: Option<String> => "siteId", inject_env: Option<bool> => "injectEnv", replace_env: Option<bool> => "replaceEnv");
+    delete_database(name: String => "name", confirm_name: String => "confirmName");
+    create_db_user(database: String => "database", user: String => "user"); delete_db_user(user: String => "user");
+    rotate_db_password(user: String => "user"); reveal_db_password(user: String => "user");
+    database_connection(name: String => "name"); test_connection(name: String => "name"); backup_database(name: String => "name"); list_backups(name: String => "name");
+    delete_backup(name: String => "name", file: String => "file"); restore_database(name: String => "name", file: String => "file", confirm_name: String => "confirmName");
+    link_database(name: String => "name", site_id: String => "siteId", inject_env: bool => "injectEnv", replace_env: Option<bool> => "replaceEnv"); unlink_database(name: String => "name");
     engine_status(); system_stats(); list_sites();
     inspect_project(path: String => "path", kind: String => "kind");
     get_app_config(site_id: String => "siteId");
@@ -153,6 +162,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            mysql_setup, mysql_status, mysql_start, mysql_stop, mysql_restart, list_databases, create_database, delete_database, create_db_user, delete_db_user, rotate_db_password, reveal_db_password, database_connection, test_connection, backup_database, list_backups, delete_backup, restore_database, link_database, unlink_database,
             inspect_project,
             get_app_config,
             set_app_config,

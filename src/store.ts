@@ -4,7 +4,7 @@ import type {
   ComponentName, ActivityEntry, AppSettings, CloudflareAccount, Deployment, Domain, EngineStatus, Site, SystemStats, TunnelHealth,
 } from "./lib/types";
 
-export type Page = "dashboard" | "websites" | "domains" | "activity" | "settings";
+export type Page = "dashboard" | "websites" | "deployments" | "domains" | "databases" | "runtimes" | "activity" | "settings";
 export interface Toast { id: number; kind: "ok" | "error" | "info"; text: string }
 
 interface State {

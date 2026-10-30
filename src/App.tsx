@@ -7,6 +7,9 @@ import { Onboarding } from "./components/Onboarding";
 import { Dashboard } from "./pages/Dashboard";
 import { Websites } from "./pages/Websites";
 import { Domains } from "./pages/Domains";
+import { Deployments } from "./pages/Deployments";
+import { Databases } from "./pages/Databases";
+import { Runtimes } from "./pages/Runtimes";
 import { Activity } from "./pages/Activity";
 import { Settings } from "./pages/Settings";
 
@@ -57,7 +60,10 @@ export default function App() {
           <div key={page} className="rise">
             {page === "dashboard" && <Dashboard />}
             {page === "websites" && <Websites />}
+            {page === "deployments" && <Deployments />}
             {page === "domains" && <Domains />}
+            {page === "databases" && <Databases />}
+            {page === "runtimes" && <Runtimes />}
             {page === "activity" && <Activity />}
             {page === "settings" && <Settings />}
           </div>

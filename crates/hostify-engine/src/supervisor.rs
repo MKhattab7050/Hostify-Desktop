@@ -147,6 +147,7 @@ pub(crate) enum Role {
     Caddy,
     App,
     Connector,
+    Service,
 }
 #[derive(Clone)]
 pub(crate) struct Spec {
@@ -191,6 +192,7 @@ impl Spec {
             Role::Caddy => "The website server",
             Role::App => "The application",
             Role::Connector => "The Cloudflare connector",
+            Role::Service => "MySQL",
         }
     }
 }
@@ -236,6 +238,8 @@ struct Worker {
     task: tokio::task::JoinHandle<()>,
 }
 pub struct Supervisor {
+    pub mysql: Arc<crate::mysql::Manager>,
+    mysql_lifecycle: Arc<Mutex<()>>,
     pub store: Arc<Store>,
     workers: Arc<Mutex<HashMap<String, Worker>>>,
     scope: Option<String>,
@@ -246,6 +250,8 @@ pub struct Supervisor {
 impl Supervisor {
     pub fn for_site(&self, id: &str) -> Arc<Self> {
         Arc::new(Self {
+            mysql: self.mysql.clone(),
+            mysql_lifecycle: self.mysql_lifecycle.clone(),
             store: self.store.clone(),
             workers: self.workers.clone(),
             scope: Some(id.into()),
@@ -325,7 +331,13 @@ impl Supervisor {
         self.for_site(id).stop_tunnel().await
     }
     pub fn new(store: Arc<Store>) -> io::Result<Arc<Self>> {
+        let mysql=crate::mysql::Manager::production(store.clone());
+        Self::with_mysql(store,mysql)
+    }
+    pub fn with_mysql(store: Arc<Store>,mysql:Arc<crate::mysql::Manager>) -> io::Result<Arc<Self>> {
         Ok(Arc::new(Self {
+            mysql,
+            mysql_lifecycle: Arc::new(Mutex::new(())),
             store,
             workers: Arc::new(Mutex::new(HashMap::new())),
             scope: None,
@@ -473,6 +485,7 @@ impl Supervisor {
             let _ = self.store.process_status(id, &spec.key, "starting", None);
         }
         let (stop, mut rx) = watch::channel(false);
+        let mysql = self.mysql.clone();
         let store = self.store.clone();
         #[cfg(windows)]
         let job = self.job.clone();
@@ -596,6 +609,22 @@ impl Supervisor {
                             } else {
                                 format!("exit code {code}")
                             };
+                            let last_exit = if spec.role == Role::Service {
+                                let log = mysql.error_log();
+                                let message = if mysql_newer_version(&log) {
+                                    "The MySQL data directory was created by a newer server version. Use that version or a newer runtime.".to_owned()
+                                } else { format!("{last_exit}. {log}") };
+                                let _ = store.save("mysql-last-error", &json!(message));
+                                message
+                            } else { last_exit };
+                            let last_exit = if spec.role == Role::Service {
+                                let log = mysql.error_log();
+                                let message = if mysql_newer_version(&log) {
+                                    "The MySQL data directory was created by a newer server version. Use that version or a newer runtime.".to_owned()
+                                } else { format!("{last_exit}. {log}") };
+                                let _ = store.save("mysql-last-error", &json!(message));
+                                message
+                            } else { last_exit };
                             #[cfg(windows)]
                             let _ = process.job.terminate();
                             if let Ok(mut all) = info.lock()
@@ -609,7 +638,7 @@ impl Supervisor {
                             let _ = process.wait();
                             process.finish_output().await;
                             child = None;
-                            let recycling = spec.health == Health::TcpConnect && code == "0";
+                            let recycling = spec.role == Role::App && spec.health == Health::TcpConnect && code == "0";
                             quiet_restart = recycling;
                             if spec.restart == RestartPolicy::Never
                                 || (spec.restart == RestartPolicy::OnFailure
@@ -631,7 +660,7 @@ impl Supervisor {
                                 break;
                             }
                             if crash_loop.php_exit(started.elapsed(), recycling)
-                                && spec.site.is_some()
+                                && (spec.site.is_some() || spec.role == Role::Service)
                                 && !(spec.role == Role::Caddy && retained_static(&store, &spec))
                             {
                                 let message = format!(
@@ -646,6 +675,7 @@ impl Supervisor {
                                         Some(message.clone()),
                                     );
                                 }
+                                if spec.role == Role::Service { let _ = store.save("mysql-last-error", &json!(message)); }
                                 let _ = store.activity("error", spec.site.as_deref(), &message);
                                 break;
                             }
@@ -698,6 +728,8 @@ impl Supervisor {
                 }
                 // Reuse the same Job Object for every restarted process.
                 let temporary = Supervisor {
+                    mysql: mysql.clone(),
+                    mysql_lifecycle: Arc::new(Mutex::new(())),
                     store: store.clone(),
                     workers: Arc::new(Mutex::new(HashMap::new())),
                     scope: None,
@@ -761,6 +793,16 @@ impl Supervisor {
                 }
             }
             if let Some(mut c) = child {
+                if spec.role == Role::Service {
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+                    let manager = mysql.clone();
+                    let shutdown = tokio::task::spawn_blocking(move || manager.shutdown_server());
+                    let _ = tokio::time::timeout_at(deadline, shutdown).await;
+                    while tokio::time::Instant::now() < deadline {
+                        if c.try_wait().ok().flatten().is_some() { break; }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
                 if spec.role == Role::App {
                     #[cfg(windows)]
                     {
@@ -819,13 +861,14 @@ impl Supervisor {
         Ok(())
     }
     pub async fn shutdown(&self) {
-        let keys = self
+        let mut keys = self
             .workers
             .lock()
             .await
             .keys()
             .cloned()
             .collect::<Vec<_>>();
+        keys.sort_by_key(|k| k == "mysql");
         for key in keys {
             let _ = self.stop(&key).await;
         }
@@ -867,6 +910,13 @@ pub(crate) fn pump_redacted(
 #[async_trait]
 impl SiteRuntime for Supervisor {
     async fn start_site(&self, id: &str) -> Result<bool, String> {
+        if let Some(name) = self.mysql.linked_database(id).map_err(|e|e.to_string())? {
+            if let Err(error) = self.mysql_start().await {
+                let message = format!("Database {name} could not start: {error}");
+                let _ = self.store.status(id, "error", Some(message.clone()));
+                return Err(message);
+            }
+        }
         if matches!(
             self.store
                 .site(id)
@@ -967,7 +1017,7 @@ impl SiteRuntime for Supervisor {
         self.stop(&format!("site:{id}")).await?;
         self.stop(&format!("app:{id}")).await?;
         let prefix = format!("php:{id}:");
-        let keys = self
+        let mut keys = self
             .workers
             .lock()
             .await
@@ -975,6 +1025,7 @@ impl SiteRuntime for Supervisor {
             .filter(|key| key.starts_with(&prefix))
             .cloned()
             .collect::<Vec<_>>();
+        keys.sort_by_key(|k| k == "mysql");
         for key in keys {
             self.stop(&key).await?;
         }
@@ -1034,7 +1085,7 @@ impl SiteRuntime for Supervisor {
         } else {
             None
         };
-        let keys = self
+        let mut keys = self
             .workers
             .lock()
             .await
@@ -1044,6 +1095,7 @@ impl SiteRuntime for Supervisor {
             })
             .cloned()
             .collect::<Vec<_>>();
+        keys.sort_by_key(|k| k == "mysql");
         for key in keys {
             self.stop(&key).await?
         }
@@ -2028,5 +2080,47 @@ mod php_recycle_tests {
             assert!(!crashes.php_exit(Duration::ZERO, true));
         }
         assert!(crashes.php_exit(Duration::ZERO, false));
+    }
+}
+fn mysql_newer_version(log: &str) -> bool {
+    let log = log.to_ascii_lowercase();
+    log.contains("invalid mysql server downgrade") || log.contains("cannot downgrade") || (log.contains("data directory") && log.contains("newer version"))
+}
+impl Supervisor {
+    pub async fn mysql_running(&self) -> bool {
+        self.workers.lock().await.get("mysql").is_some_and(|w|!w.task.is_finished())
+            && self.info.lock().ok().and_then(|i|i.get("mysql").and_then(|p|p.pid)).is_some()
+    }
+    pub async fn mysql_start(&self) -> Result<bool,String> {
+        let _guard=self.mysql_lifecycle.lock().await;
+        let c=self.mysql.required_config().map_err(|e|e.to_string())?;
+        let started=if !self.mysql_running().await {
+            let exe=self.mysql.executable(&c,"mysqld").map_err(|e|e.to_string())?;
+            let password=self.mysql.root_password().map_err(|e|e.to_string())?;
+            self.store.save("mysql-last-error",&Value::Null).map_err(|e|e.to_string())?;
+            self.launch(Spec{key:"mysql".into(),site:None,exe,args:vec![format!("--defaults-file={}",self.store.root.join("mysql/my.ini").display())],token:None,cwd:Some(self.store.root.join("mysql")),env:vec![],redact:vec![password],log:self.store.root.join("logs/mysql-process.log"),port:c.port,path:"/".into(),role:Role::Service,health:Health::TcpConnect,restart:RestartPolicy::Always,memory_limit_mb:None}).await?
+        } else {false};
+        let deadline=tokio::time::Instant::now()+Duration::from_secs(180);
+        loop {
+            if self.mysql_running().await && http_health(c.port,"/",Health::TcpConnect).await {
+                let mysql=self.mysql.clone();
+                if tokio::task::spawn_blocking(move||mysql.sql("SELECT 1;")).await.map_err(|e|e.to_string())?.is_ok(){return Ok(started)}
+            }
+            if self.workers.lock().await.get("mysql").is_none_or(|w|w.task.is_finished()) || tokio::time::Instant::now()>=deadline {
+                let log=self.mysql.error_log();
+                if mysql_newer_version(&log){return Err("The MySQL data directory was created by a newer server version. Use that version or a newer runtime.".into())}
+                let error=self.store.saved("mysql-last-error").ok().flatten().and_then(|v|v.as_str().map(str::to_owned)).unwrap_or_else(||format!("MySQL did not become ready within 180 seconds. {log}"));
+                return Err(error)
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+    pub async fn mysql_stop(&self)->Result<(),String>{let _guard=self.mysql_lifecycle.lock().await;self.stop("mysql").await}
+    pub fn mysql_measurements(&self)->Value {
+        let mut value=json!({});
+        if let Ok(all)=self.info.lock() && let Some(pid)=all.get("mysql").and_then(|p|p.pid){
+            let pid=sysinfo::Pid::from_u32(pid);let mut system=sysinfo::System::new();system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]),true);
+            if let Some(p)=system.process(pid){value["pid"]=json!(pid.as_u32());value["memoryBytes"]=json!(p.memory());}
+        }value
     }
 }

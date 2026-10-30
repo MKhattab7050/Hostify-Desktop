@@ -2,6 +2,7 @@
 #[cfg(windows)]
 pub mod cli;
 mod php;
+pub mod mysql;
 #[cfg(windows)]
 pub mod pipe;
 pub mod state;

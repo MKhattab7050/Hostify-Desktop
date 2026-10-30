@@ -1,6 +1,6 @@
 // In-memory stand-in used ONLY when running in a plain browser (no Tauri engine) for design review.
 // It is never reached inside the desktop app. Numbers here are demo data, not measurements.
-import type { ActivityEntry, AppSettings, Deployment, Domain, Site, VerifyCheck } from "./types";
+import type { ActivityEntry, AppConfig, AppSettings, Deployment, Domain, EnvVar, ManagedDatabase, ProjectReport, RuntimeStatus, Site, VerifyCheck } from "./types";
 
 const now = () => new Date().toISOString();
 let sites: Site[] = [
@@ -44,6 +44,40 @@ function previewDeployment(siteId: string, hostname: string, at: number, id = `d
   };
 }
 
+// Design-preview stand-ins for the V2 screens. A path containing "fail" previews a failed build.
+const baseConfig: AppConfig = { install: "ci", buildScript: "build", start: { type: "npmScript", name: "start" }, workingDir: ".", healthPath: "/", restart: "always", memoryLimitMb: null, allowInstallScripts: false,
+  documentRoot: ".", phpWorkers: 4, phpExtensions: ["mbstring", "openssl", "curl", "fileinfo", "mysqli", "pdo_mysql"], phpSettings: {}, persistentPaths: [],
+  internalPort: 19100, activeRelease: null, previousRelease: null, pendingRelease: "r1", builtRelease: null, trustedRelease: null };
+const configs = new Map<string, AppConfig>();
+const envs = new Map<string, EnvVar[]>();
+const builds = new Map<string, { at: number; fail: boolean; id: string }>();
+const runtimes: RuntimeStatus[] = [
+  { kind: "node", version: "24.22.2", installed: true, ready: true, sizeBytes: 107_353_198, usedBy: [] },
+  { kind: "node", version: "26.13.0", installed: false, ready: false, usedBy: [] },
+  { kind: "php", version: "8.4.27-1", installed: false, ready: false, usedBy: [] },
+  { kind: "php", version: "8.5.12-1", installed: false, ready: false, usedBy: [] },
+  { kind: "mysql", version: "8.4.10", installed: false, ready: false, usedBy: [] },
+];
+let mysql = { setUp: false, running: false } as { setUp: boolean; running: boolean; version?: string; port?: number; healthy?: boolean; dataBytes?: number; memoryBytes?: number; freeDiskBytes?: number };
+let databases: ManagedDatabase[] = [];
+const backups = new Map<string, { file: string; sizeBytes: number; createdAt: string }[]>();
+function inspect(path: string): ProjectReport {
+  const node = /node|express|socket/i.test(path); const php = /php|wordpress/i.test(path);
+  return { siteKind: node ? "node" : php ? "php" : "static", framework: /socket/i.test(path) ? "socket.io" : /express|node/i.test(path) ? "express" : /wordpress/i.test(path) ? "wordpress" : null, name: null, engines: null,
+    recommendedRuntime: node ? "24.22.2" : "8.4.27-1", scripts: node ? { start: "node server.js", build: "node build.js" } : {}, lifecycleScripts: node ? { postinstall: "node setup.js" } : {}, dependenciesWithInstallScripts: node ? ["bcrypt"] : [],
+    lockfile: node ? "package-lock" : null, hasServerEntry: node, dotenvNames: node ? ["API_TOKEN"] : [], usesDatabase: /mysql|wordpress/i.test(path), suggested: { ...baseConfig, buildScript: node ? "build" : null, install: node ? "ci" : "none" }, warnings: [] };
+}
+function buildStatus(id: string) {
+  const b = builds.get(id); if (!b) return null;
+  const t = (Date.now() - b.at) / 1000; const site = sites.find((s) => s.id === id);
+  if (b.fail && t >= 1) return { siteId: id, buildId: b.id, step: "install", state: "failed", detail: "The install step exited with 1.\nnpm error Preview: package-lock.json is out of sync.", exitCode: 1 };
+  if (site?.kind === "php" || t >= 2) {
+    const c = configs.get(id); if (c) { c.builtRelease = c.pendingRelease; c.trustedRelease = c.pendingRelease; }
+    return { siteId: id, buildId: b.id, step: "build", state: "done", detail: "The release was built successfully. Start the website to use it.", exitCode: 0 };
+  }
+  return { siteId: id, buildId: b.id, step: t < 1 ? "install" : "build", state: "running", detail: "Running the application step.", exitCode: null };
+}
+
 export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise<T> {
   await wait(120);
   const r = (v: unknown) => v as T;
@@ -54,8 +88,41 @@ export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise
     case "list_sites": return r(sites.map((x) => { const e = [...started.entries()].reverse().find(([, v]) => v.siteId === x.id); return e ? { ...x, publishDeploymentId: e[0], publishHostname: e[1].hostname, publishState: previewDeployment(x.id, e[1].hostname, e[1].at, e[0]).state } : x; }));
     case "get_site": return r(sites.find((s) => s.id === a.id));
     case "validate_source": return r({ ok: true, fileCount: 24, sizeBytes: 3_200_000, hasIndex: true, warnings: [], errors: [] });
-    case "add_site": { const s: Site = { id: "s" + Date.now(), name: a.name, sourcePath: a.sourcePath, localPort: 18080 + sites.length + 5, localUrl: "", status: "running", autoStart: true, fileCount: 24, sizeBytes: 3_200_000, createdAt: now(), updatedAt: now() }; s.localUrl = `http://127.0.0.1:${s.localPort}`; sites = [s, ...sites]; return r(s); }
-    case "start_site": return r(patch(a.id, { status: "running" }));
+    case "inspect_project": return r(inspect(String(a.path)));
+    case "get_app_config": return r(configs.get(a.siteId) ?? baseConfig);
+    case "set_app_config": { const v = a.nodeVersion ?? a.phpVersion; const old = configs.get(a.siteId); configs.set(a.siteId, { ...a.config, activeRelease: old?.activeRelease ?? null, builtRelease: old?.builtRelease ?? null, trustedRelease: old?.trustedRelease ?? null, pendingRelease: old?.pendingRelease ?? null }); if (v) patch(a.siteId, { runtimeVersion: v }); return r({ restartRequired: false, rebuildRequired: false }); }
+    case "build_app": { const id = "b" + Date.now(); builds.set(a.siteId, { at: Date.now(), fail: /fail/i.test(sites.find((s) => s.id === a.siteId)?.sourcePath ?? ""), id }); return r({ buildId: id }); }
+    case "cancel_build": builds.delete(a.siteId); return r(undefined);
+    case "get_build_status": return r(buildStatus(a.siteId));
+    case "app_status": { const s = sites.find((x) => x.id === a.siteId); return r(s?.status === "running" ? { health: "running", exposedAddresses: [], pid: 4242, processCount: 2, cpuPercent: 0.4, memoryBytes: 63_000_000, restarts: 0, internalPort: 19100, activeRelease: "r1" } : { health: "stopped", exposedAddresses: [] }); }
+    case "app_logs": return r(a.stream === "build" ? ["[preview] npm ci", "[preview] added 69 packages"] : ["[preview] Logs appear here when the engine is running."]);
+    case "list_runtimes": return r(runtimes);
+    case "install_runtime": { await wait(600); const x = runtimes.find((v) => v.kind === a.kind && v.version === a.version); if (x) { x.installed = true; x.ready = true; x.sizeBytes = 100_000_000; } return r(undefined); }
+    case "remove_runtime": { const x = runtimes.find((v) => v.kind === a.kind && v.version === a.version); if (x) { x.installed = false; x.ready = false; x.sizeBytes = undefined; } return r(undefined); }
+    case "list_env_vars": return r((envs.get(a.siteId) ?? []).map((v) => (v.secret ? { name: v.name, secret: true } : v)));
+    case "set_env_var": { const l = (envs.get(a.siteId) ?? []).filter((v) => v.name !== a.name); l.push({ name: a.name, secret: a.secret, value: a.value }); envs.set(a.siteId, l); return r({ restartRequired: sites.find((s) => s.id === a.siteId)?.status === "running" }); }
+    case "delete_env_var": envs.set(a.siteId, (envs.get(a.siteId) ?? []).filter((v) => v.name !== a.name)); return r({ restartRequired: false });
+    case "reveal_env_var": return r((envs.get(a.siteId) ?? []).find((v) => v.name === a.name)?.value ?? "");
+    case "import_env": return r({ imported: 1, errors: [], restartRequired: false });
+    case "export_env": return r("# Omitted secrets: none");
+    case "mysql_status": return r(mysql);
+    case "mysql_setup": mysql = { setUp: true, running: true, version: "8.4.10", port: 3307, healthy: true, dataBytes: 190_000_000, memoryBytes: 400_000_000, freeDiskBytes: 200e9 }; return r(mysql);
+    case "mysql_start": mysql = { ...mysql, running: true, healthy: true }; return r(mysql);
+    case "mysql_stop": mysql = { ...mysql, running: false, healthy: undefined }; return r(mysql);
+    case "list_databases": return r(databases);
+    case "create_database": { if (/fail/.test(a.name)) throw new Error("Preview: MySQL refused the new database."); databases = [...databases, { name: a.name, siteId: a.siteId, siteName: sites.find((s) => s.id === a.siteId)?.name, sizeBytes: 16384, users: [`${a.name}_app`], connectionOk: true }]; return r({ restartRequired: false }); }
+    case "delete_database": databases = databases.filter((d) => d.name !== a.name); return r(undefined);
+    case "database_connection": return r({ host: "127.0.0.1", port: 3307, database: a.name, user: `${a.name}_app` });
+    case "test_connection": return r({ ok: true, detail: "Connected as the website's user.", elapsedMs: 12 });
+    case "reveal_db_password": return r("preview-only-not-a-real-password");
+    case "rotate_db_password": return r({ restartRequired: true });
+    case "backup_database": { const b = { file: `${Date.now()}.sql`, sizeBytes: 2048, createdAt: now() }; backups.set(a.name, [b, ...(backups.get(a.name) ?? [])]); databases = databases.map((d) => (d.name === a.name ? { ...d, lastBackupAt: b.createdAt, lastBackupBytes: b.sizeBytes } : d)); return r(b); }
+    case "list_backups": return r(backups.get(a.name) ?? []);
+    case "delete_backup": backups.set(a.name, (backups.get(a.name) ?? []).filter((b) => b.file !== a.file)); return r(undefined);
+    case "restore_database": return r({ safetyBackup: "safety.sql" });
+    case "add_site": { if (a.siteKind && a.siteKind !== "static") { const s: Site = { id: "s" + Date.now(), kind: a.siteKind, name: a.name, sourcePath: a.sourcePath, localPort: 18090 + sites.length, localUrl: "", status: "stopped", autoStart: true, fileCount: 12, sizeBytes: 90_000, createdAt: now(), updatedAt: now() }; s.localUrl = `http://127.0.0.1:${s.localPort}`; sites = [s, ...sites]; configs.set(s.id, { ...baseConfig, ...a.config, pendingRelease: "r1", builtRelease: null, activeRelease: null }); return r(s); }
+      const s: Site = { id: "s" + Date.now(), name: a.name, sourcePath: a.sourcePath, localPort: 18080 + sites.length + 5, localUrl: "", status: "running", autoStart: true, fileCount: 24, sizeBytes: 3_200_000, createdAt: now(), updatedAt: now() }; s.localUrl = `http://127.0.0.1:${s.localPort}`; sites = [s, ...sites]; return r(s); }
+    case "start_site": { const c = configs.get(a.id); if (c) { if (!c.builtRelease) throw new Error("Build and acknowledge trust for this release before starting this website."); c.activeRelease = c.builtRelease; c.pendingRelease = null; } return r(patch(a.id, { status: "running" })); }
     case "stop_site": return r(patch(a.id, { status: "stopped" }));
     case "restart_site": return r(patch(a.id, { status: "running" }));
     case "update_site_files": return r(patch(a.id, {}));
@@ -80,7 +147,7 @@ export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise
     case "site_logs": return r(["[preview] Logs appear here when the engine is running."]);
     case "get_settings": return r(settings);
     case "save_settings": settings = a.settings; return r(settings);
-    case "pick_path": return r(a.kind === "zip" ? "C:\\Users\\you\\Downloads\\site.zip" : "C:\\Users\\you\\Documents\\my-site");
+    case "pick_path": { const forced = (window as unknown as { __hostifyMockPath?: string }).__hostifyMockPath; if (forced) return r(forced); return r(a.kind === "zip" ? "C:\\Users\\you\\Downloads\\site.zip" : "C:\\Users\\you\\Documents\\my-site"); }
     default: return r(undefined);
   }
 }

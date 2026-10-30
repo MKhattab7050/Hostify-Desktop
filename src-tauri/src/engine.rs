@@ -117,6 +117,7 @@ impl EngineClient {
                             | "activity"
                             | "components-progress"
                             | "runtime-progress"
+                            | "mysql-progress"
                             | "app-build"
                             | "app-build"
                     ) {

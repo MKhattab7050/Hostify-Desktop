@@ -2,7 +2,9 @@
 export type SiteStatus = "stopped" | "starting" | "running" | "error" | "deploying";
 export type SourceKind = "directory" | "zip";
 
+export type SiteKind = "static" | "node" | "php";
 export interface Site {
+  kind?: SiteKind; runtimeVersion?: string | null;
   id: string; name: string; sourcePath: string; localPort: number; localUrl: string;
   status: SiteStatus; statusDetail?: string; domainId?: string; publicUrl?: string; autoStart: boolean;
   fileCount: number; sizeBytes: number; createdAt: string; updatedAt: string;
@@ -49,3 +51,30 @@ export interface EngineStatus {
 export type ComponentName = "caddy" | "cloudflared";
 export interface SourceReport { ok: boolean; fileCount: number; sizeBytes: number; hasIndex: boolean; warnings: string[]; errors: string[] }
 export interface DomainCheck { zoneName: string; zoneId: string; canManageDns: boolean; problems: string[] }
+
+export type RuntimeKind = "node" | "php" | "mysql";
+export interface RuntimeStatus { kind: RuntimeKind; version: string; installed: boolean; ready: boolean; error?: string; sizeBytes?: number; path?: string; usedBy: string[] }
+export interface RuntimeProgress { kind: RuntimeKind; version: string; phase: "download" | "verify" | "extract" | "check"; done: number; total: number | null }
+export interface EnvVar { name: string; secret: boolean; value?: string }
+export interface AppConfig {
+  install: "ci" | "install" | "none"; buildScript: string | null;
+  start: { type: "npmScript"; name: string } | { type: "node"; args: string[] };
+  workingDir: string; healthPath: string; restart: "always" | "onFailure" | "never"; memoryLimitMb: number | null; allowInstallScripts: boolean;
+  documentRoot: string; phpWorkers: number; phpExtensions: string[]; phpSettings: Record<string, string>; persistentPaths: string[];
+  internalPort: number | null; activeRelease: string | null; previousRelease: string | null; pendingRelease: string | null; builtRelease: string | null; trustedRelease: string | null;
+}
+export interface ProjectReport {
+  siteKind: SiteKind | "unknown"; framework: string | null; name: string | null; engines: string | null; recommendedRuntime: string;
+  scripts: Record<string, string>; lifecycleScripts: Record<string, string>; dependenciesWithInstallScripts: string[];
+  lockfile: string | null; hasServerEntry: boolean; dotenvNames: string[]; usesDatabase: boolean; suggested: AppConfig; warnings: string[];
+}
+export interface BuildStatus { siteId: string; buildId: string; step: "install" | "build" | "start" | "verify"; state: "running" | "done" | "failed" | "cancelled"; detail: string; exitCode: number | null }
+export interface AppStatus {
+  health: string; exposedAddresses: string[]; pid?: number; processCount?: number; cpuPercent?: number; memoryBytes?: number; restarts?: number;
+  lastExitCode?: number; lastExitAt?: string; internalPort?: number; activeRelease?: string; workers?: { port: number; pid: number | null; health: string }[];
+}
+export type LogStream = "app" | "build" | "access";
+export interface MysqlStatus { setUp: boolean; version?: string; running: boolean; port?: number; pid?: number; memoryBytes?: number; dataBytes?: number; freeDiskBytes?: number; lastError?: string; healthy?: boolean }
+export interface ManagedDatabase { name: string; siteId?: string | null; siteName?: string | null; sizeBytes?: number; users: string[]; connectionOk: boolean | null; lastBackupAt?: string | null; lastBackupBytes?: number | null }
+export interface DatabaseBackup { file: string; sizeBytes: number; createdAt: string }
+export interface DatabaseConnection { host: string; port: number; database: string; user: string }

@@ -435,7 +435,7 @@ impl Runtimes {
             .iter()
             .any(|p| p.exists())
         {
-            return Err("Cannot remove MySQL while a MySQL data directory exists. Remove its databases first.".into());
+            return Err(format!("Cannot remove MySQL while the data directory {} exists. Uninstalling preserves data.", self.root.join("mysql/data").display()));
         }
         if dir.exists() {
             tokio::fs::remove_dir_all(&dir).await.map_err(err)?;
