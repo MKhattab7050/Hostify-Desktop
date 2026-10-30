@@ -1,6 +1,10 @@
-use std::sync::{Arc, atomic::Ordering};
 use serde_json::{Value, json};
-use tauri::{Manager, State, menu::{Menu, MenuItem}, tray::TrayIconBuilder};
+use std::sync::{Arc, atomic::Ordering};
+use tauri::{
+    Manager, State,
+    menu::{Menu, MenuItem},
+    tray::TrayIconBuilder,
+};
 use tauri_plugin_dialog::DialogExt;
 mod engine;
 mod windows;
@@ -39,8 +43,13 @@ forward! {
     get_settings();
 }
 #[tauri::command]
-async fn ensure_components(client: Client<'_>, names: Option<Vec<String>>) -> Result<Value, String> {
-    client.call("ensure_components", json!({"names":names})).await
+async fn ensure_components(
+    client: Client<'_>,
+    names: Option<Vec<String>>,
+) -> Result<Value, String> {
+    client
+        .call("ensure_components", json!({"names":names}))
+        .await
 }
 #[tauri::command]
 async fn save_settings(client: Client<'_>, settings: Value) -> Result<Value, String> {
@@ -48,13 +57,28 @@ async fn save_settings(client: Client<'_>, settings: Value) -> Result<Value, Str
 }
 #[tauri::command]
 async fn pick_path(app: tauri::AppHandle, kind: String) -> Result<Option<String>, String> {
-    if !matches!(kind.as_str(), "directory" | "zip") { return Err("Choose a directory or ZIP file".into()); }
+    if !matches!(kind.as_str(), "directory" | "zip") {
+        return Err("Choose a directory or ZIP file".into());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let dialog = app.dialog().file();
-        let selected = if kind == "directory" { dialog.blocking_pick_folder() }
-            else { dialog.add_filter("ZIP archive", &["zip"]).blocking_pick_file() };
-        selected.map(|p| p.into_path().map(|p| p.to_string_lossy().into_owned()).map_err(|e| e.to_string())).transpose()
-    }).await.map_err(|e| e.to_string())?
+        let selected = if kind == "directory" {
+            dialog.blocking_pick_folder()
+        } else {
+            dialog
+                .add_filter("ZIP archive", &["zip"])
+                .blocking_pick_file()
+        };
+        selected
+            .map(|p| {
+                p.into_path()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .map_err(|e| e.to_string())
+            })
+            .transpose()
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -72,30 +96,81 @@ pub fn run() {
                 }
             });
             let open = MenuItem::with_id(app, "open", "Open Hostify", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit window only — hosting continues", true, None::<&str>)?;
+            let quit = MenuItem::with_id(
+                app,
+                "quit",
+                "Quit window only — hosting continues",
+                true,
+                None::<&str>,
+            )?;
             let menu = Menu::with_items(app, &[&open, &quit])?;
-            let mut tray = TrayIconBuilder::new().tooltip("Hostify — hosting continues when the window closes").menu(&menu)
+            let mut tray = TrayIconBuilder::new()
+                .tooltip("Hostify — hosting continues when the window closes")
+                .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "open" => { if let Some(window) = app.get_webview_window("main") { let _ = window.show(); let _ = window.unminimize(); let _ = window.set_focus(); } }
+                    "open" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 });
-            if let Some(icon) = app.default_window_icon() { tray = tray.icon(icon.clone()); }
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
             tray.build(app)?;
             Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.state::<Arc<EngineClient>>().close_to_tray.load(Ordering::Relaxed) {
+                if window
+                    .state::<Arc<EngineClient>>()
+                    .close_to_tray
+                    .load(Ordering::Relaxed)
+                {
                     api.prevent_close();
                     let _ = window.hide();
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![engine_status, ensure_components, system_stats, list_sites, get_site,
-            validate_source, add_site, update_site_files, start_site, stop_site, restart_site, remove_site, preview_url,
-            cf_connect, cf_status, cf_disconnect, cf_check_domain, cf_plan_dns, publish_site, get_deployment,
-            list_deployments, retry_verification, cancel_deployment, unpublish_site, list_domains, tunnel_health, list_activity, site_logs, get_settings, save_settings, pick_path])
+        .invoke_handler(tauri::generate_handler![
+            engine_status,
+            ensure_components,
+            system_stats,
+            list_sites,
+            get_site,
+            validate_source,
+            add_site,
+            update_site_files,
+            start_site,
+            stop_site,
+            restart_site,
+            remove_site,
+            preview_url,
+            cf_connect,
+            cf_status,
+            cf_disconnect,
+            cf_check_domain,
+            cf_plan_dns,
+            publish_site,
+            get_deployment,
+            list_deployments,
+            retry_verification,
+            cancel_deployment,
+            unpublish_site,
+            list_domains,
+            tunnel_health,
+            list_activity,
+            site_logs,
+            get_settings,
+            save_settings,
+            pick_path
+        ])
         .run(tauri::generate_context!());
-    if let Err(error) = result { eprintln!("Hostify could not start: {error}"); }
+    if let Err(error) = result {
+        eprintln!("Hostify could not start: {error}");
+    }
 }

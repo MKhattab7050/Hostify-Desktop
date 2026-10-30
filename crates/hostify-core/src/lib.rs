@@ -4,9 +4,9 @@ pub mod db;
 pub mod import;
 pub mod paths;
 
-pub mod secrets;
 pub mod cloudflare;
 pub mod components;
 pub mod deploy;
+pub mod secrets;
 
 pub mod verify;
