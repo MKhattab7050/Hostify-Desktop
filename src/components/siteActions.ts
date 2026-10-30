@@ -1,0 +1,25 @@
+import { useState } from "react";
+import { api } from "../lib/api";
+import { useStore } from "../store";
+import type { Site } from "../lib/types";
+
+/** Start/stop/restart/open with per-site busy tracking and honest error toasts. */
+export function useSiteActions() {
+  const { toast, refresh } = useStore();
+  const [busy, setBusy] = useState<Record<string, string | undefined>>({});
+
+  async function run(site: Site, key: string, fn: () => Promise<unknown>, okText?: string) {
+    setBusy((b) => ({ ...b, [site.id]: key }));
+    try { await fn(); await refresh(); if (okText) toast("ok", okText); }
+    catch (e) { toast("error", `${site.name}: ${(e as Error).message}`); }
+    finally { setBusy((b) => ({ ...b, [site.id]: undefined })); }
+  }
+  return {
+    busy,
+    start: (s: Site) => run(s, "start", () => api.startSite(s.id), `${s.name} started`),
+    stop: (s: Site) => run(s, "stop", () => api.stopSite(s.id), `${s.name} stopped`),
+    restart: (s: Site) => run(s, "restart", () => api.restartSite(s.id), `${s.name} restarted`),
+    preview: (s: Site) => run(s, "preview", async () => api.openExternal(await api.previewUrl(s.id))),
+    openPublic: (s: Site) => s.publicUrl && api.openExternal(s.publicUrl),
+  };
+}

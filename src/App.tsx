@@ -1,51 +1,50 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import { useEffect } from "react";
+import { useStore } from "./store";
+import { Sidebar } from "./components/Sidebar";
+import { Toasts } from "./components/ui";
+import { PublishWizard } from "./components/PublishWizard";
+import { Dashboard } from "./pages/Dashboard";
+import { Websites } from "./pages/Websites";
+import { Domains } from "./pages/Domains";
+import { Activity } from "./pages/Activity";
+import { Settings } from "./pages/Settings";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
-
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
-
-  return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
-  );
+function useTheme() {
+  const theme = useStore((s) => s.settings?.theme ?? "system");
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => document.documentElement.setAttribute("data-theme", theme === "system" ? (mq.matches ? "dark" : "light") : theme);
+    apply(); mq.addEventListener("change", apply); return () => mq.removeEventListener("change", apply);
+  }, [theme]);
 }
 
-export default App;
+export default function App() {
+  const { page, wizardOpen, boot, loaded, engineError } = useStore();
+  useTheme();
+  useEffect(() => { void boot(); }, [boot]);
+
+  return (
+    <div className="flex h-full">
+      <Sidebar />
+      <main className="min-w-0 flex-1 overflow-y-auto p-8 max-[1000px]:p-5">
+        {engineError && (
+          <div role="alert" className="mx-auto mb-5 max-w-[1100px] rounded-card border border-buoy bg-buoysoft p-4">
+            <p className="font-semibold text-buoy">Hostify can't reach its hosting engine</p>
+            <p className="mt-1">{engineError} Your websites may be offline. Restart Hostify to start the engine again.</p>
+          </div>
+        )}
+        {!loaded ? <p className="text-ink2">Starting…</p> : (
+          <div key={page} className="rise">
+            {page === "dashboard" && <Dashboard />}
+            {page === "websites" && <Websites />}
+            {page === "domains" && <Domains />}
+            {page === "activity" && <Activity />}
+            {page === "settings" && <Settings />}
+          </div>
+        )}
+      </main>
+      {wizardOpen && <PublishWizard />}
+      <Toasts />
+    </div>
+  );
+}

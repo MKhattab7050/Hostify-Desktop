@@ -1,0 +1,101 @@
+@import "@fontsource-variable/bricolage-grotesque";
+@import "@fontsource-variable/instrument-sans";
+@import "tailwindcss";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+:root {
+  --chalk: #f4f6f3;
+  --panel: #ffffff;
+  --panel-2: #eceff0;
+  --line: #d9dfdd;
+  --ink: #10222b;
+  --ink-2: #4a5b63;
+  --ink-3: #7b8b92;
+  --kelp: #0e7c6b;
+  --kelp-ink: #ffffff;
+  --kelp-soft: #d8efe9;
+  --lantern: #b87a06;
+  --lantern-soft: #fbefcf;
+  --buoy: #c23a31;
+  --buoy-soft: #f9dedb;
+  --focus: #1a6bff;
+  color-scheme: light;
+}
+[data-theme="dark"] {
+  --chalk: #0a1a22;
+  --panel: #112630;
+  --panel-2: #173440;
+  --line: #234451;
+  --ink: #e6f0ee;
+  --ink-2: #a3b7b8;
+  --ink-3: #6f8a8e;
+  --kelp: #3dd6b5;
+  --kelp-ink: #06241f;
+  --kelp-soft: #12433f;
+  --lantern: #f0b93a;
+  --lantern-soft: #3b3012;
+  --buoy: #ff7b6f;
+  --buoy-soft: #4a211f;
+  --focus: #6ea2ff;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-chalk: var(--chalk);
+  --color-panel: var(--panel);
+  --color-panel2: var(--panel-2);
+  --color-line: var(--line);
+  --color-ink: var(--ink);
+  --color-ink2: var(--ink-2);
+  --color-ink3: var(--ink-3);
+  --color-kelp: var(--kelp);
+  --color-kelpink: var(--kelp-ink);
+  --color-kelpsoft: var(--kelp-soft);
+  --color-lantern: var(--lantern);
+  --color-lanternsoft: var(--lantern-soft);
+  --color-buoy: var(--buoy);
+  --color-buoysoft: var(--buoy-soft);
+  --font-display: "Bricolage Grotesque Variable", "Segoe UI", sans-serif;
+  --font-sans: "Instrument Sans Variable", "Segoe UI", sans-serif;
+  --radius-ctl: 8px;
+  --radius-card: 14px;
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: var(--chalk);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+input, textarea, pre, .selectable { user-select: text; }
+h1, h2, h3 { font-family: var(--font-display); letter-spacing: -0.01em; }
+
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 6px; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; border: 2px solid var(--chalk); }
+
+/* Signal path: a packet of light travels along live segments */
+@keyframes travel { from { background-position: 0 0; } to { background-position: 28px 0; } }
+.seg-live {
+  background-image: repeating-linear-gradient(90deg, var(--kelp) 0 10px, transparent 10px 18px);
+  background-size: 28px 100%;
+  animation: travel 1.1s linear infinite;
+}
+.seg-idle { background: var(--line); }
+.seg-bad { background-image: repeating-linear-gradient(90deg, var(--buoy) 0 4px, transparent 4px 9px); }
+
+@keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.rise { animation: rise .22s ease-out both; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin .9s linear infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+}
