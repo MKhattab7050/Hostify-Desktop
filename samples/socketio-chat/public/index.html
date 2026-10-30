@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Hostify Socket.IO sample</title>
+<h1>Hostify Socket.IO sample</h1>
+<p id="marker">hostify-sample-socketio</p>
+<p>Transport: <span id="transport">connecting</span></p>
+<form id="form"><label>Message <input id="text" autocomplete="off"></label> <button>Send message</button></form>
+<ul id="messages"></ul>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  const socket = io();
+  socket.on('transport', (name) => { document.getElementById('transport').textContent = name; });
+  socket.on('chat', (text) => {
+    const item = document.createElement('li');
+    item.textContent = text;
+    document.getElementById('messages').append(item);
+  });
+  document.getElementById('form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const input = document.getElementById('text');
+    socket.emit('chat', input.value);
+    input.value = '';
+  });
+</script>
+</html>

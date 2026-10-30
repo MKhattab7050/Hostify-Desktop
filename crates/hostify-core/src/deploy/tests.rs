@@ -272,6 +272,7 @@ async fn setup(fail: usize, reused: bool, started: bool) -> Fixture {
         secrets: Arc::new(MemoryStore::default()),
     };
     let q = DeployRequest {
+        kind: "static".into(),
         zone_name: Some("example.com".into()),
         site_id: "s".into(),
         hostname: "www.example.com".into(),
@@ -1400,4 +1401,27 @@ async fn truncated_deployment_steps_return_error_without_panicking() {
             .contains("missing its verification step")
     );
     assert_eq!(f.deployer.load(&d.id).unwrap().0.state, "verifying_public");
+}
+
+#[test]
+fn stored_v1_deploy_request_defaults_to_static() {
+    let q: DeployRequest=serde_json::from_value(serde_json::json!({"siteId":"s","hostname":"example.com","accountId":"a","zoneId":"z","tunnelName":"t","port":9000,"root":"site","consentDns":true})).unwrap();
+    assert_eq!(q.kind, "static");
+}
+#[tokio::test]
+async fn node_publish_does_not_require_index_but_static_still_does() {
+    for kind in ["node", "static"] {
+        let mut f = setup(0, false, true).await;
+        f.q.kind = kind.into();
+        std::fs::remove_file(f.q.root.join("index.html")).unwrap();
+        let result = f.deployer.test_publish(f.q.clone(), &|_| {}).await.unwrap();
+        assert_eq!(
+            result.state,
+            if kind == "node" {
+                "published"
+            } else {
+                "failed"
+            }
+        );
+    }
 }

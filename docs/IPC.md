@@ -88,3 +88,37 @@ Events: `site-status` (Site), `deployment-update` (Deployment), `activity` (Acti
 Event: `runtime-progress {kind,version,phase:'download'|'verify'|'extract'|'check',done:number,total:number|null}`. `done` and `total` are bytes for download/verify/extract, and 0/1 for the executable check; an unknown total is null. Runtime sizes are measured installed bytes or absent, never the manifest's planning estimates. Installs hold only their runtime's lock; other pipe sessions and unrelated engine requests remain available. A second operation for the same runtime receives an already-in-progress error. Runtime installs complete independently of later requests on the same shared pipe; other commands keep their existing ordering. A disconnected caller does not cancel an engine-owned install. The shell retains its existing 120-second request timeout, so after that timeout refresh the runtime list; the installation continues in the engine.
 
 Environment edits require a restart when a non-static website has an active or unhealthy running state (`starting`, `running`, or `error`). An import with no successful assignments reports false. Dotenv supports `export`, whitespace/comments, literal single quotes, double quotes and escaped newlines; errors report line numbers without source text or values. Import commits valid assignments and reports invalid lines individually. Names with SECRET, TOKEN, PASSWORD, PASS, KEY, PRIVATE or CREDENTIAL default to secret. Explicit reveal is the only command that returns a secret. A restored secret that cannot decrypt names the variable and asks the user to set it again under the current Windows user. Environment commands do not append their parameters or values to activity/logs.
+
+## Node hosting and routing IPC (Task 12)
+
+The source argument `kind: 'directory'|'zip'` keeps its V1 meaning. `add_site` additionally accepts optional `siteKind: 'static'|'node'|'php'` (default `static`) and `config: AppConfig`. PHP is detected but hosting is refused until Task 13. A Node import allocates distinct public/internal ports and never installs or starts code. Updates import a pending immutable release; the active app continues serving during installation/build.
+
+```ts
+interface AppConfig {
+  install: 'ci'|'install'|'none'; buildScript: string|null;
+  start: {type:'npmScript';name:string}|{type:'node';args:string[]};
+  workingDir: string; healthPath: string; restart:'always'|'onFailure'|'never';
+  memoryLimitMb: number|null; allowInstallScripts:boolean; internalPort:number|null;
+  activeRelease:string|null; previousRelease:string|null; pendingRelease:string|null;
+  builtRelease:string|null; trustedRelease:string|null;
+}
+```
+
+Every configuration field has a serde default. Defaults are install=`install`, start=`npmScript/start`, workingDir=`.`, healthPath=`/`, restart=`always`, install scripts disabled, and optional values null. Inspection suggests `ci` for package-lock, a build script when available, and an appropriate Node entry. Website kind and Node version remain the website's `kind` and `runtimeVersion` columns, outside the configuration JSON. Clients cannot replace engine-managed port/release fields through `set_app_config`.
+
+| command | args | returns |
+|---|---|---|
+| inspect_project | `{path,kind:'directory'|'zip'}` | `{siteKind,framework,name,engines,recommendedRuntime,scripts,lifecycleScripts,dependenciesWithInstallScripts,lockfile,hasServerEntry,dotenvNames,usesDatabase,suggested,warnings}` |
+| get_app_config | `{siteId}` | `AppConfig` |
+| set_app_config | `{siteId,config,nodeVersion?}` | `{restartRequired,rebuildRequired}` |
+| build_app | `{siteId,trustAcknowledged:true}` | `{buildId}` immediately; build continues independently of the caller |
+| cancel_build | `{siteId}` | null after the process tree ends and any promotion rollback completes |
+| get_build_status | `{siteId}` | latest `app-build` payload, or null before a build |
+| app_status | `{siteId}` | `{pid?,processCount?,cpuPercent?,memoryBytes?,peakMemoryBytes?,restarts?,lastExitCode?,lastExitAt?,internalPort?,activeRelease?,health,exposedAddresses}` |
+| app_logs | `{siteId,stream:'app'|'build'|'access',lines}` | rotated log tail, at most 5000 lines |
+
+Event `app-build`: `{siteId,buildId,step:'install'|'build'|'start'|'verify',state:'running'|'done'|'failed'|'cancelled',detail,exitCode:number|null}`. Step completion does not by itself mean the whole task is complete. A running website promotes a successfully built pending release, verifies it through Caddy, and restores the previous release if startup fails. A first deployment remains stopped until `start_site`. A reopened engine marks interrupted build work failed and explains that the release must be built again. Build metadata is durable in SQLite. Concurrent same-site builds and conflicting site operations are refused.
+
+Inspection executes no project code, limits each parsed file to 2 MiB, and returns dotenv names only. Root `.env` is excluded from app imports; the UI must explicitly submit its contents through `import_env` for encrypted secret storage. Project code runs as the signed-in Windows user after explicit trust acknowledgment. npm install lifecycle scripts run only when `allowInstallScripts` is enabled.
+
+The engine emits app-build on its pipe. The existing desktop reader whitelist in src-tauri/src/engine.rs does not forward that event to Tauri; that file is outside Task 12 ownership. Desktop consumers currently need get_build_status, pending the shell integration change.

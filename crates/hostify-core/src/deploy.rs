@@ -221,6 +221,8 @@ pub struct Deployment {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeployRequest {
+    #[serde(default = "static_kind")]
+    pub kind: String,
     #[serde(default)]
     pub zone_name: Option<String>,
     pub site_id: String,
@@ -462,7 +464,10 @@ impl Deployer {
                 if !q.consent_dns {
                     return Err(DeployError::Message("DNS consent is required".into()));
                 }
-                if !q.root.join("index.html").is_file() || q.hostname.is_empty() || q.port == 0 {
+                if (q.kind == "static" && !q.root.join("index.html").is_file())
+                    || q.hostname.is_empty()
+                    || q.port == 0
+                {
                     return Err(DeployError::Message("Invalid website or hostname".into()));
                 }
                 {
@@ -1148,4 +1153,8 @@ pub fn marker_directory(q: &DeployRequest) -> PathBuf {
         &q.root
     };
     data.join("run/verify").join(&q.site_id)
+}
+
+fn static_kind() -> String {
+    "static".into()
 }

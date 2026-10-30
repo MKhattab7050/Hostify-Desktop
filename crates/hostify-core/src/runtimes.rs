@@ -33,6 +33,11 @@ struct ManifestEntry {
 const MIB: u64 = 1024 * 1024;
 /// Written last: a runtime without it was interrupted and is never used.
 const INSTALLED_MARKER: &str = ".hostify-installed";
+pub fn is_pinned(kind: &str, version: &str) -> bool {
+    MANIFEST
+        .iter()
+        .any(|p| p.kind == kind && p.version == version)
+}
 const MANIFEST: &[ManifestEntry] = &[
     ManifestEntry {
         kind: "node",

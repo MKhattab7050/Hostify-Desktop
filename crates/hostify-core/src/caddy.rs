@@ -7,8 +7,13 @@ use thiserror::Error;
 pub struct Site {
     pub verify_root: PathBuf,
     pub port: u16,
-    pub root: PathBuf,
+    pub backend: Backend,
     pub log: PathBuf,
+}
+#[derive(Debug)]
+pub enum Backend {
+    Static { root: PathBuf },
+    Proxy { port: u16 },
 }
 #[derive(Debug, Error)]
 pub enum CaddyError {
@@ -31,7 +36,14 @@ pub fn generate(sites: &[Site]) -> Result<String, CaddyError> {
     for site in sites {
         // No hostname in the address: tunnel requests carry the public Host, and Caddy answers
         // 200 with an empty body when no site matches. `bind` keeps the listener on loopback.
-        result.push_str(&format!("\nhttp://:{} {{\n    bind 127.0.0.1\n    route {{\n        handle_path /.well-known/hostify-verify/* {{\n            root * {}\n            header Cache-Control no-store\n            file_server\n        }}\n        handle {{\n            root * {}\n            @hidden path_regexp hidden (^|/)\\.\n            respond @hidden 404\n            header {{\n                X-Hostify-Verify hostify\n                X-Content-Type-Options nosniff\n                X-Frame-Options DENY\n                Referrer-Policy strict-origin-when-cross-origin\n            }}\n            file_server\n        }}\n    }}\n",site.port,quote(&site.verify_root)?,quote(&site.root)?));
+        match &site.backend {
+            Backend::Static { root } => {
+                result.push_str(&format!("\nhttp://:{} {{\n    bind 127.0.0.1\n    route {{\n        handle_path /.well-known/hostify-verify/* {{\n            root * {}\n            header Cache-Control no-store\n            file_server\n        }}\n        handle {{\n            root * {}\n            @hidden path_regexp hidden (^|/)\\.\n            respond @hidden 404\n            header {{\n                X-Hostify-Verify hostify\n                X-Content-Type-Options nosniff\n                X-Frame-Options DENY\n                Referrer-Policy strict-origin-when-cross-origin\n            }}\n            file_server\n        }}\n    }}\n",site.port,quote(&site.verify_root)?,quote(root)?));
+            }
+            Backend::Proxy { port } => {
+                result.push_str(&format!("\nhttp://:{} {{\n    bind 127.0.0.1\n    route {{\n        handle_path /.well-known/hostify-verify/* {{\n            root * {}\n            header Cache-Control no-store\n            file_server\n        }}\n        handle /.well-known/hostify-caddy-ok {{\n            respond 200\n        }}\n        handle {{\n            header {{\n                X-Hostify-Verify hostify\n                X-Content-Type-Options nosniff\n                X-Frame-Options DENY\n                Referrer-Policy strict-origin-when-cross-origin\n            }}\n            reverse_proxy 127.0.0.1:{} {{\n                flush_interval -1\n            }}\n        }}\n    }}\n", site.port, quote(&site.verify_root)?, port));
+            }
+        }
         result.push_str(&format!(
             "    log {{\n        output file {}\n    }}\n}}\n",
             quote(&site.log)?
@@ -55,7 +67,9 @@ mod tests {
         let s = generate(&[Site {
             verify_root: "verify".into(),
             port: 9000,
-            root: "site".into(),
+            backend: Backend::Static {
+                root: "site".into(),
+            },
             log: "log".into(),
         }])
         .expect("config");
@@ -115,7 +129,7 @@ mod marker_integration {
         let config = generate(&[Site {
             verify_root: marker,
             port,
-            root,
+            backend: Backend::Static { root },
             log: dir.path().join("access.log"),
         }])
         .unwrap();
@@ -233,5 +247,74 @@ mod marker_integration {
         println!(
             "Real Caddy validated and served the marker; hidden paths and directory listing returned 404"
         );
+    }
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+    #[test]
+    fn static_bytes_match_v1_literal() {
+        assert_eq!(
+            generate(&[Site {
+                verify_root: "verify".into(),
+                port: 9000,
+                backend: Backend::Static {
+                    root: "site".into()
+                },
+                log: "log".into()
+            }])
+            .unwrap(),
+            r#"{
+    admin off
+}
+
+http://:9000 {
+    bind 127.0.0.1
+    route {
+        handle_path /.well-known/hostify-verify/* {
+            root * "verify"
+            header Cache-Control no-store
+            file_server
+        }
+        handle {
+            root * "site"
+            @hidden path_regexp hidden (^|/)\.
+            respond @hidden 404
+            header {
+                X-Hostify-Verify hostify
+                X-Content-Type-Options nosniff
+                X-Frame-Options DENY
+                Referrer-Policy strict-origin-when-cross-origin
+            }
+            file_server
+        }
+    }
+    log {
+        output file "log"
+    }
+}
+"#
+        );
+    }
+    #[test]
+    fn proxy_keeps_marker_headers_and_independent_health() {
+        let c = generate(&[Site {
+            verify_root: "verify".into(),
+            port: 9000,
+            backend: Backend::Proxy { port: 9001 },
+            log: "log".into(),
+        }])
+        .unwrap();
+        for text in [
+            "handle_path /.well-known/hostify-verify/*",
+            "handle /.well-known/hostify-caddy-ok",
+            "reverse_proxy 127.0.0.1:9001",
+            "flush_interval -1",
+            "X-Hostify-Verify hostify",
+        ] {
+            assert!(c.contains(text));
+        }
+        assert!(!c.contains("file_server\n        }\n    }"));
     }
 }

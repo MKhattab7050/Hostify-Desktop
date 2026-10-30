@@ -130,6 +130,9 @@ pub fn single_instance() -> io::Result<Handle> {
 pub struct Job(Handle);
 impl Job {
     pub fn new() -> io::Result<Self> {
+        Self::with_memory_limit(None)
+    }
+    pub fn with_memory_limit(memory_mb: Option<u64>) -> io::Result<Self> {
         unsafe {
             let h = CreateJobObjectW(ptr::null(), ptr::null());
             if h.is_null() {
@@ -138,6 +141,10 @@ impl Job {
             let job = Self(Handle(h));
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
             info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if let Some(mb) = memory_mb {
+                info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+                info.JobMemoryLimit = (mb * 1024 * 1024) as usize;
+            }
             if SetInformationJobObject(
                 job.0.0,
                 JobObjectExtendedLimitInformation,
@@ -161,4 +168,193 @@ impl Job {
             }
         }
     }
+}
+
+impl Job {
+    pub fn terminate(&self) -> io::Result<()> {
+        if unsafe { TerminateJobObject(self.0.0, 1) } == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+    pub fn process_ids(&self) -> io::Result<Vec<u32>> {
+        // The list can grow while being queried. Retry with a larger, aligned buffer.
+        let mut count = 32usize;
+        loop {
+            let mut buffer = vec![0usize; count + 2];
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    self.0.0,
+                    JobObjectBasicProcessIdList,
+                    buffer.as_mut_ptr().cast(),
+                    (buffer.len() * std::mem::size_of::<usize>()) as u32,
+                    ptr::null_mut(),
+                )
+            };
+            let info = unsafe { &*buffer.as_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>() };
+            if ok != 0 {
+                let ids = unsafe {
+                    std::slice::from_raw_parts(
+                        info.ProcessIdList.as_ptr(),
+                        info.NumberOfProcessIdsInList as usize,
+                    )
+                };
+                return Ok(ids.iter().map(|p| *p as u32).collect());
+            }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_MORE_DATA as i32) {
+                return Err(error);
+            }
+            count = count
+                .saturating_mul(2)
+                .max(info.NumberOfAssignedProcesses as usize);
+            if count > 1_000_000 {
+                return Err(io::Error::other("Too many processes in the job"));
+            }
+        }
+    }
+    pub fn running(&self) -> io::Result<bool> {
+        Ok(!self.process_ids()?.is_empty())
+    }
+}
+/// Ctrl+C console attachment mutates process-wide state and must be serialized.
+pub fn graceful_stop(job: &Job, pid: u32) -> bool {
+    use windows_sys::Win32::System::Console::*;
+    static CONSOLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let Ok(_lock) = CONSOLE.lock() else {
+        let _ = job.terminate();
+        return false;
+    };
+    // Console control dispatch is asynchronous. Keep our handler disabled and remain
+    // attached until delivery has completed; immediately restoring the handler can
+    // terminate the engine with its own queued Ctrl+C event.
+    let sent = unsafe {
+        FreeConsole();
+        if AttachConsole(pid) == 0 {
+            false
+        } else {
+            SetConsoleCtrlHandler(None, 1);
+            GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) != 0
+        }
+    };
+    let mut graceful = false;
+    if sent {
+        let began = std::time::Instant::now();
+        let deadline = began + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if matches!(job.running(), Ok(false)) {
+                graceful = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Allow the asynchronous console dispatcher to finish before restoring
+        // this process's original Ctrl+C behavior, even for an immediate exit.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    unsafe {
+        FreeConsole();
+        SetConsoleCtrlHandler(None, 0);
+    }
+    if !graceful {
+        let _ = job.terminate();
+    }
+    graceful
+}
+
+impl Job {
+    pub fn peak_memory(&self) -> io::Result<u64> {
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe {
+            QueryInformationJobObject(
+                self.0.0,
+                JobObjectExtendedLimitInformation,
+                (&mut info as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of_val(&info) as u32,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(info.PeakJobMemoryUsed as u64)
+    }
+}
+/// Enumerate listening endpoints owned by this job, including IPv6 wildcard listeners.
+pub fn exposed_addresses(pids: &[u32]) -> io::Result<Vec<String>> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::*;
+    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+    let mut addresses = Vec::new();
+    for family in [AF_INET, AF_INET6] {
+        let mut size = 0u32;
+        unsafe {
+            GetExtendedTcpTable(
+                ptr::null_mut(),
+                &mut size,
+                0,
+                family as u32,
+                TCP_TABLE_OWNER_PID_LISTENER,
+                0,
+            );
+        }
+        loop {
+            let mut bytes = vec![0usize; (size as usize).div_ceil(std::mem::size_of::<usize>())];
+            let status = unsafe {
+                GetExtendedTcpTable(
+                    bytes.as_mut_ptr().cast(),
+                    &mut size,
+                    0,
+                    family as u32,
+                    TCP_TABLE_OWNER_PID_LISTENER,
+                    0,
+                )
+            };
+            if status == ERROR_INSUFFICIENT_BUFFER {
+                continue;
+            }
+            if status != 0 {
+                return Err(io::Error::from_raw_os_error(status as i32));
+            }
+            if family == AF_INET {
+                let table = unsafe { &*bytes.as_ptr().cast::<MIB_TCPTABLE_OWNER_PID>() };
+                let rows = unsafe {
+                    std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize)
+                };
+                for row in rows {
+                    if pids.contains(&row.dwOwningPid) {
+                        let address = std::net::Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes());
+                        if !address.is_loopback() {
+                            addresses.push(format!(
+                                "{}:{}",
+                                address,
+                                u16::from_be(row.dwLocalPort as u16)
+                            ));
+                        }
+                    }
+                }
+            } else {
+                let table = unsafe { &*bytes.as_ptr().cast::<MIB_TCP6TABLE_OWNER_PID>() };
+                let rows = unsafe {
+                    std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize)
+                };
+                for row in rows {
+                    if pids.contains(&row.dwOwningPid) {
+                        let address = std::net::Ipv6Addr::from(row.ucLocalAddr);
+                        if !address.is_loopback() {
+                            addresses.push(format!(
+                                "[{}]:{}",
+                                address,
+                                u16::from_be(row.dwLocalPort as u16)
+                            ));
+                        }
+                    }
+                }
+            }
+            break;
+        }
+    }
+    addresses.sort();
+    addresses.dedup();
+    Ok(addresses)
 }

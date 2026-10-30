@@ -1,0 +1,8 @@
+{
+  "name": "hostify-sample-node-mysql",
+  "version": "1.0.0",
+  "private": true,
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "express": "^4.21.2", "mysql2": "^3.12.0" }
+}

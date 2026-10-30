@@ -5,7 +5,7 @@ use hostify_core::{
     deploy::{DeployRequest, Deployer, SiteRuntime, VerifierControl},
     secrets::{SecretStore, WindowsCredentialStore},
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -64,7 +64,9 @@ impl Default for Settings {
         }
     }
 }
+type SiteProcessHealth = HashMap<String, HashMap<String, (String, Option<String>)>>;
 pub struct Store {
+    pub process_health: Mutex<SiteProcessHealth>,
     pub runtimes: hostify_core::runtimes::Runtimes,
     pub detection: hostify_core::components::Detection,
     pub db: Database,
@@ -85,6 +87,61 @@ impl Store {
         }
         let mut db = Connection::open(root.join("hostify.db"))?;
         hostify_core::db::migrate(&mut db)?;
+        {
+            let interrupted: Vec<(String, String)> = {
+                let mut q = db.prepare(
+                    "SELECT key,value FROM application_settings WHERE key LIKE 'build:%'",
+                )?;
+                q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<_>>()?
+            };
+            for (key, text) in interrupted {
+                if let Ok(mut v) = serde_json::from_str::<Value>(&text) {
+                    if v["state"] == "running" {
+                        v["state"] = json!("failed");
+                        v["detail"] = json!(
+                            "The build was interrupted by an engine restart. Build the release again."
+                        );
+                        db.execute(
+                            "UPDATE application_settings SET value=?1 WHERE key=?2",
+                            params![v.to_string(), key],
+                        )?;
+                        if let Some(id) = key.strip_prefix("build:") {
+                            let prior: Option<String> = db
+                                .query_row(
+                                    "SELECT value FROM application_settings WHERE key=?1",
+                                    [format!("build-prior:{id}")],
+                                    |r| r.get(0),
+                                )
+                                .optional()?;
+                            if let Some(prior) = prior {
+                                let previous: Value = serde_json::from_str(&prior)?;
+                                let raw: Option<String> = db
+                                    .query_row(
+                                        "SELECT app_config_json FROM websites WHERE id=?1",
+                                        [id],
+                                        |r| r.get(0),
+                                    )
+                                    .optional()?
+                                    .flatten();
+                                if let Some(raw) = raw {
+                                    let mut config: hostify_core::app_config::AppConfig =
+                                        serde_json::from_str(&raw)?;
+                                    config.built_release =
+                                        serde_json::from_value(previous["builtRelease"].clone())?;
+                                    config.trusted_release =
+                                        serde_json::from_value(previous["trustedRelease"].clone())?;
+                                    db.execute(
+                                        "UPDATE websites SET app_config_json=?1 WHERE id=?2",
+                                        params![serde_json::to_string(&config)?, id],
+                                    )?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let (events, _) = broadcast::channel(512);
         let runtimes = hostify_core::runtimes::Runtimes::new(&root).map_err(|e| anyhow!(e))?;
         runtimes.clean_partial().map_err(|e| anyhow!(e))?;
@@ -95,8 +152,57 @@ impl Store {
             root,
             events,
             statuses: Mutex::new(HashMap::new()),
+            process_health: Mutex::new(HashMap::new()),
         }))
     }
+    pub fn app_config(&self, id: &str) -> Result<hostify_core::app_config::AppConfig> {
+        let text: Option<String> = self.db()?.query_row(
+            "SELECT app_config_json FROM websites WHERE id=?1",
+            [id],
+            |r| r.get(0),
+        )?;
+        Ok(serde_json::from_str(text.as_deref().unwrap_or("{}"))?)
+    }
+    pub fn save_app_config(
+        &self,
+        id: &str,
+        config: &hostify_core::app_config::AppConfig,
+    ) -> Result<()> {
+        self.db()?.execute(
+            "UPDATE websites SET app_config_json=?1,updated_at=?2 WHERE id=?3",
+            params![serde_json::to_string(config)?, Utc::now().to_rfc3339(), id],
+        )?;
+        Ok(())
+    }
+    pub fn reserved_ports(&self) -> Result<Vec<u16>> {
+        let mut ports = Vec::new();
+        for site in self.sites()? {
+            ports.push(site.local_port);
+            if let Some(p) = self.app_config(&site.id)?.internal_port {
+                ports.push(p);
+            }
+        }
+        Ok(ports)
+    }
+    pub fn process_status(
+        &self,
+        id: &str,
+        key: &str,
+        status: &str,
+        detail: Option<String>,
+    ) -> Result<()> {
+        let mut all = self
+            .process_health
+            .lock()
+            .map_err(|_| anyhow!("Process health unavailable"))?;
+        let processes = all.entry(id.into()).or_default();
+        processes.insert(key.into(), (status.into(), detail));
+        let (status, detail) = aggregate_health(processes.values());
+        // Serialize the aggregate write too, so an older healthy snapshot cannot
+        // overwrite a concurrent application's failure.
+        self.status(id, &status, detail)
+    }
+
     pub fn db(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.db.lock().map_err(|_| anyhow!("Database unavailable"))
     }
@@ -226,6 +332,7 @@ struct DeploymentTask {
     task: tokio::task::JoinHandle<()>,
 }
 pub struct Engine {
+    pub(crate) builds: Mutex<HashMap<String, crate::build::BuildTask>>,
     stats: Arc<Mutex<Stats>>,
     pub public_probe: Option<Arc<dyn hostify_core::verify::PublicProbe>>,
     verifiers: Mutex<HashMap<String, DeploymentTask>>,
@@ -247,6 +354,7 @@ impl Engine {
             verifiers: Mutex::new(HashMap::new()),
             tunnel_observations: Mutex::new(HashMap::new()),
             background: Mutex::new(Vec::new()),
+            builds: Mutex::new(HashMap::new()),
             supervisor: None,
             store,
             runtime,
@@ -267,6 +375,7 @@ impl Engine {
             verifiers: Mutex::new(HashMap::new()),
             tunnel_observations: Mutex::new(HashMap::new()),
             background: Mutex::new(Vec::new()),
+            builds: Mutex::new(HashMap::new()),
             store,
             runtime: supervisor.clone(),
             supervisor: Some(supervisor),
@@ -277,6 +386,7 @@ impl Engine {
         })
     }
     pub async fn shutdown(&self) {
+        crate::build::shutdown(self).await;
         let tasks = self
             .verifiers
             .lock()
@@ -599,6 +709,120 @@ impl Engine {
     pub async fn dispatch(self: &Arc<Self>, method: &str, p: Value) -> Result<Value> {
         let s = &self.store;
         match method {
+            "inspect_project" => {
+                let path = PathBuf::from(arg(&p, "path")?);
+                let kind = kind(&p)?.to_owned();
+                Ok(json!(
+                    tokio::task::spawn_blocking(move || hostify_core::project::inspect(
+                        &path, &kind
+                    ))
+                    .await?
+                    .map_err(|e| anyhow!(e))?
+                ))
+            }
+            "get_app_config" => {
+                let id = arg(&p, "siteId")?;
+                s.site(id)?;
+                Ok(json!(s.app_config(id)?))
+            }
+            "set_app_config" => {
+                let _guard = self.operations.lock().await;
+                let id = arg(&p, "siteId")?;
+                let site = s.site(id)?;
+                if site.kind != "node" {
+                    bail!("Application configuration is available for Node websites.");
+                }
+                crate::build::refuse_busy(self, id)?;
+                let old = s.app_config(id)?;
+                let mut config: hostify_core::app_config::AppConfig = serde_json::from_value(
+                    p.get("config")
+                        .cloned()
+                        .ok_or_else(|| anyhow!("Application configuration is required."))?,
+                )?;
+                config.internal_port = old.internal_port;
+                config.active_release = old.active_release.clone();
+                config.previous_release = old.previous_release.clone();
+                config.pending_release = old.pending_release.clone();
+                config.built_release = old.built_release.clone();
+                config.trusted_release = old.trusted_release.clone();
+                let release = config
+                    .pending_release
+                    .as_ref()
+                    .or(config.active_release.as_ref())
+                    .ok_or_else(|| anyhow!("Import a release first."))?;
+                config
+                    .validate(&s.root.join("sites").join(id).join("app").join(release))
+                    .map_err(|e| anyhow!(e))?;
+                let version = p
+                    .get("nodeVersion")
+                    .and_then(Value::as_str)
+                    .or(site.runtime_version.as_deref())
+                    .ok_or_else(|| anyhow!("Choose a Node runtime version."))?;
+                if !hostify_core::runtimes::is_pinned("node", version) {
+                    bail!("Choose a pinned Node runtime version.");
+                }
+                let rebuild = config.install != old.install
+                    || config.build_script != old.build_script
+                    || config.allow_install_scripts != old.allow_install_scripts
+                    || config.working_dir != old.working_dir
+                    || site.runtime_version.as_deref() != Some(version);
+                let changed = config != old || site.runtime_version.as_deref() != Some(version);
+                if rebuild {
+                    config.built_release = None;
+                }
+                s.save_app_config(id, &config)?;
+                s.db()?.execute(
+                    "UPDATE websites SET runtime_version=?1 WHERE id=?2",
+                    params![version, id],
+                )?;
+                Ok(
+                    json!({"restartRequired":changed && site.status!="stopped","rebuildRequired":rebuild}),
+                )
+            }
+            "build_app" => crate::build::begin(self, &p).await,
+            "cancel_build" => {
+                crate::build::cancel(self, arg(&p, "siteId")?).await?;
+                Ok(Value::Null)
+            }
+            "get_build_status" => {
+                let id = arg(&p, "siteId")?;
+                s.site(id)?;
+                Ok(s.saved(&format!("build:{id}"))?.unwrap_or(Value::Null))
+            }
+            "app_status" => {
+                let id = arg(&p, "siteId")?;
+                s.site(id)?;
+                match &self.supervisor {
+                    Some(supervisor) => {
+                        let supervisor = supervisor.clone();
+                        let id = id.to_owned();
+                        tokio::task::spawn_blocking(move || supervisor.app_status(&id))
+                            .await?
+                            .map_err(|e| anyhow!(e))
+                    }
+                    None => Ok(Value::Null),
+                }
+            }
+            "app_logs" => {
+                let id = arg(&p, "siteId")?;
+                s.site(id)?;
+                let stream = arg(&p, "stream")?;
+                let suffix = match stream {
+                    "app" => "app.log",
+                    "build" => "build.log",
+                    "access" => "log",
+                    _ => bail!("Choose app, build or access logs."),
+                };
+                let lines = p
+                    .get("lines")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(100)
+                    .min(5000) as usize;
+                Ok(json!(crate::supervisor::tail_logs(
+                    &s.root.join("logs").join(format!("{id}.{suffix}")),
+                    lines
+                )?))
+            }
             "list_runtimes" => {
                 let usage = self.runtime_usage()?;
                 Ok(json!(s.runtimes.list(usage).await.map_err(|e| anyhow!(e))?))
@@ -777,6 +1001,78 @@ impl Engine {
                     s.site(id)?;
                     id.into()
                 };
+                let site_kind = if method == "add_site" {
+                    p.get("siteKind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("static")
+                        .to_owned()
+                } else {
+                    s.site(&id)?.kind
+                };
+                if site_kind == "php" {
+                    bail!("PHP hosting is not available yet.");
+                }
+                if !["static", "node"].contains(&site_kind.as_str()) {
+                    bail!("Choose static or node as the website kind.");
+                }
+                if site_kind == "node" {
+                    crate::build::refuse_busy(self, &id)?;
+                    let inspection = hostify_core::project::inspect(Path::new(source), kind)
+                        .map_err(|e| anyhow!(e))?;
+                    let mut config = if method == "add_site" {
+                        match p.get("config").filter(|v| !v.is_null()) {
+                            Some(v) => serde_json::from_value(v.clone())?,
+                            None => inspection.suggested,
+                        }
+                    } else {
+                        s.app_config(&id)?
+                    };
+                    if method == "add_site" {
+                        config.internal_port = None;
+                        config.active_release = None;
+                        config.previous_release = None;
+                        config.pending_release = None;
+                        config.built_release = None;
+                        config.trusted_release = None;
+                    }
+                    let site_dir = s.root.join("sites").join(&id);
+                    let (report, release) =
+                        hostify_core::import::import_release(Path::new(source), kind, &site_dir)?;
+                    if let Err(e) = config.validate(&site_dir.join("app").join(&release)) {
+                        // Leave no refused import behind; add_site's folder is brand new.
+                        let _ = std::fs::remove_dir_all(if method == "add_site" {
+                            site_dir.clone()
+                        } else {
+                            site_dir.join("app").join(&release)
+                        });
+                        bail!(e);
+                    }
+                    let now = Utc::now().to_rfc3339();
+                    if method == "add_site" {
+                        config.active_release = None;
+                        config.previous_release = None;
+                        config.pending_release = Some(release);
+                        config.built_release = None;
+                        config.trusted_release = None;
+                        let mut reserved = s.reserved_ports()?;
+                        let port = hostify_core::caddy::allocate_port(
+                            s.settings()?.base_port_start,
+                            &reserved,
+                        )?;
+                        reserved.push(port);
+                        config.internal_port = Some(hostify_core::caddy::allocate_port(
+                            s.settings()?.base_port_start,
+                            &reserved,
+                        )?);
+                        s.db()?.execute("INSERT INTO websites(id,name,source_path,local_port,file_count,size_bytes,created_at,updated_at,kind,runtime_version,app_config_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?7,'node',?8,?9)",params![id,arg(&p,"name")?,source,port,report.file_count,report.size_bytes,now,inspection.recommended_runtime,serde_json::to_string(&config)?])?;
+                    } else {
+                        config.pending_release = Some(release);
+                        s.save_app_config(&id, &config)?;
+                        s.db()?.execute("UPDATE websites SET source_path=?1,file_count=?2,size_bytes=?3,updated_at=?4 WHERE id=?5",params![source,report.file_count,report.size_bytes,now,id])?;
+                    }
+                    s.activity("info",Some(&id),"Application release imported; acknowledge trust and build before starting.")?;
+                    return Ok(json!(s.site(&id)?));
+                }
                 let report = hostify_core::import::import(
                     Path::new(source),
                     kind,
@@ -788,7 +1084,7 @@ impl Engine {
                     if name.trim().is_empty() || name.len() > 200 {
                         bail!("Website name must contain 1 to 200 characters")
                     };
-                    let reserved = s.sites()?.iter().map(|s| s.local_port).collect::<Vec<_>>();
+                    let reserved = s.reserved_ports()?;
                     let port = hostify_core::caddy::allocate_port(
                         s.settings()?.base_port_start,
                         &reserved,
@@ -808,6 +1104,7 @@ impl Engine {
                     .map_err(|_| anyhow!("Wait for the current deployment to finish"))?;
                 let id = arg(&p, "id")?;
                 s.site(id)?;
+                crate::build::refuse_busy(self, id)?;
                 if method != "stop_site" {
                     self.preflight_caddy(id).await?;
                 }
@@ -818,9 +1115,17 @@ impl Engine {
                 if method != "stop_site" {
                     s.status(id, "starting", None)?;
                     match self.runtime.start_site(id).await {
-                        Ok(_) => s.status(id, "running", None)?,
+                        Ok(_) => {
+                            if s.site(id)?.kind == "node" {
+                                s.process_status(id, &format!("site:{id}"), "running", None)?;
+                            } else {
+                                s.status(id, "running", None)?;
+                            }
+                        }
                         Err(e) => {
-                            s.status(id, "error", Some(e.clone()))?;
+                            if s.site(id)?.kind != "node" || s.site(id)?.status != "running" {
+                                s.status(id, "error", Some(e.clone()))?;
+                            }
                             bail!("{e}")
                         }
                     }
@@ -844,6 +1149,7 @@ impl Engine {
                     .map_err(|_| anyhow!("Wait for the current deployment to finish"))?;
                 let id = arg(&p, "id")?;
                 s.site(id)?;
+                crate::build::refuse_busy(self, id)?;
                 let delete = boolean(&p, "deleteFiles")?;
                 if delete {
                     uuid::Uuid::parse_str(id).map_err(|_| anyhow!("Invalid website ID"))?;
@@ -972,6 +1278,7 @@ impl Engine {
                     })?;
                 let id = arg(&p, "siteId")?.to_owned();
                 let site = s.site(&id)?;
+                crate::build::refuse_busy(self, &id)?;
                 let h = hostname(&p)?.to_owned();
                 let consent = boolean(&p, "consentDns")?;
                 if !consent {
@@ -1004,6 +1311,7 @@ impl Engine {
                     .saved("account")?
                     .ok_or_else(|| anyhow!("Connect Cloudflare first"))?;
                 let request = DeployRequest {
+                    kind: site.kind.clone(),
                     zone_name: Some(z.name.clone()),
                     site_id: id.clone(),
                     hostname: h.clone(),
@@ -1329,6 +1637,7 @@ mod publishing_tests {
         let port = if id == "s" { 9000 } else { 9001 };
         store.db().unwrap().execute("INSERT INTO websites(id,name,source_path,local_port,auto_start,created_at,updated_at) VALUES(?1,?1,'source',?2,?3,'now','now')",params![id,port,auto]).unwrap();
         let q = DeployRequest {
+            kind: "static".into(),
             zone_name: Some("example.com".into()),
             site_id: id.into(),
             hostname: format!("{id}.example.com"),
@@ -1745,5 +2054,34 @@ fn remember_tunnel_tokens(cf: &CloudflareClient, store: &Store, secrets: &dyn Se
                 }
             }
         }
+    }
+}
+
+pub fn aggregate_health<'a>(
+    processes: impl Iterator<Item = &'a (String, Option<String>)>,
+) -> (String, Option<String>) {
+    let values = processes.collect::<Vec<_>>();
+    for state in ["error", "starting", "stopped"] {
+        if let Some(v) = values.iter().find(|v| v.0 == state) {
+            return (*v).clone();
+        }
+    }
+    if values.is_empty() {
+        ("stopped".into(), None)
+    } else {
+        ("running".into(), None)
+    }
+}
+#[cfg(test)]
+mod aggregation_tests {
+    use super::*;
+    #[test]
+    fn failed_app_is_not_hidden_by_caddy() {
+        let p = [
+            ("running".into(), None),
+            ("error".into(), Some("The application crashed".into())),
+        ];
+        assert_eq!(aggregate_health(p.iter()), p[1]);
+        assert_eq!(aggregate_health(p[..1].iter()), p[0]);
     }
 }

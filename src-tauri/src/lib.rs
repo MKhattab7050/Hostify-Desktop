@@ -25,6 +25,13 @@ macro_rules! forward {
 }
 forward! {
     engine_status(); system_stats(); list_sites();
+    inspect_project(path: String => "path", kind: String => "kind");
+    get_app_config(site_id: String => "siteId");
+    set_app_config(site_id: String => "siteId", config: Value => "config", node_version: Option<String> => "nodeVersion");
+    build_app(site_id: String => "siteId", trust_acknowledged: bool => "trustAcknowledged");
+    cancel_build(site_id: String => "siteId"); get_build_status(site_id: String => "siteId");
+    app_status(site_id: String => "siteId");
+    app_logs(site_id: String => "siteId", stream: String => "stream", lines: u32 => "lines");
     list_runtimes();
     install_runtime(kind: String => "kind", version: String => "version");
     remove_runtime(kind: String => "kind", version: String => "version");
@@ -36,7 +43,7 @@ forward! {
     export_env(site_id: String => "siteId");
     get_site(id: String => "id");
     validate_source(path: String => "path", kind: String => "kind");
-    add_site(name: String => "name", source_path: String => "sourcePath", kind: String => "kind");
+    add_site(name: String => "name", source_path: String => "sourcePath", kind: String => "kind", site_kind: Option<String> => "siteKind", config: Option<Value> => "config");
     update_site_files(id: String => "id", source_path: String => "sourcePath", kind: String => "kind");
     start_site(id: String => "id"); stop_site(id: String => "id"); restart_site(id: String => "id");
     remove_site(id: String => "id", delete_files: bool => "deleteFiles");
@@ -146,6 +153,14 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            inspect_project,
+            get_app_config,
+            set_app_config,
+            build_app,
+            cancel_build,
+            get_build_status,
+            app_status,
+            app_logs,
             list_runtimes,
             install_runtime,
             remove_runtime,

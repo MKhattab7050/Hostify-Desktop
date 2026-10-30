@@ -71,7 +71,7 @@ pub(crate) fn safe_name(name: &str) -> Result<PathBuf, ImportError> {
     }
     Ok(result)
 }
-fn is_link(meta: &fs::Metadata) -> bool {
+pub(crate) fn is_link(meta: &fs::Metadata) -> bool {
     if meta.file_type().is_symlink() {
         return true;
     }
@@ -85,7 +85,7 @@ fn is_link(meta: &fs::Metadata) -> bool {
     false
 }
 /// Open the leaf itself, then validate metadata from that handle, not the scanned path.
-fn open_regular(source: &Path, scanned: &fs::Metadata) -> Result<File, ImportError> {
+pub(crate) fn open_regular(source: &Path, scanned: &fs::Metadata) -> Result<File, ImportError> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(windows)]
@@ -160,7 +160,11 @@ fn copy_dir(
     dest: &Path,
     relative: &Path,
     report: &mut SourceReport,
+    app: bool,
 ) -> Result<(), ImportError> {
+    if app && skip_app(relative) {
+        return Ok(());
+    }
     if relative
         .as_os_str()
         .to_string_lossy()
@@ -194,6 +198,7 @@ fn copy_dir(
                 &dest.join(&name),
                 &relative.join(&name),
                 report,
+                app,
             )?;
         }
     } else if meta.is_file() {
@@ -216,7 +221,12 @@ fn copy_dir(
     }
     Ok(())
 }
-fn extract_zip(source: &Path, dest: &Path, report: &mut SourceReport) -> Result<(), ImportError> {
+fn extract_zip(
+    source: &Path,
+    dest: &Path,
+    report: &mut SourceReport,
+    app: bool,
+) -> Result<(), ImportError> {
     let mut archive = zip::ZipArchive::new(open_regular(source, &fs::symlink_metadata(source)?)?)?;
     if archive.len() as u64 > MAX_FILES * 2 {
         return Err(ImportError::Invalid("Too many archive entries".into()));
@@ -266,6 +276,9 @@ fn extract_zip(source: &Path, dest: &Path, report: &mut SourceReport) -> Result<
         let key = rel.to_string_lossy().to_lowercase();
         if !seen.insert(key) {
             return Err(ImportError::Invalid("Duplicate archive path".into()));
+        }
+        if app && skip_app(&rel) {
+            continue;
         }
         let target = dest.join(&rel);
         if is_dir {
@@ -326,8 +339,10 @@ pub fn import(source: &Path, kind: &str, site_dir: &Path) -> Result<SourceReport
     let result = (|| {
         let mut report = SourceReport::default();
         match kind {
-            "directory" if source.is_dir() => copy_dir(source, &stage, Path::new(""), &mut report)?,
-            "zip" if source.is_file() => extract_zip(source, &stage, &mut report)?,
+            "directory" if source.is_dir() => {
+                copy_dir(source, &stage, Path::new(""), &mut report, false)?
+            }
+            "zip" if source.is_file() => extract_zip(source, &stage, &mut report, false)?,
             _ => {
                 return Err(ImportError::Invalid(
                     "Source does not match the selected kind".into(),
@@ -656,5 +671,134 @@ mod committed_swap_tests {
             fs::read_to_string(site.join("current/index.html")).unwrap(),
             "new"
         );
+    }
+}
+
+fn skip_app(path: &Path) -> bool {
+    path.to_string_lossy().eq_ignore_ascii_case(".env")
+        || path.components().any(|c| {
+            let name = c.as_os_str().to_string_lossy();
+            name.eq_ignore_ascii_case("node_modules") || name.eq_ignore_ascii_case(".git")
+        })
+}
+/// Import an immutable application release without renaming a running working directory.
+pub fn import_release(
+    source: &Path,
+    kind: &str,
+    site_dir: &Path,
+) -> Result<(SourceReport, String), ImportError> {
+    reject_link_ancestors(site_dir)?;
+    fs::create_dir_all(site_dir)?;
+    if kind == "directory" && fs::canonicalize(site_dir)?.starts_with(fs::canonicalize(source)?) {
+        return Err(ImportError::Invalid(
+            "The import destination must be outside the source directory".into(),
+        ));
+    }
+    reject_link_ancestors(&site_dir.join("app"))?;
+    if is_link(&fs::symlink_metadata(source)?) {
+        return Err(ImportError::Invalid(
+            "Links and reparse points are not allowed".into(),
+        ));
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let stage = site_dir.join(format!(".staging-{id}"));
+    fs::create_dir(&stage)?;
+    let result = (|| {
+        let mut report = SourceReport::default();
+        match kind {
+            "directory" if source.is_dir() => {
+                copy_dir(source, &stage, Path::new(""), &mut report, true)?
+            }
+            "zip" if source.is_file() => extract_zip(source, &stage, &mut report, true)?,
+            _ => {
+                return Err(ImportError::Invalid(
+                    "Source does not match the selected kind".into(),
+                ));
+            }
+        }
+        fs::create_dir_all(site_dir.join("app"))?;
+        fs::rename(&stage, site_dir.join("app").join(&id))?;
+        report.ok = true;
+        Ok((report, id))
+    })();
+    if stage.exists() {
+        let _ = fs::remove_dir_all(stage);
+    }
+    result
+}
+pub fn prune_app_releases(site_dir: &Path, keep: &[&str]) -> Result<(), ImportError> {
+    let app = site_dir.join("app");
+    reject_link_ancestors(&app)?;
+    let mut entries = Vec::new();
+    for e in fs::read_dir(&app)? {
+        let e = e?;
+        let meta = fs::symlink_metadata(e.path())?;
+        if is_link(&meta)
+            || !meta.is_dir()
+            || uuid::Uuid::parse_str(&e.file_name().to_string_lossy()).is_err()
+        {
+            return Err(ImportError::Invalid(
+                "Unsafe application release entry".into(),
+            ));
+        }
+        entries.push((meta.modified()?, e));
+    }
+    entries.sort_by_key(|a| std::cmp::Reverse(a.0));
+    for (_, e) in entries.into_iter().skip(1) {
+        if !keep.contains(&e.file_name().to_string_lossy().as_ref()) {
+            fs::remove_dir_all(e.path())?;
+        }
+    }
+    Ok(())
+}
+#[cfg(test)]
+mod app_release_tests {
+    use super::*;
+    #[test]
+    fn releases_skip_secrets_and_dependencies_and_do_not_touch_active() {
+        let source = tempfile::tempdir().unwrap();
+        let managed = tempfile::tempdir().unwrap();
+        for path in [
+            "node_modules/pkg",
+            ".git",
+            "nested/node_modules/pkg",
+            "nested/.git",
+        ] {
+            fs::create_dir_all(source.path().join(path)).unwrap();
+            fs::write(source.path().join(path).join("skip"), "skip").unwrap();
+        }
+        fs::write(source.path().join(".env"), "PASSWORD=secret").unwrap();
+        fs::create_dir_all(source.path().join("nested")).unwrap();
+        fs::write(source.path().join("nested/.env"), "included").unwrap();
+        fs::write(source.path().join("server.js"), "old").unwrap();
+        let (_, first) = import_release(source.path(), "directory", managed.path()).unwrap();
+        fs::write(source.path().join("server.js"), "new").unwrap();
+        let (_, second) = import_release(source.path(), "directory", managed.path()).unwrap();
+        let root = managed.path().join("app").join(&first);
+        assert_eq!(fs::read_to_string(root.join("server.js")).unwrap(), "old");
+        assert!(!root.join(".env").exists());
+        assert!(!root.join("nested/node_modules").exists());
+        assert!(!root.join(".git").exists());
+        assert!(root.join("nested/.env").exists());
+        let mut zip = zip::ZipWriter::new(File::create(source.path().join("input.zip")).unwrap());
+        for (name, text) in [
+            ("project/server.js", "zip"),
+            ("project/.env", "secret"),
+            ("project/node_modules/pkg/file", "skip"),
+            ("project/.git/config", "skip"),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(text.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        let (_, third) =
+            import_release(&source.path().join("input.zip"), "zip", managed.path()).unwrap();
+        let root = managed.path().join("app").join(&third);
+        assert!(!root.join(".env").exists());
+        assert!(!root.join("node_modules").exists());
+        prune_app_releases(managed.path(), &[&first, &second]).unwrap();
+        assert!(managed.path().join("app").join(first).exists());
+        assert!(root.exists());
     }
 }

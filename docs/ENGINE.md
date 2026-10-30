@@ -189,3 +189,83 @@ The no-fail-fast run executes every test target: 140 passed, 3 failed, 3 ignored
 Clippy reports existing warnings (core lib 13 / tests 14, desktop 4, engine lib 9 / tests 10), with no errors and no diagnostics in the new runtime/environment/vault modules. No broad lint cleanup was attempted. `git diff --check` passes. Workspace formatting was executed; unrelated/protected source formatting was preserved to respect file ownership. No new dependencies or lockfile changes remain. Existing documentation is preserved as an exact normalized prefix, with only Task 11 sections appended.
 
 Real publisher downloads, real Node/PHP/MySQL executables, the Visual C++ loader-failure path and full installed-app flows were not exercised. Production HTTPS/redirect enforcement is implemented; fixture HTTP tests do not certify real TLS. Final test commands set LOCALAPPDATA to an isolated workspace test path so the existing optional real-Caddy test skips its installed-binary lookup; three existing live-network tests remain ignored. Windows import tests may retain their pre-existing privilege-dependent symlink skip. No real Hostify engine was started/stopped, no live installation data was modified, and no commit, push or branch switch was performed.
+
+## Node application hosting (Task 12)
+
+Node projects use immutable `<data>/sites/<id>/app/<releaseId>` directories. Imports share static import traversal, link, duplicate, size and ZIP checks; they omit `.git` and `node_modules` at every depth and root `.env`. The root dotenv values are never copied into application releases. Inspection is passive and returns only dotenv names. Static sites retain the existing `current` layout, static-only index check for publishing, and byte-identical Caddy output (covered against a V1 literal). V1 deployment request JSON defaults its new kind field to static.
+
+Application configuration is camelCase JSON in `websites.app_config_json`; kind and Node version retain their existing columns. Relative working directories and path arguments reject traversal, drive/UNC prefixes and NUL, and canonical checks reject junction escapes. Build/start script names must exist in package.json and are individual argv entries. Only `{PORT}` is substituted. Node entry paths are canonical files inside the release at startup, including entries installed by npm.
+
+Builds belong to the engine, return a build ID immediately, persist their latest step/state in SQLite and emit `app-build`. They do not hold the operation/publishing locks during npm work. Same-site builds and conflicting site mutations are refused. Trust acknowledgment is required before code executes. npm is invoked with the pinned runtime's node.exe and npm-cli.js, never npm.cmd or a Hostify shell command. Install uses ci/install, no-audit/no-fund and ignore-scripts unless explicitly enabled. Each install/build step has a 20-minute deadline and its own kill-on-close Job Object. Cancellation and timeout terminate descendants. Real exit codes and the last 20 redacted log lines accompany failures. Interrupted builds become failed on engine restart, restoring the prior active release's build/trust markers when available. A rebuild of an existing active release first copies it to a fresh release so build scripts cannot modify its running files.
+
+App/build processes clear inherited environment, restore the existing Windows allowlist and resolved site variables, and set PATH to the runtime, the release's node_modules/.bin and System32. npm uses `<data>/cache/npm` with update notifications disabled. Install unsets NODE_ENV; builds/apps default to production. App PORT and HOST are set last. Logs rotate at 5 MiB with three backups; secret_values supplies redaction for process output and build failure details. App logs are `<id>.app.log`, build logs `<id>.build.log`, and Caddy access logs retain `<id>.log`.
+
+Every app/build process is assigned, while suspended, to the engine job and then its own nested job before resuming. Per-app jobs optionally enforce a total memory limit. Stops attempt Ctrl+C under a process-wide console lock in a blocking worker, wait up to ten seconds, then terminate the complete job if necessary. Console control dispatch is asynchronous: the engine keeps its ignore handler until dispatch/exit has settled before detaching and restoring it. Activity distinguishes graceful stops from forced termination. Crash exits terminate surviving descendants before any restart. Roles distinguish app, Caddy and connector messages/preflight. Always/onFailure/never policies and the app crash-loop limit govern restarts. Per-process health is aggregated under a lock, so healthy Caddy checks cannot overwrite an app error.
+
+The compiled-in CommonJS preload patches host-less TCP listen overloads to use 127.0.0.1, including ESM users of net/http and listen(port, callback). Explicit hosts, pipes and handles retain their meaning. NODE_OPTIONS prepends the quoted preload path, using forward slashes for Node's option parser on Windows. After each healthy start, GetExtendedTcpTable checks IPv4/IPv6 listeners owned by the app job. Non-loopback addresses produce warning activity and appear in app_status. Resource statistics are measured on request using the job's process IDs; CPU sampling runs in a blocking worker, without background statistics polling.
+
+Node startup requires matching built/trusted release markers, reallocates an occupied internal port, starts the app and waits up to 60 seconds for health below 500. It then validates a temporary Caddyfile before atomically replacing the prior file, starts that site's Caddy and requests the configured health path through Caddy with a foreign Host header. The proxy preserves marker routing, verification/security headers, logging and WebSocket upgrades, and disables response buffering with flush_interval -1. Caddy's own worker probes `/.well-known/hostify-caddy-ok`, separately from app health. Config changes can cause a brief gap for that one site; this is not zero-downtime. Stops end Caddy before gracefully stopping the app. Failed promotion restarts the previous release and records the update failure. Successful promotion prunes releases while retaining active, previous and newest. Trusted/built websites can auto-start after an engine restart; untrusted releases cannot.
+
+Ignored real-Node tests in `crates/hostify-engine/tests/node_live.rs` read HOSTIFY_LIVE_RUNTIMES (the runtime data root), copy fixtures into temporary data, and read only the installed Caddy executable. They never launch a real Hostify engine or modify the live installation. Offline fixtures use only built-in Node modules. Real DPAPI success still requires a Windows user context where CryptProtectData works. Final command results and limitations are recorded below.
+
+Task 12 shell limitation: the engine emits `app-build` to named-pipe subscribers, and the commands are registered in the permitted `src-tauri/src/lib.rs` forward/handler lists. The pre-existing shell reader in `src-tauri/src/engine.rs` whitelists only site-status, deployment-update, activity and components-progress; it therefore drops app-build (and the earlier runtime-progress) before Tauri event delivery. That file is outside this task's explicit ownership, so it was left unchanged. Desktop UI delivery of app-build is an outstanding integration change; clients can retrieve durable progress with get_build_status.
+
+
+### Task 12 validation on 2026-10-31
+
+CARGO_BUILD_JOBS remained 4. Compilation/test commands were offline. These are the actual final command summaries; full output is retained under target/task12-checks.
+
+```text
+cargo fmt --all
+cargo fmt --all exit code: 0
+
+cargo build --workspace --offline
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 32.53s
+EXIT CODE: 0
+
+cargo test --workspace --offline --no-fail-fast
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 40.44s
+test result: FAILED. 120 passed; 2 failed; 4 ignored; 0 measured; 0 filtered out; finished in 1.54s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.34s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+error: 2 targets failed:
+EXIT CODE: 101
+
+cargo clippy --workspace --all-targets --offline
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 12.18s
+EXIT CODE: 0
+
+HOSTIFY_LIVE_RUNTIMES=D:\Hostify-Desktop\target\live-runtimes cargo test -p hostify-engine --test node_live --offline -- --ignored --test-threads=1 --nocapture
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.81s
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 186.06s
+EXIT CODE: 101
+
+```
+
+Workspace totals: 157 passed, 3 failed, 8 ignored, including empty binary/doc-test targets. The real Node suite separately passed 3 scenarios and failed 1. Its passing scenarios cover npm install with lifecycle hooks ignored, build cancellation, persisted interrupted status, build/start, foreign-Host proxy requests, raw WebSocket upgrade/echo, new-PID restart, five-exit crash loop, failed-build preservation, failed-health rollback, grandchild cleanup, graceful SIGINT with engine survival, host-less loopback/LAN behavior, explicit bind warnings, ESM/404 health, trust/path refusal, three concurrent sites, and trusted auto-start after reopening isolated engine data.
+
+Failed or unverified:
+
+- `vault::tests::round_trip_and_tamper`, `env_vars::tests::secret_is_ciphertext_and_never_listed`, `environment_secrets_are_not_in_pipe_errors_or_activity`, and ignored real-Node `live_secret_environment_is_redacted` fail at user-scoped DPAPI with `The system cannot find the file specified. (os error 2)`. The real secret-injection/redaction fixture therefore remains unverified after sealing; rerun it in a Windows user context with working DPAPI. There is no plaintext fallback.
+- Desktop app-build event delivery remains incomplete because the existing shell whitelist is in the excluded src-tauri/src/engine.rs, as documented above. Engine pipe emission and durable status are implemented. No desktop UI end-to-end run was performed.
+- Four existing publisher-download/network tests remained ignored under the no-network constraint. Live Cloudflare publishing, DNS/TLS and installed-engine/reboot behavior were not exercised.
+- The 20-minute timeout, memory-limit enforcement, Never/OnFailure process policies, cancellation during release promotion, and Caddy-validation rejection/preservation were implemented but not separately exercised live.
+- Clippy exits 0 with no errors; style warnings remain, including three in the new inspection/interrupted-build code, alongside pre-existing warnings.
+
+`git diff --check` passes. Existing IPC/ENGINE documentation is preserved as an exact normalized prefix with sections appended. Workspace formatting was run; unrelated/protected source formatting was restored. No new crates, lockfile changes, commit, real engine start/stop, or live-installation changes were made. Tests copied the installed Caddy executable only into temporary fixture data. samples/ and docs/SECURITY.md were left unchanged.
+
+## Review notes on task 12 (run outside the Codex sandbox)
+
+The DPAPI failures in the section above are limited to the Codex sandbox. Outside it: 160 tests passed, plus all 4 `node_live` and 5 `node_policies_live` tests.
+
+`peakMemoryBytes` comes from Windows `PeakJobMemoryUsed`, which counts a refused allocation. A 256 MiB job refusing a 900 MiB allocation reported a peak of 970 MB while using 52 MB, so it can exceed the limit. Do not present it as memory used. `memoryBytes` is the measured figure.
+
+Not exercised: the 20-minute build timeout, cancelling during promotion, Caddy rejecting a generated configuration.

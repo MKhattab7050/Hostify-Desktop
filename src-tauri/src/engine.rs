@@ -112,7 +112,12 @@ impl EngineClient {
                 if let Some(event) = value.get("event").and_then(Value::as_str) {
                     if matches!(
                         event,
-                        "site-status" | "deployment-update" | "activity" | "components-progress"
+                        "site-status"
+                            | "deployment-update"
+                            | "activity"
+                            | "components-progress"
+                            | "runtime-progress"
+                            | "app-build"
                     ) {
                         let _ =
                             app.emit(event, value.get("payload").cloned().unwrap_or(Value::Null));
