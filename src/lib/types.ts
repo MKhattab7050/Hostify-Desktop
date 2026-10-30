@@ -6,6 +6,7 @@ export interface Site {
   id: string; name: string; sourcePath: string; localPort: number; localUrl: string;
   status: SiteStatus; statusDetail?: string; domainId?: string; publicUrl?: string; autoStart: boolean;
   fileCount: number; sizeBytes: number; createdAt: string; updatedAt: string;
+  publishState?: DeploymentState; publishDeploymentId?: string; publishHostname?: string;
 }
 export interface Domain {
   id: string; hostname: string; zoneName: string; zoneId: string; siteId?: string;
@@ -13,9 +14,18 @@ export interface Domain {
 }
 export interface CloudflareAccount { connected: boolean; accountName?: string; accountId?: string; tokenHint?: string }
 export interface DeploymentStep { key: string; label: string; state: "pending" | "running" | "done" | "failed" | "skipped"; detail?: string }
+export type DeploymentState = "validating" | "starting_local" | "provisioning_tunnel" | "configuring_dns" | "starting_connector"
+  | "waiting_dns" | "waiting_tls" | "verifying_public" | "published" | "failed" | "recovery_required" | "rolled_back";
+export type VerifyClass = "zone_not_active" | "dns_record_missing" | "dns_not_visible" | "tls_pending" | "connector_down"
+  | "origin_unreachable" | "routing_mismatch" | "network_error" | "cloudflare_api";
+export interface VerifyCheck { key: "zone" | "dns_record" | "connector" | "dns_public" | "tls" | "http" | "content"; label: string; state: "pending" | "passed" | "failed"; detail?: string }
+export interface Verification {
+  attempt: number; nextRetryAt?: string; deadlineAt: string; errorClass?: VerifyClass; message?: string;
+  checks: VerifyCheck[]; lastCheckedAt?: string; visibleFromThisPc?: boolean; nameservers?: string[];
+}
 export interface Deployment {
-  id: string; siteId: string; state: "running" | "live" | "failed" | "rolled_back";
-  steps: DeploymentStep[]; error?: string; startedAt: string; finishedAt?: string;
+  id: string; siteId: string; hostname?: string; state: DeploymentState;
+  steps: DeploymentStep[]; verification?: Verification; error?: string; startedAt: string; finishedAt?: string;
 }
 export interface DnsPlan { hostname: string; action: "create" | "update_own" | "conflict"; existing?: { type: string; content: string }; message: string }
 export interface SystemStats {

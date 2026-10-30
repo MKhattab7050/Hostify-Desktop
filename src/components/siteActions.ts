@@ -5,7 +5,7 @@ import type { Site } from "../lib/types";
 
 /** Start/stop/restart/open with per-site busy tracking and honest error toasts. */
 export function useSiteActions() {
-  const { toast, refresh } = useStore();
+  const toast = useStore((s) => s.toast); const refresh = useStore((s) => s.refresh);
   const [busy, setBusy] = useState<Record<string, string | undefined>>({});
 
   async function run(site: Site, key: string, fn: () => Promise<unknown>, okText?: string) {

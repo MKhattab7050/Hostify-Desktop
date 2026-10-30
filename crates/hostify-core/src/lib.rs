@@ -8,3 +8,5 @@ pub mod secrets;
 pub mod cloudflare;
 pub mod components;
 pub mod deploy;
+
+pub mod verify;

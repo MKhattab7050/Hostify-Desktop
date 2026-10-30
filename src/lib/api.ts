@@ -58,6 +58,8 @@ export const api = {
     call<Deployment>("publish_site", { siteId, hostname, consentDns }),
   getDeployment: (id: string) => call<Deployment>("get_deployment", { id }),
   listDeployments: (siteId: string) => call<Deployment[]>("list_deployments", { siteId }),
+  retryVerification: (id: string) => call<Deployment>("retry_verification", { id }),
+  cancelDeployment: (id: string) => call<Deployment>("cancel_deployment", { id }),
   unpublishSite: (siteId: string) => call<void>("unpublish_site", { siteId }),
   listDomains: () => call<Domain[]>("list_domains"),
   tunnelHealth: () => call<TunnelHealth[]>("tunnel_health"),

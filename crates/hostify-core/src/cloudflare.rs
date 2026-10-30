@@ -39,7 +39,7 @@ pub struct CloudflareClient { base: String, token: String, client: reqwest::Clie
 pub struct Account { pub id: String, pub name: String }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all="camelCase")]
-pub struct Zone { pub id: String, pub name: String }
+pub struct Zone { pub id: String, pub name: String, #[serde(default)] pub status:String, #[serde(default,rename="name_servers")] pub name_servers:Vec<String> }
 #[derive(Clone)]
 pub struct Tunnel { pub id: String, pub token: String, pub created: bool }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +48,11 @@ pub struct ExistingRecord { #[serde(rename="type")] pub kind: String, pub conten
 #[serde(rename_all="camelCase")]
 pub struct DnsPlan { pub hostname: String, pub action: String, #[serde(skip_serializing_if="Option::is_none")] pub existing: Option<ExistingRecord>, pub message: String }
 impl CloudflareClient {
+    pub async fn zone(&self,id:&str)->Result<Zone,CfError> {
+        let v=self.request(reqwest::Method::GET,&format!("/zones/{id}"),None).await?;
+        serde_json::from_value(v["result"].clone()).map_err(|e|CfError::Unexpected(e.to_string()))
+    }
+
     /// Split operations so deploy can journal the remote ID before fetching credentials.
     pub async fn find_tunnel(&self, account: &str, name: &str) -> Result<Option<String>, CfError> {
         let items = self.pages(&format!("/accounts/{account}/cfd_tunnel")).await?;

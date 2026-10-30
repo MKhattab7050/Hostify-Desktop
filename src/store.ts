@@ -40,6 +40,9 @@ interface State {
 }
 
 let toastId = 1;
+let booted = false;
+
+export const tunnelFor = (tunnels: TunnelHealth[], siteId: string) => tunnels.find((t) => t.name === `hostify-${siteId}`);
 
 export const useStore = create<State>((set, get) => ({
   page: "dashboard",
@@ -55,7 +58,10 @@ export const useStore = create<State>((set, get) => ({
     setTimeout(() => get().dismissToast(id), kind === "error" ? 9000 : 4500);
   },
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
-  setDeployment: (d) => set((s) => ({ deployments: { ...s.deployments, [d.id]: d } })),
+  setDeployment: (d) => set((s) => ({
+    deployments: { ...s.deployments, [d.id]: d },
+    sites: s.sites.map((x) => (x.id === d.siteId ? { ...x, publishState: d.state, publishDeploymentId: d.id, publishHostname: d.hostname ?? x.publishHostname } : x)),
+  })),
   installComponents: async (names) => { set({ engine: await api.ensureComponents(names), engineError: undefined }); },
   // Status is detected live by the engine, so a re-read is all it takes to notice installs, deletions or a different engine.
   refreshEngine: async () => {
@@ -83,6 +89,8 @@ export const useStore = create<State>((set, get) => ({
   },
 
   boot: async () => {
+    if (booted) return; // React re-runs mount effects in development; timers and listeners must exist once.
+    booted = true;
     try {
       const [engine, settings] = await Promise.all([api.engineStatus(), api.getSettings()]);
       set({ engine, settings, engineError: undefined });
@@ -94,12 +102,20 @@ export const useStore = create<State>((set, get) => ({
 
     await listen<Site>("site-status", (site) =>
       set((s) => ({ sites: s.sites.some((x) => x.id === site.id) ? s.sites.map((x) => (x.id === site.id ? site : x)) : [site, ...s.sites] })));
-    await listen<Deployment>("deployment-update", (d) => get().setDeployment(d));
+    await listen<Deployment>("deployment-update", (d) => {
+      const before = get().deployments[d.id]?.state;
+      get().setDeployment(d);
+      if (before !== d.state && (d.state === "published" || d.state === "recovery_required" || d.state === "failed")) void get().refresh();
+    });
     await listen<ActivityEntry>("activity", (a) => set((s) => ({ activity: [a, ...s.activity].slice(0, 200) })));
 
-    setInterval(() => void get().refreshStats(), 3000);
-    setInterval(() => void get().refreshEngine(), 5000);
-    window.addEventListener("focus", () => void get().refreshEngine());
-    setInterval(() => void get().refresh(), 10000);
+    // A hidden window polls nothing, and only the dashboard shows live machine usage.
+    const visible = () => !document.hidden;
+    setInterval(() => { if (visible() && get().page === "dashboard") void get().refreshStats(); }, 3000);
+    setInterval(() => { if (visible()) void get().refreshEngine(); }, 5000);
+    setInterval(() => { if (visible()) void get().refresh(); }, 10000);
+    const wake = () => { if (visible()) { void get().refreshEngine(); void get().refresh(); } };
+    window.addEventListener("focus", wake);
+    document.addEventListener("visibilitychange", wake);
   },
 }));

@@ -32,6 +32,7 @@ forward! {
     cf_plan_dns(site_id: String => "siteId", hostname: String => "hostname");
     publish_site(site_id: String => "siteId", hostname: String => "hostname", consent_dns: bool => "consentDns");
     get_deployment(id: String => "id"); list_deployments(site_id: String => "siteId");
+    retry_verification(id: String => "id"); cancel_deployment(id: String => "id");
     unpublish_site(site_id: String => "siteId"); list_domains(); tunnel_health();
     list_activity(site_id: Option<String> => "siteId", limit: u32 => "limit");
     site_logs(site_id: String => "siteId", lines: u32 => "lines");
@@ -94,7 +95,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![engine_status, ensure_components, system_stats, list_sites, get_site,
             validate_source, add_site, update_site_files, start_site, stop_site, restart_site, remove_site, preview_url,
             cf_connect, cf_status, cf_disconnect, cf_check_domain, cf_plan_dns, publish_site, get_deployment,
-            list_deployments, unpublish_site, list_domains, tunnel_health, list_activity, site_logs, get_settings, save_settings, pick_path])
+            list_deployments, retry_verification, cancel_deployment, unpublish_site, list_domains, tunnel_health, list_activity, site_logs, get_settings, save_settings, pick_path])
         .run(tauri::generate_context!());
     if let Err(error) = result { eprintln!("Hostify could not start: {error}"); }
 }
