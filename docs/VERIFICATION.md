@@ -6,7 +6,7 @@ Run on 2026-10-30 on one Windows 11 Pro machine that already had Hostify install
 
 **Public HTTPS publishing has worked on a real domain.** `niga.online` reached **Published** through the new verifier at 20:43:43 UTC, and a separate `curl` request received the full page over validated TLS. That request came from the publishing PC. A check from another network and a real Windows restart are still outstanding.
 
-**The site is not live now.** The Unpublish flow removed its DNS record at 20:46:01 UTC, about two minutes after the engine kill test. Unpublish is the only code path that does this, and it needs a confirmed click in the app. The results below describe the period it was published. The final 0.2.0 build was installed after that, so it has not itself been tested with a live publication.
+It has been published more than once. The Unpublish flow removed the first publication's DNS record at 20:46:01 UTC, and a new publish started at 20:58:59 UTC reached **Published** on a later build. Unpublish is the only code path that deletes a published record, and it needs a confirmed click in the app.
 
 The first real publish found a bug no earlier test could: published sites were blank, because Caddy answered 200 with an empty body to any hostname other than `127.0.0.1`. The marker check refused to call that published. The real Caddy test now sends a public hostname.
 
