@@ -33,6 +33,7 @@ interface State {
   refresh: () => Promise<void>;
   refreshStats: () => Promise<void>;
   setDeployment: (d: Deployment) => void;
+  installComponents: () => Promise<void>;
   saveSettings: (s: AppSettings) => Promise<void>;
   boot: () => Promise<void>;
 }
@@ -54,6 +55,7 @@ export const useStore = create<State>((set, get) => ({
   },
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
   setDeployment: (d) => set((s) => ({ deployments: { ...s.deployments, [d.id]: d } })),
+  installComponents: async () => { set({ engine: await api.ensureComponents() }); },
 
   refresh: async () => {
     const [sites, domains, cf, tunnels, activity] = await Promise.allSettled([

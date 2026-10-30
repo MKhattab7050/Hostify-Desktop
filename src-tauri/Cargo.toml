@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "hostify-desktop"
 version = "0.1.0"
 description = "Hostify Desktop - host static websites from your PC"

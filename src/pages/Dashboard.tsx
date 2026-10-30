@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import { ExternalLink, Play, Plus, RotateCw, Square } from "lucide-react";
+import { listen } from "../lib/api";
 import { useStore } from "../store";
 import { Button, Card, Empty, IconButton, Meter, StatusPill, fmtBytes, fmtTime, cx } from "../components/ui";
 import { SignalPath } from "../components/SignalPath";
@@ -25,11 +27,7 @@ export function Dashboard() {
         <Button variant="primary" onClick={() => openWizard()}><Plus size={16} aria-hidden />Add website</Button>
       </header>
 
-      {engine && !engine.componentsReady && (
-        <Card className="flex items-center justify-between gap-4 border-lantern p-4">
-          <p><strong>Hosting components are not installed yet.</strong> Hostify downloads and verifies its web server and tunnel connector before the first publish.</p>
-        </Card>
-      )}
+      {engine && !engine.componentsReady && <ComponentsBanner />}
 
       {sites.length === 0 ? (
         <Card>
@@ -96,5 +94,30 @@ export function Dashboard() {
         </Card>
       </div>
     </div>
+  );
+}
+
+function ComponentsBanner() {
+  const { installComponents, toast } = useStore();
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<{ name: string; percent: number }>();
+  useEffect(() => {
+    let off: (() => void) | undefined; let dead = false;
+    listen<{ name: string; percent: number }>("components-progress", setProgress).then((u) => (dead ? u() : (off = u)));
+    return () => { dead = true; off?.(); };
+  }, []);
+  async function install() {
+    setBusy(true);
+    try { await installComponents(); toast("ok", "Web server and tunnel connector installed"); }
+    catch (e) { toast("error", (e as Error).message); }
+    finally { setBusy(false); setProgress(undefined); }
+  }
+  return (
+    <Card className="flex items-center justify-between gap-4 border-lantern p-4">
+      <p><strong>Two hosting components are missing.</strong> Hostify downloads Caddy (web server) and cloudflared (tunnel) from their official releases and checks each against the publisher's checksum.</p>
+      <Button variant="primary" busy={busy} onClick={install} className="shrink-0">
+        {busy ? `Installing${progress ? ` ${progress.name} ${progress.percent}%` : "…"}` : "Install components"}
+      </Button>
+    </Card>
   );
 }

@@ -170,7 +170,10 @@ function PublishStep({ site, hostname, onDone, onBack }: { site: Site; hostname:
 
   async function go() {
     setStarting(true); setErr(undefined);
-    try { const d = await api.publishSite(site.id, host, consent); setDeployment(d); setDepId(d.id); }
+    try {
+      if (!useStore.getState().engine?.componentsReady) await useStore.getState().installComponents();
+      const d = await api.publishSite(site.id, host, consent); setDeployment(d); setDepId(d.id);
+    }
     catch (e) { setErr((e as Error).message); } finally { setStarting(false); }
   }
 
