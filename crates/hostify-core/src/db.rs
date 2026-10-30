@@ -3,7 +3,7 @@ use rusqlite::{Connection, Result};
 /// Apply migrations in one transaction. A newer schema is never silently downgraded.
 pub fn migrate(connection: &mut Connection) -> Result<()> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version > 2 {
+    if version > 3 {
         return Err(rusqlite::Error::InvalidQuery);
     }
     if version == 0 {
@@ -20,6 +20,18 @@ PRAGMA user_version = 1;")?;
     if version < 2 {
         let tx = connection.transaction()?;
         tx.execute_batch("UPDATE deployments SET state='published',snapshot_json=json_set(snapshot_json,'$.state','published') WHERE state='live'; PRAGMA user_version=2;")?;
+        tx.commit()?;
+    }
+    if version < 3 {
+        // Older engines wrote internal wording to the activity feed and a row for every routine start.
+        let tx = connection.transaction()?;
+        tx.execute_batch("DELETE FROM activity_logs WHERE message='Child health check passed';
+UPDATE activity_logs SET message='The website server isn''t responding. Hostify keeps checking.' WHERE message='Child health check failed';
+UPDATE activity_logs SET message='Website started' WHERE message='start_site';
+UPDATE activity_logs SET message='Website stopped' WHERE message='stop_site';
+UPDATE activity_logs SET message='Website restarted' WHERE message='restart_site';
+UPDATE activity_logs SET message='Hostify engine started' WHERE message LIKE 'Hostify engine started (data:%';
+PRAGMA user_version=3;")?;
         tx.commit()?;
     }
     connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -39,6 +51,43 @@ mod tests {
 
 #[cfg(test)]
 mod legacy_migration {
+    #[test]
+    fn old_activity_wording_is_rewritten_and_routine_rows_removed() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        super::migrate(&mut db).unwrap();
+        for message in [
+            "Child health check passed",
+            "Child health check failed",
+            "start_site",
+            "Hostify engine started (data: C:\\x)",
+            "Website files imported",
+        ] {
+            db.execute(
+                "INSERT INTO activity_logs(ts,level,message) VALUES('now','info',?1)",
+                [message],
+            )
+            .unwrap();
+        }
+        db.pragma_update(None, "user_version", 2).unwrap();
+        super::migrate(&mut db).unwrap();
+        let mut query = db
+            .prepare("SELECT message FROM activity_logs ORDER BY id")
+            .unwrap();
+        let rows: Vec<String> = query
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "The website server isn't responding. Hostify keeps checking.",
+                "Website started",
+                "Hostify engine started",
+                "Website files imported"
+            ]
+        );
+    }
     #[test]
     fn live_rows_and_snapshots_become_published() {
         let mut db = rusqlite::Connection::open_in_memory().unwrap();

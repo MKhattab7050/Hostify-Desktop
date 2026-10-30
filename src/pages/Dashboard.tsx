@@ -89,6 +89,9 @@ export function Dashboard() {
               <Meter label="Processor" value={stats.cpuPercent} detail={`${stats.cpuPercent.toFixed(0)}% in use`} />
               <Meter label="Memory" value={(stats.ramUsedBytes / stats.ramTotalBytes) * 100} detail={`${fmtBytes(stats.ramUsedBytes)} of ${fmtBytes(stats.ramTotalBytes)}`} />
               <Meter label="Disk" value={(stats.diskUsedBytes / stats.diskTotalBytes) * 100} detail={`${fmtBytes(stats.diskUsedBytes)} of ${fmtBytes(stats.diskTotalBytes)}`} />
+              {stats.diskTotalBytes > 0 && stats.diskTotalBytes - stats.diskUsedBytes < 5e9 && (
+                <p role="status" className="text-[13px] text-buoy">Only {fmtBytes(stats.diskTotalBytes - stats.diskUsedBytes)} free on the disk Hostify uses. Adding or updating websites can fail until you free some space.</p>
+              )}
               <p className="text-[13px] text-ink3">Hostify is using {fmtBytes(stats.hostifyDataBytes)} of storage. Visitor traffic isn't measured in this version.</p>
             </div>
           ) : <div className="grid gap-3.5" role="status" aria-label="Reading system usage"><Skeleton className="h-7" /><Skeleton className="h-7" /><Skeleton className="h-7" /></div>}

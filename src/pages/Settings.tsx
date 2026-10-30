@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { Clipboard } from "lucide-react";
 import { useStore } from "../store";
-import { Button, Card, Field, PageHeader, Pill, Switch, cx, fmtBytes } from "../components/ui";
+import { Button, Card, Field, PageHeader, Pill, Switch, cx, fmtBytes, fmtVersion } from "../components/ui";
 import { CloudflareCard } from "./Domains";
 import { redact } from "../lib/publish";
 import type { AppSettings, ComponentName, ComponentStatus } from "../lib/types";
@@ -22,7 +22,7 @@ function ComponentRow({ name, label, status }: { name: ComponentName; label: str
   return (
     <div className="flex items-center justify-between gap-4 py-3">
       <div className="min-w-0"><div className="flex items-center gap-2 font-medium">{label}<Pill tone={ready ? "ok" : "bad"}>{ready ? "Ready" : status?.installed ? "Can't run" : "Not installed"}</Pill></div>
-        <div className="selectable break-all text-[13px] text-ink2">{ready ? `Version ${status?.version ?? "unknown"}` : status?.error ?? "Downloaded from the official release and checked against a pinned checksum."}</div></div>
+        <div className="selectable break-all text-[13px] text-ink2">{ready ? `Version ${fmtVersion(status?.version)}` : status?.error ?? "Downloaded from the official release and checked against a pinned checksum."}</div></div>
       {!ready && <Button size="sm" busy={busy} onClick={async () => { setBusy(true); try { await install([name]); toast("ok", `${label} installed`); } catch (e) { toast("error", (e as Error).message); } finally { setBusy(false); } }}>Install {label}</Button>}
     </div>
   );

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Check, Loader2, X } from "lucide-react";
 import { useStore } from "../store";
 import { listen } from "../lib/api";
-import { Button, cx, fmtBytes } from "./ui";
+import { Button, cx, fmtBytes, fmtVersion } from "./ui";
 import { Logo } from "./Sidebar";
 
 type Row = { label: string; detail: string; state: "ok" | "bad" | "wait" };
@@ -33,8 +33,8 @@ export function Onboarding({ onFinish }: { onFinish: () => void }) {
   const rows: Row[] = [
     { label: "Hosting engine", detail: engineError ?? (engine?.running ? "Running in the background on this PC." : "Starting"), state: engineError ? "bad" : engine?.running ? "ok" : "wait" },
     { label: "Disk space", detail: free === undefined ? "Checking" : `${fmtBytes(free)} free. Hostify needs about 150 MB plus your websites.`, state: free === undefined ? "wait" : free < 200e6 ? "bad" : "ok" },
-    { label: "Web server (Caddy)", detail: engine?.caddy?.ready ? `Ready, version ${engine.caddy.version ?? "unknown"}.` : engine?.caddy?.error ?? "Not installed yet. It serves your websites on this PC.", state: engine?.caddy?.ready ? "ok" : "bad" },
-    { label: "Tunnel connector (cloudflared)", detail: engine?.cloudflared?.ready ? `Ready, version ${engine.cloudflared.version ?? "unknown"}.` : engine?.cloudflared?.error ?? "Not installed yet. It connects your websites to your domain.", state: engine?.cloudflared?.ready ? "ok" : "bad" },
+    { label: "Web server (Caddy)", detail: engine?.caddy?.ready ? `Ready, version ${fmtVersion(engine.caddy.version)}.` : engine?.caddy?.error ?? "Not installed yet. It serves your websites on this PC.", state: engine?.caddy?.ready ? "ok" : "bad" },
+    { label: "Tunnel connector (cloudflared)", detail: engine?.cloudflared?.ready ? `Ready, version ${fmtVersion(engine.cloudflared.version)}.` : engine?.cloudflared?.error ?? "Not installed yet. It connects your websites to your domain.", state: engine?.cloudflared?.ready ? "ok" : "bad" },
   ];
   const ready = !!engine?.componentsReady;
 

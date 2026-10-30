@@ -697,7 +697,15 @@ impl Engine {
                         }
                     }
                 }
-                s.activity("info", Some(id), method)?;
+                s.activity(
+                    "info",
+                    Some(id),
+                    match method {
+                        "start_site" => "Website started",
+                        "stop_site" => "Website stopped",
+                        _ => "Website restarted",
+                    },
+                )?;
                 Ok(json!(s.site(id)?))
             }
             "remove_site" => {

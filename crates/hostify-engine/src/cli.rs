@@ -131,11 +131,7 @@ pub async fn run(
     let store = crate::state::Store::open(root)?;
     let supervisor = crate::supervisor::Supervisor::new(store.clone())?;
     let engine = crate::state::Engine::production(store.clone(), supervisor.clone(), service);
-    store.activity(
-        "info",
-        None,
-        &format!("Hostify engine started (data: {})", store.root.display()),
-    )?;
+    store.activity("info", None, "Hostify engine started")?;
     let result = serve_engine(crate::windows::pipe_name()?, engine, shutdown).await;
     supervisor.shutdown().await;
     store.activity("info", None, "Hostify engine stopped")?;

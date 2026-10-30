@@ -10,6 +10,9 @@ export function fmtBytes(n: number) {
   const u = ["B", "KB", "MB", "GB", "TB"]; const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
   return `${(n / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
 }
+export const fmtFiles = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
+// Components report extra build text ("v2.11.7 h1:...", "cloudflared version 2026.10.6 (built ...)").
+export const fmtVersion = (v?: string) => v?.match(/\d+\.\d+(\.\d+)?/)?.[0] ?? v ?? "unknown";
 export function fmtTime(iso: string) {
   const d = new Date(iso); if (isNaN(+d)) return "";
   return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });

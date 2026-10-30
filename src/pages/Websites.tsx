@@ -3,7 +3,7 @@ import { ExternalLink, FolderOpen, Play, Plus, RefreshCw, RotateCw, Square, Tras
 import { tunnelFor, useStore } from "../store";
 import { api } from "../lib/api";
 import { holdsResources, isActive, publishPill } from "../lib/publish";
-import { Button, Card, Confirm, Disclosure, Empty, Modal, PageHeader, Pill, Skeleton, StatusPill, fmtBytes, fmtTime } from "../components/ui";
+import { Button, Card, Confirm, Disclosure, Empty, Modal, PageHeader, Pill, Skeleton, StatusPill, fmtBytes, fmtFiles, fmtTime } from "../components/ui";
 import { SignalPath } from "../components/SignalPath";
 import { PublishProgress } from "../components/PublishProgress";
 import { useSiteActions } from "../components/siteActions";
@@ -93,7 +93,7 @@ function Detail({ site }: { site: Site }) {
         <PublishProgress deployment={deployment} onRepublish={() => openWizard(site.id)} /></Card>}
 
       <Card className="grid gap-px overflow-hidden bg-line p-0 md:grid-cols-[1fr_1.5fr_1fr]">
-        {[["Local address", site.localUrl], ["Public address", site.publicUrl ?? site.publishHostname ?? "Not published"], ["Files", `${site.fileCount} files, ${fmtBytes(site.sizeBytes)}`]].map(([k, v]) => (
+        {[["Local address", site.localUrl], ["Public address", site.publicUrl ?? site.publishHostname ?? "Not published"], ["Files", `${fmtFiles(site.fileCount)}, ${fmtBytes(site.sizeBytes)}`]].map(([k, v]) => (
           <div key={k} className="bg-panel p-3.5"><div className="text-[13px] text-ink3">{k}</div><div className="selectable mt-0.5 break-all font-medium">{v}</div></div>
         ))}
       </Card>

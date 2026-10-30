@@ -3,7 +3,7 @@ import { AlertTriangle, Check, CheckCircle2, ExternalLink, FileArchive, FolderOp
 import { useStore } from "../store";
 import { api, isTauri, onFileDrop } from "../lib/api";
 import { isActive, holdsResources } from "../lib/publish";
-import { Button, Field, Modal, cx, fmtBytes } from "./ui";
+import { Button, Field, Modal, cx, fmtBytes, fmtFiles } from "./ui";
 import { PublishProgress } from "./PublishProgress";
 import { ConnectCloudflare } from "../pages/Domains";
 import type { DnsPlan, DomainCheck, Site, SourceKind, SourceReport } from "../lib/types";
@@ -83,7 +83,7 @@ function AddStep({ onAdded }: { onAdded: (s: Site) => void }) {
       {busy && !rep && <p className="flex items-center gap-2 text-ink2" role="status"><Loader2 size={15} className="spin" aria-hidden />Checking files</p>}
       {rep && (
         <div className={cx("rise rounded-card border p-3.5", rep.ok ? "border-line" : "border-buoy bg-buoysoft")} role={rep.ok ? "status" : "alert"}>
-          {rep.ok ? <p className="flex items-center gap-2 font-medium"><CheckCircle2 size={16} className="text-kelp" aria-hidden />{rep.fileCount} files, {fmtBytes(rep.sizeBytes)}{rep.hasIndex ? "" : ". No index.html found"}</p>
+          {rep.ok ? <p className="flex items-center gap-2 font-medium"><CheckCircle2 size={16} className="text-kelp" aria-hidden />{fmtFiles(rep.fileCount)}, {fmtBytes(rep.sizeBytes)}{rep.hasIndex ? "" : ". No index.html found"}</p>
             : <p className="font-medium text-buoy">These files can't be hosted</p>}
           {[...rep.errors, ...rep.warnings].map((m, i) => (
             <p key={i} className={cx("mt-1.5 flex gap-2", i < rep.errors.length ? "text-buoy" : "text-lantern")}><AlertTriangle size={15} className="mt-0.5 shrink-0" aria-hidden />{m}</p>))}

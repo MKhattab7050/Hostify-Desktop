@@ -131,6 +131,16 @@ struct Spec {
     port: u16,
     path: &'static str,
 }
+impl Spec {
+    /// What people call this process; `key` holds internal ids and never reaches the activity feed.
+    fn label(&self) -> &'static str {
+        if self.site.is_some() {
+            "The website server"
+        } else {
+            "The Cloudflare connector"
+        }
+    }
+}
 struct Worker {
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
@@ -284,8 +294,8 @@ impl Supervisor {
                 hostify_core::components::CADDY_UNAVAILABLE.into()
             } else {
                 format!(
-                    "Could not start {}: {e}. Ensure components are installed.",
-                    spec.key
+                    "{} could not start: {e}. Check Settings > Components.",
+                    spec.label()
                 )
             }
         })?;
@@ -311,6 +321,8 @@ impl Supervisor {
                         Ok(None) => {
                             let ok = http_ok(spec.port, spec.path).await;
                             if healthy != Some(ok) {
+                                // A first pass is the normal start, so only a change of health is news.
+                                let recovered = healthy == Some(false);
                                 healthy = Some(ok);
                                 if let Some(id) = &spec.site {
                                     let _ = store.status(
@@ -319,19 +331,29 @@ impl Supervisor {
                                         if ok {
                                             None
                                         } else {
-                                            Some("Local HTTP health check failed".into())
+                                            Some(format!(
+                                                "{} isn't responding. Hostify keeps checking.",
+                                                spec.label()
+                                            ))
                                         },
                                     );
                                 }
-                                let _ = store.activity(
-                                    if ok { "info" } else { "warn" },
-                                    spec.site.as_deref(),
-                                    if ok {
-                                        "Child health check passed"
-                                    } else {
-                                        "Child health check failed"
-                                    },
-                                );
+                                if !ok {
+                                    let _ = store.activity(
+                                        "warn",
+                                        spec.site.as_deref(),
+                                        &format!(
+                                            "{} isn't responding. Hostify keeps checking.",
+                                            spec.label()
+                                        ),
+                                    );
+                                } else if recovered {
+                                    let _ = store.activity(
+                                        "info",
+                                        spec.site.as_deref(),
+                                        &format!("{} is responding again", spec.label()),
+                                    );
+                                }
                             }
                             if started.elapsed() > Duration::from_secs(60) && ok {
                                 failures = 0
@@ -349,7 +371,8 @@ impl Supervisor {
                                     id,
                                     "error",
                                     Some(format!(
-                                        "Server exited; retrying in {} seconds",
+                                        "{} stopped unexpectedly. Restarting in {} seconds.",
+                                        spec.label(),
                                         restart_delay(failures).as_secs()
                                     )),
                                 );
@@ -358,8 +381,8 @@ impl Supervisor {
                                 "warn",
                                 spec.site.as_deref(),
                                 &format!(
-                                    "{} exited; restart in {} seconds",
-                                    spec.key,
+                                    "{} stopped unexpectedly. Restarting in {} seconds.",
+                                    spec.label(),
                                     restart_delay(failures).as_secs()
                                 ),
                             );
@@ -411,7 +434,7 @@ impl Supervisor {
                         let _ = store.activity(
                             "info",
                             spec.site.as_deref(),
-                            &format!("{} restarted", spec.key),
+                            &format!("{} restarted", spec.label()),
                         );
                     }
                     Err(e) => {
@@ -421,7 +444,7 @@ impl Supervisor {
                         {
                             hostify_core::components::CADDY_UNAVAILABLE
                         } else {
-                            "Child restart failed; retry scheduled"
+                            "Hostify could not restart this process and will try again"
                         };
                         if let Some(id) = &spec.site {
                             let _ = store.status(id, "error", Some(message.into()));
