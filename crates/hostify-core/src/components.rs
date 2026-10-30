@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use std::{io::{Cursor, Read}, path::{Path, PathBuf}, sync::Arc};
 use thiserror::Error;
 
@@ -24,12 +24,13 @@ impl Components {
         let release: serde_json::Value=serde_json::from_slice(&release).map_err(|e| ComponentError::Download(e.to_string()))?;
         let version=release["tag_name"].as_str().ok_or_else(|| ComponentError::Download("Missing release version".into()))?;
         let asset=if name=="caddy" { format!("caddy_{}_windows_amd64.zip",version.trim_start_matches('v')) } else { "cloudflared-windows-amd64.exe".into() };
-        let checks=if name=="caddy" { format!("caddy_{}_checksums.txt",version.trim_start_matches('v')) } else { format!("{asset}.sha256") };
         let assets=release["assets"].as_array().ok_or_else(|| ComponentError::Download("Missing release assets".into()))?;
         let get_url=|n: &str| assets.iter().find(|a| a["name"].as_str()==Some(n)).and_then(|a| a["browser_download_url"].as_str()).map(str::to_owned).ok_or_else(|| ComponentError::Checksum(n.into()));
-        let checksum=self.http.get(&get_url(&checks)?).await?; let checksum=std::str::from_utf8(&checksum).map_err(|_| ComponentError::Checksum(asset.clone()))?;
-        let expected=checksum.lines().find_map(|line| { let mut parts=line.split_whitespace(); let hash=parts.next()?; let file=parts.next(); if (file.is_some_and(|f| f.trim_start_matches('*')==asset) || (name=="cloudflared" && file.is_none())) && hash.len()==64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) { Some(hash.to_ascii_lowercase()) } else { None } }).ok_or_else(|| ComponentError::Checksum(asset.clone()))?;
-        progress(name,20); let bytes=self.http.get(&get_url(&asset)?).await?; if hex::encode(Sha256::digest(&bytes))!=expected { return Err(ComponentError::Checksum(asset)); } progress(name,80);
+        // Publisher-provided checksums only. Caddy: checksums.txt (SHA-512, `hash  file`). cloudflared: SHA256 list in the release notes (`file: hash`).
+        let listing=if name=="caddy" { let bytes=self.http.get(&get_url(&format!("caddy_{}_checksums.txt",version.trim_start_matches('v')))?).await?; String::from_utf8(bytes).map_err(|_| ComponentError::Checksum(asset.clone()))? } else { release["body"].as_str().unwrap_or("").to_owned() };
+        let from_notes=name!="caddy";
+        let expected=listing.lines().find_map(|line| { let line=line.trim(); let (file,hash)=if from_notes { let (f,h)=line.split_once(':')?; (f.trim(),h.trim()) } else { let mut p=line.split_whitespace(); let h=p.next()?; let f=p.next()?; (f.trim_start_matches('*'),h) }; if file==asset && (hash.len()==64 || hash.len()==128) && hash.bytes().all(|b| b.is_ascii_hexdigit()) { Some(hash.to_ascii_lowercase()) } else { None } }).ok_or_else(|| ComponentError::Checksum(asset.clone()))?;
+        progress(name,20); let bytes=self.http.get(&get_url(&asset)?).await?; let actual=if expected.len()==128 { hex::encode(Sha512::digest(&bytes)) } else { hex::encode(Sha256::digest(&bytes)) }; if actual!=expected { return Err(ComponentError::Checksum(asset)); } progress(name,80);
         let executable=if name=="caddy" { let mut archive=zip::ZipArchive::new(Cursor::new(bytes))?; let mut file=archive.by_name("caddy.exe")?; let mut buf=Vec::new(); file.read_to_end(&mut buf)?; buf } else { bytes };
         std::fs::create_dir_all(&self.bin)?; let tmp=self.bin.join(format!(".{name}-{}.tmp",uuid::Uuid::new_v4())); std::fs::write(&tmp,executable)?;
         let target=self.bin.join(format!("{name}.exe")); if let Err(e)=replace(&tmp,&target) { let _=std::fs::remove_file(&tmp); return Err(e.into()); } progress(name,100); Ok(version.to_owned())
@@ -43,8 +44,13 @@ fn replace(tmp: &Path, target: &Path) -> std::io::Result<()> { std::fs::rename(t
  #[async_trait] impl Http for MockHttp { async fn get(&self,url:&str)->Result<Vec<u8>,ComponentError> { self.0.get(url).cloned().ok_or_else(||ComponentError::Download("missing mock".into())) } }
  #[tokio::test] async fn refuses_bad_checksum_without_installing() {
   let dir=tempfile::tempdir().expect("dir"); let mut m=HashMap::new();
-  m.insert("mock/repos/cloudflare/cloudflared/releases/latest".into(),br#"{"tag_name":"v1","assets":[{"name":"cloudflared-windows-amd64.exe","browser_download_url":"exe"},{"name":"cloudflared-windows-amd64.exe.sha256","browser_download_url":"sha"}]}"#.to_vec());
-  m.insert("sha".into(),format!("{}", "0".repeat(64)).into_bytes()); m.insert("exe".into(),b"wrong".to_vec());
+  let body = format!("### SHA256 Checksums:
+```
+cloudflared-windows-amd64.exe: {}
+```", "0".repeat(64));
+  let release = serde_json::json!({"tag_name":"v1","assets":[{"name":"cloudflared-windows-amd64.exe","browser_download_url":"exe"}],"body":body});
+  m.insert("mock/repos/cloudflare/cloudflared/releases/latest".into(), release.to_string().into_bytes());
+  m.insert("exe".into(),b"wrong".to_vec());
   let c=Components{http:Arc::new(MockHttp(m)),bin:dir.path().into(),github_api:"mock".into()}; assert!(matches!(c.install("cloudflared",|_,_|{}).await,Err(ComponentError::Checksum(_)))); assert!(!dir.path().join("cloudflared.exe").exists());
  }
 }
