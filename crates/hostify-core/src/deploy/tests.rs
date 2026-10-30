@@ -6,7 +6,7 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 #[derive(Default)]
 struct Remote {
     tunnels: Vec<Value>, records: Vec<Value>, config: Value,
-    writes: Vec<String>, delayed_create:Option<&'static str>, add_concurrent: bool, add_after_restore:bool, fail: Option<&'static str>,
+    config_reads_fail:bool, writes: Vec<String>, delayed_create:Option<&'static str>, add_concurrent: bool, add_after_restore:bool, fail: Option<&'static str>,
 }
 #[derive(Clone)]
 struct Api { remote: Arc<Mutex<Remote>>, db: Arc<Mutex<Connection>> }
@@ -25,10 +25,10 @@ impl Respond for Api {
                 if path.ends_with("cfd_tunnel") {assert_eq!(journal.tunnel_intent.as_deref(),body["name"].as_str());}
                 else {assert!(journal.dns_intent); assert_eq!(body["tags"][0],format!("hostify-deployment:{}",journal.owner));}
             }
-            if method=="PUT" {
+            if method=="PUT" && path.ends_with("configurations") {
                 let raw:String=self.db.lock().unwrap().query_row("SELECT created_resources_json FROM deployments ORDER BY rowid DESC LIMIT 1",[],|r|r.get(0)).unwrap();
                 let journal:Resources=serde_json::from_str(&raw).unwrap();
-                assert!(journal.previous_config.is_some());
+                assert!(journal.previous_config.is_some() || journal.tunnel_created || journal.ingress_pending);
             }
         }
         let result=match (method,path) {
@@ -40,7 +40,7 @@ impl Respond for Api {
                 if r.fail==Some("token") {return ResponseTemplate::new(403);}
                 json!("secret")
             },
-            ("GET","/accounts/a/cfd_tunnel/t/configurations")=>json!({"config":r.config}),
+            ("GET","/accounts/a/cfd_tunnel/t/configurations")=>{if r.config_reads_fail || r.fail==Some("config"){return ResponseTemplate::new(500);} if r.config==json!("missing") {json!({})}else{json!({"config":r.config})}},
             ("PUT","/accounts/a/cfd_tunnel/t/configurations")=>{
                 r.config=body["config"].clone();
                 if r.add_concurrent || (r.add_after_restore && r.writes.iter().filter(|s|s.starts_with("PUT")).count()==2) {
@@ -59,8 +59,10 @@ impl Respond for Api {
                 if r.fail==Some("dns") {return ResponseTemplate::new(403);}
                 let mut record=body;record["id"]=json!("dns");r.records.push(record.clone());record
             },
+            ("PUT","/zones/z/dns_records/dns")=>{if r.fail==Some("restore_dns_once") && body["content"]=="old.cfargotunnel.com" {r.fail=None;return ResponseTemplate::new(500);}let idx=r.records.iter().position(|v|v["id"]=="dns").unwrap();let mut body=body;body["id"]=json!("dns");r.records[idx]=body.clone();body},
             ("GET","/zones/z/dns_records/dns")=>r.records.iter().find(|v|v["id"]=="dns").unwrap().clone(),
             ("DELETE","/zones/z/dns_records/dns")=>{if r.fail==Some("delete_dns_once") {r.fail=None;return ResponseTemplate::new(403);} r.records.retain(|v|v["id"]!="dns");json!({})},
+            ("DELETE",p) if p.ends_with("/orphan-1") || p.ends_with("/orphan-2")=>{let id=p.rsplit('/').next().unwrap();r.tunnels.retain(|t|t["id"]!=id);json!({})},
             _=>panic!("Unexpected Cloudflare request: {method} {path}"),
         };
         let response=ResponseTemplate::new(200).set_body_json(json!({"success":true,"result":result}));
@@ -69,14 +71,14 @@ impl Respond for Api {
         } else {response}
     }
 }
-struct Runtime { fail:usize, started:bool, events:Mutex<Vec<&'static str>> }
+struct Runtime { fail:usize, started:bool, stop_failure:Mutex<bool>, events:Mutex<Vec<&'static str>> }
 #[async_trait]
 impl SiteRuntime for Runtime {
     async fn start_site(&self,_:&str)->Result<bool,String>{self.events.lock().unwrap().push("start_site");if self.fail==1 {Err("start failed".into())} else {Ok(self.started)}}
     async fn stop_site(&self,_:&str)->Result<(),String>{self.events.lock().unwrap().push("stop_site");Ok(())}
     async fn site_responds(&self,_:u16)->Result<bool,String>{Ok(self.fail!=2)}
     async fn start_tunnel(&self,_:&str)->Result<bool,String>{self.events.lock().unwrap().push("start_tunnel");if self.fail==5 {Err("connector failed".into())}else{Ok(self.started)}}
-    async fn stop_tunnel(&self)->Result<(),String>{self.events.lock().unwrap().push("stop_tunnel");Ok(())}
+    async fn stop_tunnel(&self)->Result<(),String>{self.events.lock().unwrap().push("stop_tunnel");let mut fail=self.stop_failure.lock().unwrap();if *fail {*fail=false;Err("stop failed once".into())}else{Ok(())}}
     async fn verify_public(&self,_:&str,_:&std::path::Path)->Result<(),String>{if self.fail==6{Err("DNS has not propagated yet".into())}else{Ok(())}}
 }
 struct Fixture { deployer:Deployer, q:DeployRequest, remote:Arc<Mutex<Remote>>, runtime:Arc<Runtime>, _dir:tempfile::TempDir, server:MockServer }
@@ -87,17 +89,17 @@ async fn setup(fail:usize, reused:bool, started:bool)->Fixture {
     let db=Arc::new(Mutex::new(conn));
     let mut tunnels=vec![json!({"id":"unrelated","name":"unrelated"})];
     let mut entries=vec![json!({"service":"http_status:404"})];
-    if reused {tunnels.push(json!({"id":"t","name":"site"}));entries.insert(0,json!({"hostname":"other.example.com","service":"http://elsewhere","originRequest":{"connectTimeout":30}}));}
-    let remote=Arc::new(Mutex::new(Remote{tunnels,records:vec![json!({"id":"unrelated","name":"other.example.com","type":"A","content":"192.0.2.1"})],config:json!({"ingress":entries,"originRequest":{"noTLSVerify":false}}),fail:match fail{3=>Some("token"),4=>Some("dns"),_=>None},..Default::default()}));
+    if reused {tunnels.push(json!({"id":"t","name":"hostify-s"}));entries.insert(0,json!({"hostname":"other.example.com","service":"http://elsewhere","originRequest":{"connectTimeout":30}}));}
+    let remote=Arc::new(Mutex::new(Remote{tunnels,records:vec![json!({"id":"unrelated","name":"other.example.com","type":"A","content":"192.0.2.1"})],config:if reused {json!({"ingress":entries,"originRequest":{"noTLSVerify":false}})} else {Value::Null},fail:match fail{3=>Some("token"),4=>Some("dns"),_=>None},..Default::default()}));
     let server=MockServer::start().await;
     Mock::given(|_:&Request|true).respond_with(Api{remote:remote.clone(),db:db.clone()}).mount(&server).await;
-    let runtime=Arc::new(Runtime{fail,started,events:Mutex::new(Vec::new())});
+    let runtime=Arc::new(Runtime{fail,started,stop_failure:Mutex::new(false),events:Mutex::new(Vec::new())});
     let deployer=Deployer{db,cf:Arc::new(CloudflareClient::new(server.uri(),"token")),supervisor:runtime.clone(),secrets:Arc::new(MemoryStore::default())};
     let q=DeployRequest{site_id:"s".into(),hostname:"www.example.com".into(),account_id:"a".into(),zone_id:"z".into(),tunnel_name:"site".into(),port:1234,root:dir.path().to_owned(),consent_dns:true};
     Fixture{deployer,q,remote,runtime,_dir:dir,server}
 }
 async fn failure(step:usize) {
-    let mut f=setup(step,false,true).await;
+    let mut f=setup(step,false,true).await;f.remote.lock().unwrap().config_reads_fail=true;
     if step==0 {f.q.port=0;}
     let result=f.deployer.deploy(f.q.clone(),&|_|{}).await.unwrap();
     assert_eq!(result.state,"failed"); assert_eq!(result.steps[step].state,"failed");
@@ -111,7 +113,7 @@ async fn failure(step:usize) {
     assert_eq!(deletes,expected);
     let events=f.runtime.events.lock().unwrap();
     assert_eq!(events.contains(&"stop_site"),step>=2);
-    assert_eq!(events.contains(&"stop_tunnel"),step==6);
+    assert_eq!(events.contains(&"stop_tunnel"),step>=3);
     if step==6 {assert_eq!(result.error.as_deref(),Some("DNS has not propagated yet"));}
 }
 #[tokio::test] async fn failure_step_1_validation(){failure(0).await;}
@@ -172,24 +174,28 @@ async fn interrupt_after_create(dns:bool) {
 #[tokio::test] async fn recovers_tunnel_create_before_id_save(){interrupt_after_create(false).await;}
 #[tokio::test] async fn recovers_dns_create_before_id_save(){interrupt_after_create(true).await;}
 
-#[tokio::test] async fn concurrent_ingress_is_preserved_and_created_tunnel_retained() {
-    let f=setup(6,false,true).await;f.remote.lock().unwrap().add_concurrent=true;
+#[tokio::test] async fn concurrent_ingress_is_preserved_on_reused_tunnel() {
+    let f=setup(6,true,true).await;f.remote.lock().unwrap().add_concurrent=true;
     assert_eq!(f.deployer.deploy(f.q,&|_|{}).await.unwrap().state,"failed");
     let r=f.remote.lock().unwrap();assert_eq!(r.tunnels.len(),2);
-    assert_eq!(r.config["ingress"],json!([{"hostname":"concurrent.example.com","service":"http://another"},{"service":"http_status:404"}]));
+    assert_eq!(r.config["ingress"],json!([{"hostname":"concurrent.example.com","service":"http://another"},{"hostname":"other.example.com","service":"http://elsewhere","originRequest":{"connectTimeout":30}},{"service":"http_status:404"}]));
     assert!(!r.writes.iter().any(|s|s=="DELETE /accounts/a/cfd_tunnel/t"));
 }
 #[tokio::test] async fn incomplete_failed_rollback_is_retried() {
     let f=setup(6,true,true).await;f.remote.lock().unwrap().fail=Some("delete_dns_once");
-    let failed=f.deployer.deploy(f.q,&|_|{}).await.unwrap();assert_eq!(failed.state,"failed");assert!(failed.error.unwrap().contains("rollback incomplete"));
+    let failed=f.deployer.deploy(f.q.clone(),&|_|{}).await.unwrap();assert_eq!(failed.state,"failed");assert!(failed.error.unwrap().contains("rollback incomplete"));
     assert_eq!(f.remote.lock().unwrap().records.len(),2);
+    let writes=f.remote.lock().unwrap().writes.clone();
+    let blocked=f.deployer.deploy(f.q.clone(),&|_|{}).await.unwrap();assert!(blocked.error.unwrap().contains("rollback pending"));assert_eq!(f.remote.lock().unwrap().writes,writes);
     let recovered=f.deployer.recover_interrupted(&|_|{}).await.unwrap();assert_eq!(recovered.len(),1);assert_eq!(recovered[0].state,"rolled_back");assert_eq!(f.remote.lock().unwrap().records.len(),1);
     assert!(f.deployer.recover_interrupted(&|_|{}).await.unwrap().is_empty());
 }
-#[tokio::test] async fn tagged_dns_for_different_tunnel_conflicts_before_writes() {
-    let f=setup(99,false,true).await;
-    f.remote.lock().unwrap().records.push(json!({"id":"old-hostify","name":f.q.hostname,"type":"CNAME","content":"different.cfargotunnel.com","comment":"managed-by=hostify"}));
-    assert_eq!(f.deployer.deploy(f.q,&|_|{}).await.unwrap().state,"failed");assert!(f.remote.lock().unwrap().writes.is_empty());
+#[tokio::test] async fn tagged_dns_for_different_tunnel_repoints_and_rollback_restores() {
+    let f=setup(6,false,true).await;
+    let old=json!({"id":"dns","name":f.q.hostname,"type":"CNAME","content":"different.cfargotunnel.com","proxied":false,"comment":"managed-by=hostify","tags":["hostify-deployment:old"]});
+    f.remote.lock().unwrap().records.push(old.clone());
+    assert_eq!(f.deployer.deploy(f.q,&|_|{}).await.unwrap().state,"failed");
+    let r=f.remote.lock().unwrap();assert_eq!(r.records[1],old);assert_eq!(r.writes.iter().filter(|s|s.starts_with("PUT /zones")).count(),2);
 }
 #[tokio::test] async fn recovery_does_not_delete_another_deployments_tagged_dns() {
     let f=setup(99,true,false).await;
@@ -240,14 +246,89 @@ async fn cancel_after_remote_create(kind:&'static str) {
     let mut f=setup(99,false,true).await;
     assert_eq!(f.deployer.deploy(f.q.clone(),&|_|{}).await.unwrap().state,"live");
     let before=f.remote.lock().unwrap().config.clone();
-    f.deployer.supervisor=Arc::new(Runtime{fail:6,started:false,events:Mutex::new(Vec::new())});
+    f.deployer.supervisor=Arc::new(Runtime{fail:6,started:false,stop_failure:Mutex::new(false),events:Mutex::new(Vec::new())});
     let result=f.deployer.deploy(f.q.clone(),&|_|{}).await.unwrap();assert_eq!(result.state,"failed");assert_eq!(result.steps[6].state,"failed");
     let r=f.remote.lock().unwrap();assert_eq!(r.tunnels.len(),2);assert_eq!(r.records.len(),2);assert_eq!(r.config,before);assert!(!r.writes.iter().any(|s|s.starts_with("DELETE")));
 }
 
-#[tokio::test] async fn tunnel_deletion_rechecks_ingress_after_restoration() {
-    let f=setup(6,false,true).await;f.remote.lock().unwrap().add_after_restore=true;
+#[tokio::test] async fn created_tunnel_cleanup_never_reads_configuration() {
+    let f=setup(6,false,true).await;f.remote.lock().unwrap().fail=Some("config");
     assert_eq!(f.deployer.deploy(f.q,&|_|{}).await.unwrap().state,"failed");
-    let r=f.remote.lock().unwrap();assert_eq!(r.tunnels.len(),2);assert!(r.config["ingress"].as_array().unwrap().iter().any(|e|e["hostname"]=="concurrent.example.com"));
-    assert!(!r.writes.iter().any(|s|s=="DELETE /accounts/a/cfd_tunnel/t"));
+    let r=f.remote.lock().unwrap();assert_eq!(r.tunnels.len(),1);
+    assert!(r.writes.iter().any(|s|s=="DELETE /accounts/a/cfd_tunnel/t"));
+    drop(r);
+    assert!(!f.server.received_requests().await.unwrap().iter().any(|r|r.method=="GET" && r.url.path().ends_with("configurations")));
+}
+
+#[tokio::test] async fn fresh_null_empty_and_missing_config_publish_apex_to_live() {
+    for config in [Value::Null,json!({}),json!("missing")] {
+        let mut f=setup(99,false,true).await;f.q.hostname="example.com".into();f.remote.lock().unwrap().config=config;
+        let d=f.deployer.deploy(f.q.clone(),&|_|{}).await.unwrap();assert_eq!(d.state,"live","{:?}",d.error);
+        let requests=f.server.received_requests().await.unwrap();
+        assert!(!requests.iter().any(|r|r.method=="GET" && r.url.path().ends_with("configurations")));
+        let put=requests.iter().find(|r|r.method=="PUT").unwrap();let body:Value=serde_json::from_slice(&put.body).unwrap();
+        assert_eq!(body,json!({"config":{"ingress":[{"hostname":"example.com","service":"http://127.0.0.1:1234"},{"service":"http_status:404"}]}}));
+        let post=requests.iter().find(|r|r.method=="POST" && r.url.path().ends_with("cfd_tunnel")).unwrap();
+        let body:Value=serde_json::from_slice(&post.body).unwrap();assert_eq!(body,json!({"name":"hostify-s","config_src":"cloudflare"}));
+        assert_eq!(f.remote.lock().unwrap().records[1]["content"],"t.cfargotunnel.com");
+    }
+}
+#[tokio::test] async fn reused_unconfigured_tunnel_restores_without_deleting() {
+    for config in [Value::Null,json!({}),json!("missing")] {
+        let f=setup(6,true,true).await;f.remote.lock().unwrap().config=config;
+        let d=f.deployer.deploy(f.q,&|_|{}).await.unwrap();assert_eq!(d.state,"failed");assert!(!d.error.unwrap().contains("rollback incomplete"));
+        let r=f.remote.lock().unwrap();assert_eq!(r.tunnels.len(),2);assert_eq!(r.config["ingress"],json!([{"service":"http_status:404"}]));
+    }
+}
+#[tokio::test] async fn recovers_two_failed_orphans_with_null_snapshot_idempotently() {
+    let f=setup(99,false,false).await;
+    for (owner,id) in [("failed-1","orphan-1"),("failed-2","orphan-2")] {
+        let d=Deployment{id:owner.into(),site_id:"s".into(),state:"failed".into(),steps:Vec::new(),error:Some("Cloudflare network error: Missing tunnel ingress; rollback incomplete".into()),started_at:"now".into(),finished_at:Some("now".into())};
+        // Persist the same resource fields as the real rows, with fake identifiers.
+        let r=Resources{request:Some(f.q.clone()),owner:owner.into(),tunnel_created:true,tunnel_id:Some(id.into()),previous_config:None,dns_id:None,rollback_pending:true,..Default::default()};
+        f.deployer.save(&d,&r).unwrap();f.remote.lock().unwrap().tunnels.push(json!({"id":id,"name":owner}));
+    }
+    f.remote.lock().unwrap().config_reads_fail=true;
+    let recovered=f.deployer.recover_interrupted(&|_|{}).await.unwrap();assert_eq!(recovered.len(),2);assert!(recovered.iter().all(|d|d.state=="rolled_back"));
+    assert!(f.deployer.recover_interrupted(&|_|{}).await.unwrap().is_empty());
+    let r=f.remote.lock().unwrap();assert_eq!(r.writes,vec!["DELETE /accounts/a/cfd_tunnel/orphan-1","DELETE /accounts/a/cfd_tunnel/orphan-2"]);assert_eq!(r.tunnels.len(),1);assert_eq!(r.records.len(),1);
+}
+#[tokio::test] async fn apex_conflicts_all_record_types_and_no_consent_repoint_have_zero_writes() {
+    for kind in ["A","AAAA","CNAME","TXT"] {
+        let mut f=setup(99,false,true).await;f.q.hostname="example.com".into();
+        f.remote.lock().unwrap().records.push(json!({"id":"foreign","name":"example.com","type":kind,"content":"foreign"}));
+        assert_eq!(f.deployer.deploy(f.q,&|_|{}).await.unwrap().state,"failed");assert!(f.remote.lock().unwrap().writes.is_empty());
+    }
+    let mut f=setup(99,false,true).await;f.q.consent_dns=false;
+    f.remote.lock().unwrap().records.push(json!({"id":"dns","name":f.q.hostname,"type":"CNAME","content":"old.cfargotunnel.com","comment":"managed-by=hostify"}));
+    assert_eq!(f.deployer.deploy(f.q,&|_|{}).await.unwrap().state,"failed");assert!(f.server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test] async fn failed_dns_restore_retries_after_owned_tunnel_has_been_deleted() {
+    let f=setup(6,false,true).await;
+    let old=json!({"id":"dns","name":f.q.hostname,"type":"CNAME","content":"old.cfargotunnel.com","proxied":true,"comment":"managed-by=hostify"});
+    {let mut remote=f.remote.lock().unwrap();remote.records.push(old.clone());remote.fail=Some("restore_dns_once");}
+    let failed=f.deployer.deploy(f.q,&|_|{}).await.unwrap();assert!(failed.error.unwrap().contains("rollback incomplete"));
+    {let remote=f.remote.lock().unwrap();assert_eq!(remote.tunnels.len(),1);assert_eq!(remote.records[1]["content"],"t.cfargotunnel.com");}
+    assert_eq!(f.deployer.recover_interrupted(&|_|{}).await.unwrap()[0].state,"rolled_back");
+    assert_eq!(f.remote.lock().unwrap().records[1],old);
+    assert!(f.deployer.recover_interrupted(&|_|{}).await.unwrap().is_empty());
+}
+#[tokio::test] async fn tagged_stale_dns_success_repoints_then_republish_has_no_dns_write() {
+    let f=setup(99,false,true).await;
+    f.remote.lock().unwrap().records.push(json!({"id":"dns","name":f.q.hostname,"type":"CNAME","content":"old.cfargotunnel.com","proxied":false,"comment":"managed-by=hostify","tags":["hostify-deployment:old"]}));
+    assert_eq!(f.deployer.deploy(f.q.clone(),&|_|{}).await.unwrap().state,"live");
+    let writes=f.remote.lock().unwrap().writes.clone();assert_eq!(writes.iter().filter(|s|s.starts_with("PUT /zones")).count(),1);
+    assert_eq!(f.deployer.deploy(f.q,&|_|{}).await.unwrap().state,"live");
+    let remote=f.remote.lock().unwrap();assert_eq!(remote.records.len(),2);assert_eq!(remote.records[1]["content"],"t.cfargotunnel.com");assert_eq!(remote.records[1]["proxied"],true);
+    assert_eq!(remote.writes.iter().filter(|s|s.starts_with("PUT /zones") || s.starts_with("POST")).count(),writes.iter().filter(|s|s.starts_with("PUT /zones") || s.starts_with("POST")).count());
+}
+
+#[tokio::test] async fn failed_connector_stop_keeps_owned_tunnel_pending_until_retry() {
+    let f=setup(6,false,true).await;*f.runtime.stop_failure.lock().unwrap()=true;
+    let failed=f.deployer.deploy(f.q,&|_|{}).await.unwrap();assert!(failed.error.unwrap().contains("rollback incomplete"));
+    assert_eq!(f.remote.lock().unwrap().tunnels.len(),2);
+    assert!(!f.remote.lock().unwrap().writes.iter().any(|w|w=="DELETE /accounts/a/cfd_tunnel/t"));
+    assert_eq!(f.deployer.recover_interrupted(&|_|{}).await.unwrap()[0].state,"rolled_back");assert_eq!(f.remote.lock().unwrap().tunnels.len(),1);
+    assert!(f.deployer.recover_interrupted(&|_|{}).await.unwrap().is_empty());
 }

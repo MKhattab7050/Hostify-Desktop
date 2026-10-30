@@ -37,7 +37,8 @@ impl Engine{
  pub fn new(store:Arc<Store>,runtime:Arc<dyn SiteRuntime>,service:bool)->Arc<Self>{Arc::new(Self{tunnel_observations:Mutex::new(HashMap::new()),background:Mutex::new(Vec::new()),supervisor:None,store,runtime,secrets:Arc::new(WindowsCredentialStore),service,operations:tokio::sync::Mutex::new(()),publishing:Arc::new(tokio::sync::Mutex::new(()))})}
  pub fn production(store:Arc<Store>,supervisor:Arc<crate::supervisor::Supervisor>,service:bool)->Arc<Self>{Arc::new(Self{tunnel_observations:Mutex::new(HashMap::new()),background:Mutex::new(Vec::new()),store,runtime:supervisor.clone(),supervisor:Some(supervisor),secrets:Arc::new(WindowsCredentialStore),service,operations:tokio::sync::Mutex::new(()),publishing:Arc::new(tokio::sync::Mutex::new(()))})}
  pub async fn shutdown(&self){let tasks=match self.background.lock(){Ok(mut tasks)=>std::mem::take(&mut *tasks),Err(_)=>Vec::new()};for task in tasks{task.abort();let _=task.await;}}
- fn cf(&self)->Result<CloudflareClient>{Ok(CloudflareClient::production(self.secrets.get("cloudflare-token")?.ok_or_else(||anyhow!("Connect your Cloudflare account first"))?))}
+ fn logged_cf(&self,token:impl Into<String>)->CloudflareClient {let path=self.store.root.join("logs/cloudflare.log");CloudflareClient::production(token).with_logger(move|line|{let _=crate::supervisor::append_log(&path,line);})}
+ fn cf(&self)->Result<CloudflareClient>{Ok(self.logged_cf(self.secrets.get("cloudflare-token")?.ok_or_else(||anyhow!("Connect your Cloudflare account first"))?))}
  fn deployer(&self,cf:CloudflareClient,site:Option<&str>)->Deployer{Deployer{db:self.store.db.clone(),cf:Arc::new(cf),secrets:self.secrets.clone(),supervisor:match (&self.supervisor,site){(Some(runtime),Some(id))=>runtime.for_site(id),_=>self.runtime.clone()}}}
  pub async fn engine_status(&self)->Value {
   let [caddy,cloudflared]=self.store.detection.statuses(false).await;
@@ -56,8 +57,24 @@ impl Engine{
   Ok(())
  }
  pub async fn startup(&self)->Result<()>{// Recovery runs before desired state is reconciled.
- let cf=CloudflareClient::production(self.secrets.get("cloudflare-token")?.unwrap_or_default());let s=self.store.clone();if let Err(e)=self.deployer(cf,None).recover_interrupted(&move|d|s.emit("deployment-update",json!(d))).await{self.store.activity("error",None,&format!("Deployment recovery requires attention: {e}"))?;}
+ let cf=self.logged_cf(self.secrets.get("cloudflare-token")?.unwrap_or_default());let s=self.store.clone();if let Err(e)=self.deployer(cf,None).recover_interrupted(&move|d|s.emit("deployment-update",json!(d))).await{self.store.activity("error",None,&format!("Deployment recovery requires attention: {e}"))?;}
  for site in self.store.sites()?{if site.auto_start{if let Err(e)=self.runtime.start_site(&site.id).await{self.store.activity("error",Some(&site.id),&e)?;}}}
+ // Retry durable cleanup failures while the engine remains running, serialized with publish.
+ let store=self.store.clone();let secrets=self.secrets.clone();let runtime=self.runtime.clone();let publishing=self.publishing.clone();
+ let retry=tokio::spawn(async move {
+   loop {
+     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+     let Ok(_guard)=publishing.try_lock() else {continue};
+     let pending=(||->Result<bool>{let db=store.db()?;let mut stmt=db.prepare("SELECT created_resources_json FROM deployments WHERE state IN ('running','failed')")?;let rows=stmt.query_map([],|r|r.get::<_,String>(0))?;for row in rows {let v:Value=serde_json::from_str(&row?)?;if v["rollback_pending"]==true{return Ok(true)}}Ok(false)})();
+     if !matches!(pending,Ok(true)){continue;}
+     let token=match secrets.get("cloudflare-token"){Ok(Some(token))=>token,_=>continue};
+     let path=store.root.join("logs/cloudflare.log");let cf=CloudflareClient::production(token).with_logger(move|line|{let _=crate::supervisor::append_log(&path,line);});
+     let deployer=Deployer{db:store.db.clone(),cf:Arc::new(cf),secrets:secrets.clone(),supervisor:runtime.clone()};
+     let events=store.clone();
+     if let Err(e)=deployer.recover_interrupted(&move|d|events.emit("deployment-update",json!(d))).await{let _=store.activity("error",None,&format!("Deployment recovery requires attention: {e}"));}
+   }
+ });
+ self.background.lock().map_err(|_|anyhow!("Background tasks unavailable"))?.push(retry);
  let records=self.live_resources()?;for r in records{if let Some(id)=r["tunnel_id"].as_str(){if let Some(token)=self.secrets.get(&format!("tunnel:{id}"))?{if let Err(e)=self.runtime.start_tunnel(&token).await{self.store.activity("error",None,&e)?;}}}}Ok(())}
  fn live_resources(&self)->Result<Vec<Value>>{let db=self.store.db()?;let mut st=db.prepare("SELECT created_resources_json FROM deployments WHERE state='live'")?;let rows=st.query_map([],|r|r.get::<_,String>(0))?;rows.map(|r|Ok(serde_json::from_str(&r?)?)).collect()}
  pub async fn dispatch(self:&Arc<Self>,method:&str,p:Value)->Result<Value>{
@@ -86,7 +103,7 @@ impl Engine{
  "remove_site"=>{let _guard=self.operations.lock().await;let _publish_guard=self.publishing.try_lock().map_err(|_|anyhow!("Wait for the current deployment to finish"))?;let id=arg(&p,"id")?;s.site(id)?;let delete=boolean(&p,"deleteFiles")?;if self.live_resources()?.iter().any(|r|r["request"]["siteId"]==id){bail!("Unpublish this website before removing it")};self.runtime.stop_site(id).await.map_err(|e|anyhow!(e))?;{let mut db=s.db()?;let tx=db.transaction()?;tx.execute("UPDATE domains SET site_id=NULL WHERE site_id=?1",[id])?;tx.execute("DELETE FROM deployments WHERE site_id=?1",[id])?;tx.execute("DELETE FROM websites WHERE id=?1",[id])?;tx.commit()?;}if delete{std::fs::remove_dir_all(s.root.join("sites").join(id))?}s.activity("info",Some(id),"Website removed")?;Ok(Value::Null)},
  "get_settings"=>Ok(json!(s.settings()?)),"save_settings"=>{let settings:Settings=serde_json::from_value(p)?;if settings.base_port_start==0||!["system","light","dark"].contains(&settings.theme.as_str()){bail!("Invalid settings")};#[cfg(windows)]{let old=s.settings()?;if old.launch_on_login!=settings.launch_on_login{crate::cli::task(settings.launch_on_login,&s.root)?;}if old.start_engine_on_boot!=settings.start_engine_on_boot{crate::cli::service_install(settings.start_engine_on_boot,&s.root)?;}}s.save("settings",&json!(settings))?;Ok(json!(settings))},
  "cf_status"=>Ok(s.saved("account")?.unwrap_or(json!({"connected":false}))),
- "cf_connect"=>{let token=arg(&p,"token")?;let cf=CloudflareClient::production(token);cf.verify_token().await?;let accounts=cf.list_accounts().await?;let account=accounts.first().ok_or_else(||anyhow!("No accessible Cloudflare account"))?;self.secrets.set("cloudflare-token",token)?;let hint=token.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<String>();let a=json!({"connected":true,"accountId":account.id,"accountName":account.name,"tokenHint":hint});s.save("account",&a)?;Ok(a)},
+ "cf_connect"=>{let token=arg(&p,"token")?;let cf=self.logged_cf(token);cf.verify_token().await?;let accounts=cf.list_accounts().await?;let account=accounts.first().ok_or_else(||anyhow!("No accessible Cloudflare account"))?;self.secrets.set("cloudflare-token",token)?;let hint=token.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<String>();let a=json!({"connected":true,"accountId":account.id,"accountName":account.name,"tokenHint":hint});s.save("account",&a)?;Ok(a)},
  "cf_disconnect"=>{self.secrets.delete("cloudflare-token")?;s.save("account",&json!({"connected":false}))?;Ok(Value::Null)},
  "cf_check_domain"=>{let cf=self.cf()?;let z=cf.find_zone(hostname(&p)?).await?;let problem=cf.check_dns_permission(&z.id).await.err().map(|e|e.to_string());Ok(json!({"zoneName":z.name,"zoneId":z.id,"canManageDns":problem.is_none(),"problems":problem.into_iter().collect::<Vec<_>>()}))},
  "cf_plan_dns"=>{let id=arg(&p,"siteId")?;s.site(id)?;let cf=self.cf()?;let h=hostname(&p)?;let z=cf.find_zone(h).await?;let tunnel=self.live_resources()?.iter().find(|r|r["request"]["siteId"]==id).and_then(|r|r["tunnel_id"].as_str()).unwrap_or("").to_owned();Ok(json!(cf.plan_dns(&z.id,h,&tunnel).await?))},

@@ -17,6 +17,7 @@ pub trait SiteRuntime: Send + Sync {
     /// Returns true only when this call started a new connector.
     async fn start_tunnel(&self, token: &str) -> Result<bool, String>;
     async fn stop_tunnel(&self) -> Result<(), String>;
+    async fn stop_owned_tunnel(&self,_id:&str)->Result<(),String>{self.stop_tunnel().await}
     async fn site_responds(&self, port: u16) -> Result<bool, String>;
     async fn verify_public(&self, hostname: &str, root: &std::path::Path) -> Result<(), String> {
 let expected=Sha256::digest(std::fs::read(root.join("index.html")).map_err(|e| e.to_string())?); let client=reqwest::Client::builder().timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())?; let deadline=tokio::time::Instant::now()+Duration::from_secs(180); loop { if let Ok(resp)=client.get(format!("https://{}/",hostname)).send().await { if resp.status().is_success() { if let Ok(body)=resp.bytes().await { if Sha256::digest(&body)==expected { break; } } } } if tokio::time::Instant::now()>=deadline { return Err("DNS has not propagated yet".into()); } tokio::time::sleep(Duration::from_secs(5)).await; } Ok(())
@@ -30,18 +31,23 @@ pub trait Cloudflare: Send + Sync {
     async fn plan(&self, zone: &str, hostname: &str, tunnel: &str) -> Result<DnsPlan,CfError>;
     async fn create_dns(&self, zone: &str, hostname: &str, tunnel: &str) -> Result<String,CfError>;
     async fn delete_dns(&self, zone: &str, id: &str) -> Result<bool,CfError>;
+    async fn delete_owned_dns(&self,z:&str,i:&str,_o:&str)->Result<bool,CfError>{self.delete_dns(z,i).await}
     async fn delete_tunnel(&self, account: &str, id: &str) -> Result<(),CfError>;
     async fn find_tunnel(&self, _a: &str, _n: &str) -> Result<Option<String>,CfError> { Err(unsupported()) }
     async fn create_tunnel(&self, _a: &str, _n: &str) -> Result<String,CfError> { Err(unsupported()) }
     async fn token(&self, _a: &str, _i: &str) -> Result<String,CfError> { Err(unsupported()) }
-    async fn config(&self, _a: &str, _i: &str) -> Result<serde_json::Value,CfError> { Err(unsupported()) }
+    async fn config(&self, _a: &str, _i: &str) -> Result<Option<serde_json::Value>,CfError> { Err(unsupported()) }
     async fn put_config(&self, _a: &str, _i: &str, _v: serde_json::Value) -> Result<(),CfError> { Err(unsupported()) }
     async fn preflight(&self, _z: &str, _h: &str) -> Result<(),CfError> { Err(unsupported()) }
     async fn owned_dns(&self, _z: &str, _h: &str, _o: &str) -> Result<Option<String>,CfError> { Err(unsupported()) }
     async fn create_owned_dns(&self, _z: &str, _h: &str, _t: &str, _o: &str) -> Result<String,CfError> { Err(unsupported()) }
 
+    async fn dns_record(&self,_z:&str,_h:&str)->Result<Option<serde_json::Value>,CfError>{Err(unsupported())}
+    async fn write_dns(&self,_z:&str,_i:&str,_v:serde_json::Value)->Result<(),CfError>{Err(unsupported())}
+    async fn verify_dns(&self,_z:&str,_i:&str,_t:&str)->Result<(),CfError>{Err(unsupported())}
+
 }
-fn unsupported() -> CfError { CfError::Network("Cloudflare adapter lacks journaled deployment operations".into()) }
+fn unsupported() -> CfError { CfError::Unexpected("Cloudflare adapter lacks journaled deployment operations".into()) }
 #[async_trait]
 impl Cloudflare for CloudflareClient {
     async fn tunnel(&self,a:&str,n:&str)->Result<Tunnel,CfError>{ self.get_or_create_tunnel(a,n).await }
@@ -49,15 +55,20 @@ impl Cloudflare for CloudflareClient {
     async fn plan(&self,z:&str,h:&str,t:&str)->Result<DnsPlan,CfError>{ self.plan_dns(z,h,t).await }
     async fn create_dns(&self,z:&str,h:&str,t:&str)->Result<String,CfError>{ self.create_dns(z,h,t).await }
     async fn delete_dns(&self,z:&str,i:&str)->Result<bool,CfError>{ self.delete_dns_if_ours(z,i).await }
+    async fn delete_owned_dns(&self,z:&str,i:&str,o:&str)->Result<bool,CfError>{CloudflareClient::delete_owned_dns(self,z,i,o).await}
     async fn delete_tunnel(&self,a:&str,i:&str)->Result<(),CfError>{ self.delete_tunnel(a,i).await }
     async fn find_tunnel(&self,a:&str,n:&str)->Result<Option<String>,CfError>{ CloudflareClient::find_tunnel(self,a,n).await }
     async fn create_tunnel(&self,a:&str,n:&str)->Result<String,CfError>{ CloudflareClient::create_tunnel(self,a,n).await }
     async fn token(&self,a:&str,i:&str)->Result<String,CfError>{ self.tunnel_token(a,i).await }
-    async fn config(&self,a:&str,i:&str)->Result<serde_json::Value,CfError>{ self.get_ingress(a,i).await }
+    async fn config(&self,a:&str,i:&str)->Result<Option<serde_json::Value>,CfError>{ self.get_ingress(a,i).await }
     async fn put_config(&self,a:&str,i:&str,v:serde_json::Value)->Result<(),CfError>{ CloudflareClient::put_config(self,a,i,v).await }
     async fn preflight(&self,z:&str,h:&str)->Result<(),CfError>{ self.dns_preflight(z,h).await }
     async fn owned_dns(&self,z:&str,h:&str,o:&str)->Result<Option<String>,CfError>{ self.find_deployment_dns(z,h,o).await }
     async fn create_owned_dns(&self,z:&str,h:&str,t:&str,o:&str)->Result<String,CfError>{ self.create_deployment_dns(z,h,t,o).await }
+
+    async fn dns_record(&self,z:&str,h:&str)->Result<Option<serde_json::Value>,CfError>{CloudflareClient::dns_record(self,z,h).await}
+    async fn write_dns(&self,z:&str,i:&str,v:serde_json::Value)->Result<(),CfError>{CloudflareClient::write_dns(self,z,i,v).await}
+    async fn verify_dns(&self,z:&str,i:&str,t:&str)->Result<(),CfError>{CloudflareClient::verify_dns(self,z,i,t).await}
 
 }
 #[derive(Clone,Debug,Serialize,Deserialize)]
@@ -76,7 +87,7 @@ struct Resources {
     tunnel_id:Option<String>, tunnel_created:bool, dns_id:Option<String>,
     tunnel_intent:Option<String>, dns_intent:bool, owner:String,
     previous_config:Option<serde_json::Value>, desired_config:Option<serde_json::Value>,
-    ingress_pending:bool, rollback_pending:bool,
+    ingress_pending:bool, rollback_pending:bool, previous_dns:Option<serde_json::Value>, dns_update_pending:bool, dns_update_target:Option<String>,
 }
 pub struct Deployer { pub db:Arc<Mutex<Connection>>, pub cf:Arc<dyn Cloudflare>, pub secrets:Arc<dyn SecretStore>, pub supervisor:Arc<dyn SiteRuntime> }
 const LABELS: [&str;7]=["Validate website","Start local server","Verify local site","Create tunnel","Add DNS record","Start connector","Verify HTTPS"];
@@ -84,6 +95,7 @@ impl Deployer {
     fn save(&self,d:&Deployment,r:&Resources)->Result<(),DeployError> { let db=self.db.lock().map_err(|_| DeployError::Message("Database lock poisoned".into()))?; db.execute("INSERT INTO deployments (id,site_id,state,snapshot_json,created_resources_json,started_at,finished_at) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(id) DO UPDATE SET state=excluded.state,snapshot_json=excluded.snapshot_json,created_resources_json=excluded.created_resources_json,finished_at=excluded.finished_at",params![d.id,d.site_id,d.state,serde_json::to_string(d)?,serde_json::to_string(r)?,d.started_at,d.finished_at])?; Ok(()) }
     fn emit(&self,d:&Deployment,r:&Resources,callback:&(dyn Fn(&Deployment)+Send+Sync))->Result<(),DeployError> { self.save(d,r)?; callback(d); Ok(()) }
     pub async fn deploy(&self, mut request:DeployRequest, callback: &(dyn Fn(&Deployment)+Send+Sync)) -> Result<Deployment,DeployError> {
+        request.tunnel_name=format!("hostify-{}",request.site_id);
         if request.consent_dns {
             let db = self.db.lock().map_err(|_| DeployError::Message("Database lock poisoned".into()))?;
             let mut stmt = db.prepare("SELECT snapshot_json,created_resources_json FROM deployments WHERE state='live' AND site_id=?1")?;
@@ -110,7 +122,13 @@ impl Deployer {
     }
     async fn step(&self,i:usize,q:&DeployRequest,r:&mut Resources,d:&Deployment,callback:&(dyn Fn(&Deployment)+Send+Sync))->Result<(),DeployError> {
         match i {
-            0=>{ if !q.consent_dns { return Err(DeployError::Message("DNS consent is required".into())); } if !q.root.join("index.html").is_file() || q.hostname.is_empty() || q.port==0 { return Err(DeployError::Message("Invalid website or hostname".into())); } self.cf.preflight(&q.zone_id,&q.hostname).await?;
+            0=>{ if !q.consent_dns { return Err(DeployError::Message("DNS consent is required".into())); } if !q.root.join("index.html").is_file() || q.hostname.is_empty() || q.port==0 { return Err(DeployError::Message("Invalid website or hostname".into())); } {
+                    let db=self.db.lock().map_err(|_|DeployError::Message("Database lock poisoned".into()))?;
+                    let mut stmt=db.prepare("SELECT created_resources_json FROM deployments WHERE site_id=?1 AND id!=?2 AND state IN ('running','failed')")?;
+                    let rows=stmt.query_map(params![q.site_id,d.id],|row|row.get::<_,String>(0))?;
+                    for row in rows {let previous:Resources=serde_json::from_str(&row?)?;if previous.rollback_pending {return Err(DeployError::Message("Previous deployment rollback pending; cleanup will be retried by the engine before publishing again".into()));}}
+                }
+                self.cf.preflight(&q.zone_id,&q.hostname).await?;
                 let existing=self.cf.find_tunnel(&q.account_id,&q.tunnel_name).await?;
                 if self.cf.plan(&q.zone_id,&q.hostname,existing.as_deref().unwrap_or("")).await?.action=="conflict" { return Err(CfError::Conflict.into()); }
             },
@@ -120,9 +138,9 @@ impl Deployer {
                 if let Some(id) = self.cf.find_tunnel(&q.account_id,&q.tunnel_name).await? {
                     r.tunnel_id=Some(id); self.save(d,r)?;
                 } else {
-                    // Unique physical name is the remote ownership proof for an ambiguous POST.
-                    let name=format!("hostify-{}",d.id);
-                    if self.cf.find_tunnel(&q.account_id,&name).await?.is_some() { return Err(CfError::Conflict.into()); }
+                    // Stable site name is journaled before POST for ambiguous-create recovery.
+                    // Callers serialize deployment and recovery for the same site.
+                    let name=q.tunnel_name.clone();
                     r.tunnel_intent=Some(name.clone()); self.save(d,r)?;
                     r.tunnel_id=Some(self.cf.create_tunnel(&q.account_id,&name).await?);
                     r.tunnel_created=true; self.save(d,r)?;
@@ -131,21 +149,33 @@ impl Deployer {
                 if self.cf.plan(&q.zone_id,&q.hostname,&id).await?.action == "conflict" { return Err(CfError::Conflict.into()); }
                 let token=self.cf.token(&q.account_id,&id).await?;
                 self.secrets.set(&format!("tunnel:{id}"),&token)?;
-                let previous=self.cf.config(&q.account_id,&id).await?;
-                let mut desired=previous.clone();
-                let entries=desired["ingress"].as_array_mut().ok_or_else(|| DeployError::Message("Missing ingress".into()))?;
+                let previous=if r.tunnel_created {None} else {self.cf.config(&q.account_id,&id).await?};
+                let mut desired=previous.clone().unwrap_or_else(||serde_json::json!({"ingress":[]}));
+                let entries=desired["ingress"].as_array_mut().ok_or_else(unsupported)?;
+                entries.retain(|e|e.get("hostname").is_some());
                 let entry=serde_json::json!({"hostname":q.hostname,"service":format!("http://127.0.0.1:{}",q.port)});
-                if entries.iter().any(|e| e["hostname"]==q.hostname && e != &entry) { return Err(CfError::Conflict.into()); }
-                if !entries.contains(&entry) { let index=entries.iter().position(|e| e.get("hostname").is_none()).unwrap_or(entries.len()); entries.insert(index,entry); }
-                r.previous_config=Some(previous); r.desired_config=Some(desired.clone()); r.ingress_pending=true;
+                entries.retain(|e|e["hostname"]!=q.hostname);
+                entries.insert(0,entry);
+                entries.push(serde_json::json!({"service":"http_status:404"}));
+                r.previous_config=previous; r.desired_config=Some(desired.clone()); r.ingress_pending=true;
                 self.save(d,r)?; self.cf.put_config(&q.account_id,&id,desired).await?;
             },
             4=>{
                 let tunnel=r.tunnel_id.as_deref().ok_or_else(|| DeployError::Message("Missing tunnel".into()))?;
                 let plan=self.cf.plan(&q.zone_id,&q.hostname,tunnel).await?;
                 match plan.action.as_str() {
-                    "create"=>{ r.dns_intent=true; self.save(d,r)?; r.dns_id=Some(self.cf.create_owned_dns(&q.zone_id,&q.hostname,tunnel,&r.owner).await?); self.save(d,r)?; },
-                    "update_own"=>(), _=>return Err(CfError::Conflict.into())
+                    "create"=>{ r.dns_intent=true; self.save(d,r)?; r.dns_id=Some(self.cf.create_owned_dns(&q.zone_id,&q.hostname,tunnel,&r.owner).await?); self.save(d,r)?; self.cf.verify_dns(&q.zone_id,r.dns_id.as_deref().ok_or_else(unsupported)?,tunnel).await?; },
+                    "reuse"=>(),
+                    "update_own"=>{
+                        let old=self.cf.dns_record(&q.zone_id,&q.hostname).await?.ok_or(CfError::Conflict)?;
+                        let id=old["id"].as_str().ok_or_else(unsupported)?.to_owned();
+                        if old["content"].as_str().is_some_and(|content|content.eq_ignore_ascii_case(&format!("{tunnel}.cfargotunnel.com"))) {return Ok(());}
+                        r.dns_update_target=Some(format!("{tunnel}.cfargotunnel.com"));
+                        r.previous_dns=Some(old.clone());r.dns_update_pending=true;self.save(d,r)?;
+                        let mut updated=old;updated["content"]=serde_json::json!(format!("{tunnel}.cfargotunnel.com"));updated["proxied"]=serde_json::json!(true);
+                        self.cf.write_dns(&q.zone_id,&id,updated).await?;
+                        self.cf.verify_dns(&q.zone_id,&id,tunnel).await?;
+                    }, _=>return Err(CfError::Conflict.into())
                 }
             },
             5=>{ let tunnel=r.tunnel_id.as_deref().ok_or_else(|| DeployError::Message("Missing tunnel".into()))?; let token=self.secrets.get(&format!("tunnel:{tunnel}"))?.ok_or_else(|| DeployError::Message("Missing tunnel credential".into()))?; r.connector_started=self.supervisor.start_tunnel(&token).await.map_err(DeployError::Message)?; self.emit(d,r,callback)?; },
@@ -170,37 +200,52 @@ impl Deployer {
                 Err(e)=>{dns_reconciled=false;errors.push(e.to_string());},
             }
         }
-        if r.connector_started { match self.supervisor.stop_tunnel().await { Ok(())=>{r.connector_started=false; self.save(d,r)?;},Err(e)=>errors.push(e) } }
-        if let Some(id)=r.dns_id.clone().filter(|_|dns_reconciled) { match self.cf.delete_dns(&q.zone_id,&id).await { Ok(_)=>{r.dns_id=None; r.dns_intent=false; self.save(d,r)?;},Err(e)=>errors.push(e.to_string()) } }
+        let mut connector_stopped=true;
+        if r.connector_started || (r.tunnel_created && r.owner==d.id) { match self.supervisor.stop_owned_tunnel(r.tunnel_id.as_deref().unwrap_or("")).await { Ok(())=>{r.connector_started=false; self.save(d,r)?;},Err(e)=>{connector_stopped=false;errors.push(e)} } }
+        if let Some(id)=r.dns_id.clone().filter(|_|dns_reconciled) { match self.cf.delete_owned_dns(&q.zone_id,&id,&r.owner).await { Ok(_)=>{r.dns_id=None; r.dns_intent=false; self.save(d,r)?;},Err(e)=>errors.push(e.to_string()) } }
+        if r.dns_update_pending {
+            if let Some(old)=r.previous_dns.clone() {
+                let restore=async {
+                    let current=self.cf.dns_record(&q.zone_id,&q.hostname).await?;
+                    if let Some(current)=current {
+                        if current["id"]==old["id"] && current["content"]==r.dns_update_target.clone().unwrap_or_else(||format!("{}.cfargotunnel.com",r.tunnel_id.as_deref().unwrap_or(""))) {
+                            self.cf.write_dns(&q.zone_id,old["id"].as_str().ok_or_else(unsupported)?,old.clone()).await?;
+                        }
+                    }
+                    Ok::<(),CfError>(())
+                }.await;
+                match restore {Ok(())=>{r.dns_update_pending=false;self.save(d,r)?;},Err(e)=>errors.push(e.to_string())}
+            }
+        }
         if let Some(id)=r.tunnel_id.clone() {
             let cleanup = async {
-                let mut current=match self.cf.config(&q.account_id,&id).await {
-                    Ok(config)=>config,
-                    Err(CfError::NotFound) if r.tunnel_created=>{r.tunnel_created=false;r.tunnel_id=None;r.tunnel_intent=None;r.ingress_pending=false;return Ok(());},
-                    Err(e)=>return Err(e),
-                };
-                if r.ingress_pending {
-                    if r.desired_config.as_ref()==Some(&current) {
-                        current=r.previous_config.clone().ok_or_else(unsupported)?;
-                    } else if let (Some(previous),Some(desired))=(&r.previous_config,&r.desired_config) {
-                        // Preserve concurrent ingress additions; remove only our exact added entry.
-                        let added:Vec<_>=desired["ingress"].as_array().ok_or_else(unsupported)?.iter().filter(|e| !previous["ingress"].as_array().is_some_and(|p|p.contains(e))).cloned().collect();
-                        current["ingress"].as_array_mut().ok_or_else(unsupported)?.retain(|e| !added.contains(e));
+                if r.tunnel_created && r.owner==d.id {
+                    if !connector_stopped {return Err(CfError::Unexpected("Connector stop pending before tunnel deletion".into()));}
+                    // Ownership is journaled before creation. Configuration is irrelevant to deletion.
+                    match self.cf.delete_tunnel(&q.account_id,&id).await {Ok(())=>(),Err(e) if e.is_not_found()=>(),Err(e)=>return Err(e)};
+                    r.tunnel_created=false;r.tunnel_intent=None;r.tunnel_id=None;r.ingress_pending=false;
+                } else if r.ingress_pending {
+                    let mut current=self.cf.config(&q.account_id,&id).await?.unwrap_or_else(||serde_json::json!({"ingress":[]}));
+                    if r.desired_config.as_ref()==Some(&current) && r.previous_config.is_some() {
+                        current=r.previous_config.clone().unwrap();
+                    } else {
+                        let previous=r.previous_config.clone().unwrap_or_else(||serde_json::json!({"ingress":[]}));
+                        let desired=r.desired_config.clone().unwrap_or_else(||serde_json::json!({"ingress":[]}));
+                        let added:Vec<_>=desired["ingress"].as_array().ok_or_else(unsupported)?.iter().filter(|e|e.get("hostname").is_some() && !previous["ingress"].as_array().is_some_and(|p|p.contains(e))).cloned().collect();
+                        current["ingress"].as_array_mut().ok_or_else(unsupported)?.retain(|e|!added.contains(e));
+                        // Put back any old hostname entry we replaced, without overwriting a concurrent edit.
+                        for entry in previous["ingress"].as_array().ok_or_else(unsupported)? {
+                            if entry["hostname"]==q.hostname && !current["ingress"].as_array().unwrap().iter().any(|e|e["hostname"]==q.hostname) {
+                                current["ingress"].as_array_mut().unwrap().insert(0,entry.clone());
+                            }
+                        }
+                        if !current["ingress"].as_array().unwrap().iter().any(|e|e.get("hostname").is_none()) {current["ingress"].as_array_mut().unwrap().push(serde_json::json!({"service":"http_status:404"}));}
                     }
-                    self.cf.put_config(&q.account_id,&id,current.clone()).await?;
-                    r.ingress_pending=false; self.save(d,r).map_err(|e|CfError::Network(e.to_string()))?;
-                }
-                if r.tunnel_created {
-                    // Re-read after restoring/removing ingress; a PUT response is not
-                    // evidence that another actor has not since added an entry.
-                    current=self.cf.config(&q.account_id,&id).await?;
-                    // Only an empty config (or the standard terminal 404) permits deletion.
-                    let empty=current["ingress"].as_array().is_some_and(|entries|entries.iter().all(|e| e==&serde_json::json!({"service":"http_status:404"})));
-                    if empty { match self.cf.delete_tunnel(&q.account_id,&id).await {Ok(())|Err(CfError::NotFound)=>(),Err(e)=>return Err(e)}; r.tunnel_created=false; r.tunnel_intent=None; r.tunnel_id=None; }
+                    self.cf.put_config(&q.account_id,&id,current).await?;r.ingress_pending=false;
                 }
                 Ok::<(),CfError>(())
             }.await;
-            if let Err(e)=cleanup {errors.push(e.to_string());}
+            if let Err(e)=cleanup {errors.push(e.to_string());} else {self.save(d,r)?;}
         }
         if r.site_started {match self.supervisor.stop_site(&q.site_id).await {Ok(())=>{r.site_started=false; self.save(d,r)?;},Err(e)=>errors.push(e)}}
         r.rollback_pending=!errors.is_empty(); self.save(d,r)?;
