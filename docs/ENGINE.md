@@ -1,23 +1,56 @@
 # Hostify engine implementation status
 
-The engine and Tauri shell are not yet connected to the core and do not provide a working hosting product. The core work in this pass is incomplete and must not be used for production deployment.
+This pass hardens `hostify-core` deployment and import only. The offline workspace build confirms that the existing engine and shell still compile with the core APIs; it does not certify an end-to-end hosting product.
 
-## Core work
+## Deployment journal and rollback
 
-Core contains SQLite migration, paths, staged directory and ZIP import, Caddyfile generation and port selection, a keyring-backed secret store, a Cloudflare API client, checksum-gated component downloads, and a deployment implementation with SQLite snapshots and rollback. Public verification compares a successful HTTPS response body with the local index file hash. The Caddyfile also emits an `X-Hostify-Verify` header. Cloudflare and component unit tests use mocks rather than the network.
+Deployment persists its request, ownership information, and create intent in SQLite before each Cloudflare POST. A newly created tunnel has a deployment-specific physical name (`hostify-<deployment UUID>`), recorded before creation; its returned ID is saved before fetching its token. DNS creation persists an intent first and adds the `managed-by=hostify` comment marker plus a `hostify-deployment:<deployment UUID>` DNS tag. The returned DNS ID is saved immediately. Tokens remain in the secret store, outside the journal.
 
-## Known gaps
+Recovery looks up ambiguous tunnel creates by their recorded unique name and DNS creates by hostname, management marker, and deployment tag. It rolls back interrupted attempts and retries failed attempts whose cleanup is incomplete. Successful cleanup operations are checkpointed. A shared hostname or management marker alone is never proof that this deployment created a resource.
 
-Deployment is not yet safe to run: ownership cannot be reliably recovered if a process stops between a remote create operation and saving its result, and automatic tunnel deletion is withheld because the implementation cannot establish that a newly created tunnel is unused by other actors. Reusing a tunnel replaces its ingress and failure rollback does not restore its former configuration. Recovery currently rolls back running deployments only; incomplete rollback after a failure is not retried automatically. Full success, every failure step, and interruption recovery are not yet tested. SiteRuntime implementations must return whether they actually started a resource, to avoid stopping a previously running one.
+Before changing ingress, deployment saves the entire prior config and intended config, including origin options and existing entries. Rollback restores the snapshot when the remote config still equals the intended config. If another actor has changed it, rollback removes only the exact ingress entries this deployment added, preserving other entries and options. Reused tunnels are never deleted. A newly created tunnel is deleted only after removing this deployment's ingress and checking that no ingress remains except the standard terminal 404 entry. A tunnel with other ingress is retained, with its ID and ownership still in the deployment journal.
 
-The import code has not been security audited. Directory traversal checks metadata before opening files and is susceptible to concurrent filesystem replacement (TOCTOU); managed destination ancestors are not checked for reparse points. ZIP symlink behavior and Windows filename edge cases need further adversarial tests. Do not import untrusted sources.
+DNS deletion checks the deployment ownership tag during reconciliation and uses `delete_dns_if_ours` to recheck the management marker before DELETE. Reused DNS is never adopted for cleanup. Connector and local-site stop calls occur only for resources whose runtime start call returned `true`. Remote cleanup failures do not prevent attempts to stop the local resources; incomplete cleanup stays eligible for recovery.
 
-Component acquisition expects a cloudflared `.sha256` asset; it fails closed when unavailable. Real release asset formats and installation replacement on Windows have not been verified. Component downloads do not yet report byte-level progress. Caddy and cloudflared binary execution has not been tested.
+No DNS consent means zero Cloudflare calls. DNS conflicts detected during preflight cause no writes or local starts; planning is checked again before tunnel configuration and DNS creation. Existing ingress is merged rather than replaced. Re-publishing a live site and hostname reuses its journaled physical tunnel, repeats validation and public verification, and does not create another tunnel or DNS record. A previously saved `live` snapshot alone is not treated as successful verification.
 
-The engine supervisor and child Job Object, named pipe ACL and JSON-RPC server, event forwarding, service and scheduled-task management, tray behavior, installer hooks, and IPC commands remain unimplemented. Port selection is advisory and can race with another process.
+Public verification retains the production HTTPS fetch and index-body SHA-256 comparison, with a bounded retry deadline. `SiteRuntime::verify_public` supplies a default production implementation and an offline test seam. Existing public method signatures and engine-facing journal fields remain compatible. Additional Cloudflare trait methods have fail-closed defaults for older adapters; those adapters must implement the journaled operations to deploy safely.
 
-## Verification
+## Import hardening
 
-Run `cargo build -p hostify-core --offline` and `cargo test -p hostify-core --offline` with `%USERPROFILE%\.cargo\bin` on PATH. Tests use local mocks and no real credentials. Rustfmt is unavailable in the current toolchain.
+Imports retain only the newest three previous releases, ordered by their numeric timestamp names. Unsafe release entries and existing links or reparse points in managed destination ancestors are rejected.
 
-No operation has been verified against real Cloudflare, release downloads, Windows Credential Manager, installed Caddy or cloudflared, a Windows reboot, Windows Service, scheduled task, or installer. The API behavior, permissions, release checksum availability, and public propagation need real integration verification before release.
+On Windows, directory traversal retains non-delete-shared directory handles during recursion. Source files, including ZIP archives, are opened with `FILE_FLAG_OPEN_REPARSE_POINT`; metadata from the opened handle must identify a regular, non-reparse file with the scanned size. File handles deny write/delete sharing while copying. Size limits are applied after opening and the copied byte count is checked. These checks reduce scan/open replacement races; they are not a complete filesystem security audit. In particular, destination ancestor validation is still path based and is not an atomic defense against hostile concurrent changes. ZIP edge cases and other platform behavior need further adversarial review.
+
+## Covered by offline tests
+
+The core suite uses a fake `SiteRuntime`, in-memory SQLite, and wiremock Cloudflare on loopback. It covers:
+
+- Full seven-step success ending `live`; a separate failure at every step with exact DELETE and local-stop assertions, preserving unrelated DNS and tunnels.
+- No-consent refusal with zero Cloudflare requests; foreign and mismatched tagged DNS conflicts without writes.
+- Propagation failure ending `failed`, reused DNS preservation, full reused-ingress restoration, and already-running local resources remaining running.
+- An ingress write that takes effect but returns an error; concurrent ingress additions retained and a shared created tunnel preserved.
+- Tunnel and DNS creation interrupted before ID save, both as seeded crash snapshots and by cancelling real mock HTTP POSTs after remote creation while their response is delayed.
+- Incomplete failed rollback retried by recovery, repeat recovery doing nothing, and another deployment's tagged DNS being preserved.
+- Re-publish without duplicate creates, and failed re-verification preserving previously live resources.
+- Release retention, post-scan size changes, Windows source handle sharing restrictions, directory junction rejection, managed destination junction rejection, and file-symlink replacement rejection when Windows permits creating the test link.
+
+Validation on this Windows machine: 42 core tests pass; the file-symlink test exits early with an explicit `SKIP` message because creating a symlink fails with privilege error 1314. Junction and handle-sharing tests execute and pass. Rust reports conditional skips inside test bodies as passed rather than ignored. `cargo build --workspace --offline` also passes. No new crates or external network access were used. Rustfmt is not installed for the active toolchain.
+
+Commands use `%USERPROFILE%\.cargo\bin` on PATH:
+
+```text
+cargo test -p hostify-core --offline
+cargo test -p hostify-core --offline -- --nocapture
+cargo build --workspace --offline
+```
+
+## Still unverified against real services and processes
+
+No operation in this pass was verified against real Cloudflare, release downloads, Windows Credential Manager, installed Caddy or cloudflared, reboot, Windows Service, scheduled tasks, or installer behavior. In particular, Cloudflare token scopes, DNS tag acceptance, unconfigured-tunnel configuration responses, list visibility immediately after creates, ingress restoration behavior, and real HTTPS propagation remain integration checks before release. The mock tests do not exercise real TLS or the production HTTPS retry loop.
+
+Cloudflare calls are not a distributed transaction: another account actor can change configuration between a read and a write or delete. The client has no provider-side compare-and-swap or transaction primitive; preserving changes already visible during rollback does not eliminate that concurrent-update window. Recovery assumes successful Cloudflare list responses accurately expose committed creates. Historical deployment snapshots made before create intents existed cannot reconstruct IDs that were never saved.
+
+`SiteRuntime` must report `true` only when it actually starts a resource, and must clean up partial starts before returning an error. A process death between a local start taking effect and its boolean result being saved is outside the remote-create journal guarantee; the engine must reconcile its own child processes. Core cannot identify an unknown start through the existing runtime API. Callers must serialize publish/recovery operations for the same site or shared tunnel; this pass adds no cross-process deployment lock.
+
+Component acquisition still expects a cloudflared `.sha256` release asset and fails closed when it is unavailable. Real checksum formats and Windows installation replacement remain unverified. Port selection remains advisory and can race with another process. Engine and shell runtime behavior beyond compilation is outside this core-only pass.

@@ -5,6 +5,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CfError {
+    #[error("Cloudflare resource not found")] NotFound,
     #[error("Invalid Cloudflare token")] InvalidToken,
     #[error("Missing Cloudflare permission: {0}")] MissingPermission(String),
     #[error("Cloudflare zone not found")] ZoneNotFound,
@@ -30,6 +31,42 @@ pub struct ExistingRecord { #[serde(rename="type")] pub kind: String, pub conten
 #[serde(rename_all="camelCase")]
 pub struct DnsPlan { pub hostname: String, pub action: String, #[serde(skip_serializing_if="Option::is_none")] pub existing: Option<ExistingRecord>, pub message: String }
 impl CloudflareClient {
+    /// Split operations so deploy can journal the remote ID before fetching credentials.
+    pub async fn find_tunnel(&self, account: &str, name: &str) -> Result<Option<String>, CfError> {
+        let items = self.pages(&format!("/accounts/{account}/cfd_tunnel")).await?;
+        Ok(items.iter().find(|v| v["name"].as_str() == Some(name) && v.get("deleted_at").is_none_or(Value::is_null)).and_then(|v| v["id"].as_str()).map(str::to_owned))
+    }
+    pub async fn create_tunnel(&self, account: &str, name: &str) -> Result<String, CfError> {
+        let v = self.request(reqwest::Method::POST, &format!("/accounts/{account}/cfd_tunnel"), Some(json!({"name":name,"config_src":"cloudflare"}))).await?;
+        v["result"]["id"].as_str().map(str::to_owned).ok_or_else(|| CfError::Network("Missing tunnel ID".into()))
+    }
+    pub async fn tunnel_token(&self, account: &str, id: &str) -> Result<String, CfError> {
+        let v = self.request(reqwest::Method::GET, &format!("/accounts/{account}/cfd_tunnel/{id}/token"), None).await?;
+        v["result"].as_str().map(str::to_owned).ok_or_else(|| CfError::Network("Missing tunnel token".into()))
+    }
+    pub async fn get_ingress(&self, account: &str, id: &str) -> Result<Value, CfError> {
+        let v = self.request(reqwest::Method::GET, &format!("/accounts/{account}/cfd_tunnel/{id}/configurations"), None).await?;
+        let config = v["result"]["config"].clone();
+        if !config["ingress"].is_array() { return Err(CfError::Network("Missing tunnel ingress".into())); }
+        Ok(config)
+    }
+    pub async fn put_config(&self, account: &str, id: &str, config: Value) -> Result<(), CfError> {
+        self.request(reqwest::Method::PUT, &format!("/accounts/{account}/cfd_tunnel/{id}/configurations"), Some(json!({"config":config}))).await?; Ok(())
+    }
+    pub async fn dns_preflight(&self, zone: &str, hostname: &str) -> Result<(), CfError> {
+        for v in self.records(zone, hostname).await? {
+            if v["type"] != "CNAME" || v["comment"] != "managed-by=hostify" { return Err(CfError::Conflict); }
+        }
+        Ok(())
+    }
+    pub async fn find_deployment_dns(&self, zone: &str, hostname: &str, owner: &str) -> Result<Option<String>, CfError> {
+        Ok(self.records(zone, hostname).await?.iter().find(|v| v["comment"] == "managed-by=hostify" && v["tags"].as_array().is_some_and(|tags| tags.contains(&json!(format!("hostify-deployment:{owner}"))))).and_then(|v| v["id"].as_str()).map(str::to_owned))
+    }
+    pub async fn create_deployment_dns(&self, zone: &str, hostname: &str, tunnel: &str, owner: &str) -> Result<String, CfError> {
+        if self.plan_dns(zone, hostname, tunnel).await?.action != "create" { return Err(CfError::Conflict); }
+        let v = self.request(reqwest::Method::POST, &format!("/zones/{zone}/dns_records"), Some(json!({"type":"CNAME","name":hostname,"content":format!("{tunnel}.cfargotunnel.com"),"proxied":true,"comment":"managed-by=hostify","tags":[format!("hostify-deployment:{owner}")]}))).await?;
+        v["result"]["id"].as_str().map(str::to_owned).ok_or_else(|| CfError::Network("Missing DNS record ID".into()))
+    }
     pub fn new(base_url: impl AsRef<str>, token: impl Into<String>) -> Self { Self { base: base_url.as_ref().trim_end_matches('/').to_owned(), token: token.into(), client: reqwest::Client::builder().timeout(Duration::from_secs(20)).build().unwrap_or_default() } }
     pub fn production(token: impl Into<String>) -> Self { Self::new("https://api.cloudflare.com/client/v4", token) }
     async fn request(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value, CfError> {
@@ -37,6 +74,7 @@ impl CloudflareClient {
         if let Some(v) = body { req = req.json(&v); }
         let response = req.send().await.map_err(|e| CfError::Network(e.to_string()))?;
         let status = response.status();
+        if status.as_u16() == 404 { return Err(CfError::NotFound); }
         if status.as_u16() == 401 { return Err(CfError::InvalidToken); }
         if status.as_u16() == 403 { return Err(CfError::MissingPermission("access to this resource".into())); }
         if status.as_u16() == 429 { return Err(CfError::RateLimited); }
@@ -82,7 +120,7 @@ impl CloudflareClient {
         Ok(DnsPlan{hostname:hostname.into(),action:if own.is_some(){"update_own"}else{"create"}.into(),existing:own,message:"DNS record can be configured".into()})
     }
     pub async fn create_dns(&self, zone: &str, hostname: &str, tunnel: &str) -> Result<String, CfError> { if self.plan_dns(zone,hostname,tunnel).await?.action != "create" { return Err(CfError::Conflict); } let v=self.request(reqwest::Method::POST,&format!("/zones/{zone}/dns_records"),Some(json!({"type":"CNAME","name":hostname,"content":format!("{tunnel}.cfargotunnel.com"),"proxied":true,"comment":"managed-by=hostify"}))).await?; v["result"]["id"].as_str().map(str::to_owned).ok_or_else(|| CfError::Network("Missing DNS record ID".into())) }
-    pub async fn delete_dns_if_ours(&self, zone: &str, id: &str) -> Result<bool, CfError> { let path=format!("/zones/{zone}/dns_records/{id}"); let v=self.request(reqwest::Method::GET,&path,None).await?; if v["result"]["comment"].as_str()!=Some("managed-by=hostify") { return Ok(false); } self.request(reqwest::Method::DELETE,&path,None).await?; Ok(true) }
+    pub async fn delete_dns_if_ours(&self, zone: &str, id: &str) -> Result<bool, CfError> { let path=format!("/zones/{zone}/dns_records/{id}"); let v=match self.request(reqwest::Method::GET,&path,None).await { Ok(v)=>v, Err(CfError::NotFound)=>return Ok(false), Err(e)=>return Err(e) }; if v["result"]["comment"].as_str()!=Some("managed-by=hostify") { return Ok(false); } self.request(reqwest::Method::DELETE,&path,None).await?; Ok(true) }
 }
 #[cfg(test)] mod tests {
     use super::*;
