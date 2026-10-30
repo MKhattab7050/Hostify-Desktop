@@ -27,7 +27,7 @@ forward! {
     engine_status(); system_stats(); list_sites();
     inspect_project(path: String => "path", kind: String => "kind");
     get_app_config(site_id: String => "siteId");
-    set_app_config(site_id: String => "siteId", config: Value => "config", node_version: Option<String> => "nodeVersion");
+    set_app_config(site_id: String => "siteId", config: Value => "config", node_version: Option<String> => "nodeVersion", php_version: Option<String> => "phpVersion");
     build_app(site_id: String => "siteId", trust_acknowledged: bool => "trustAcknowledged");
     cancel_build(site_id: String => "siteId"); get_build_status(site_id: String => "siteId");
     app_status(site_id: String => "siteId");

@@ -118,6 +118,7 @@ impl EngineClient {
                             | "components-progress"
                             | "runtime-progress"
                             | "app-build"
+                            | "app-build"
                     ) {
                         let _ =
                             app.emit(event, value.get("payload").cloned().unwrap_or(Value::Null));

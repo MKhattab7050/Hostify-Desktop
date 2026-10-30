@@ -38,6 +38,22 @@ pub fn is_pinned(kind: &str, version: &str) -> bool {
         .iter()
         .any(|p| p.kind == kind && p.version == version)
 }
+/// Pinned versions in descending numeric order, including the PHP package revision.
+pub fn pinned_versions(kind: &str) -> Vec<&'static str> {
+    let mut versions = MANIFEST
+        .iter()
+        .filter(|p| p.kind == kind)
+        .map(|p| p.version)
+        .collect::<Vec<_>>();
+    versions.sort_by_cached_key(|v| {
+        std::cmp::Reverse(
+            v.split(['.', '-'])
+                .map(|n| n.parse::<u32>().unwrap_or(0))
+                .collect::<Vec<_>>(),
+        )
+    });
+    versions
+}
 const MANIFEST: &[ManifestEntry] = &[
     ManifestEntry {
         kind: "node",

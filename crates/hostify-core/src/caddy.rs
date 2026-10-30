@@ -14,6 +14,7 @@ pub struct Site {
 pub enum Backend {
     Static { root: PathBuf },
     Proxy { port: u16 },
+    Php { root: PathBuf, upstreams: Vec<u16> },
 }
 #[derive(Debug, Error)]
 pub enum CaddyError {
@@ -39,6 +40,53 @@ pub fn generate(sites: &[Site]) -> Result<String, CaddyError> {
         match &site.backend {
             Backend::Static { root } => {
                 result.push_str(&format!("\nhttp://:{} {{\n    bind 127.0.0.1\n    route {{\n        handle_path /.well-known/hostify-verify/* {{\n            root * {}\n            header Cache-Control no-store\n            file_server\n        }}\n        handle {{\n            root * {}\n            @hidden path_regexp hidden (^|/)\\.\n            respond @hidden 404\n            header {{\n                X-Hostify-Verify hostify\n                X-Content-Type-Options nosniff\n                X-Frame-Options DENY\n                Referrer-Policy strict-origin-when-cross-origin\n            }}\n            file_server\n        }}\n    }}\n",site.port,quote(&site.verify_root)?,quote(root)?));
+            }
+            Backend::Php { root, upstreams } => {
+                // PHP CGI cannot open SCRIPT_FILENAME with the Win32 extended-path prefix.
+                let root_text = root.to_string_lossy();
+                let root = PathBuf::from(root_text.strip_prefix(r"\\?\").unwrap_or(&root_text));
+                let upstreams = upstreams
+                    .iter()
+                    .map(|p| format!("127.0.0.1:{p}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                result.push_str(&format!(r#"
+http://:{} {{
+    bind 127.0.0.1
+    route {{
+        handle_path /.well-known/hostify-verify/* {{
+            root * {}
+            header Cache-Control no-store
+            file_server
+        }}
+        handle /.well-known/hostify-caddy-ok {{
+            respond 200
+        }}
+        handle {{
+            route {{
+            @hidden path_regexp (^|/)\.
+            respond @hidden 404
+            @private path_regexp "(?i)(::|:\$|[. ]$|(^|/)(composer\.(json|lock)|[^/]*\.(ini|log))(/|$)|^/vendor(/|$))"
+            respond @private 404
+            header {{
+                X-Hostify-Verify hostify
+                X-Content-Type-Options nosniff
+                X-Frame-Options DENY
+                Referrer-Policy strict-origin-when-cross-origin
+            }}
+            root * {}
+                php_fastcgi {} {{
+                    lb_policy least_conn
+                    lb_try_duration 30s
+                    unhealthy_request_count 1
+                }}
+                @phpSource path_regexp (?i)\.php
+                respond @phpSource 404
+                file_server
+            }}
+        }}
+    }}
+"#, site.port, quote(&site.verify_root)?, quote(&root)?, upstreams));
             }
             Backend::Proxy { port } => {
                 result.push_str(&format!("\nhttp://:{} {{\n    bind 127.0.0.1\n    route {{\n        handle_path /.well-known/hostify-verify/* {{\n            root * {}\n            header Cache-Control no-store\n            file_server\n        }}\n        handle /.well-known/hostify-caddy-ok {{\n            respond 200\n        }}\n        handle {{\n            header {{\n                X-Hostify-Verify hostify\n                X-Content-Type-Options nosniff\n                X-Frame-Options DENY\n                Referrer-Policy strict-origin-when-cross-origin\n            }}\n            reverse_proxy 127.0.0.1:{} {{\n                flush_interval -1\n            }}\n        }}\n    }}\n", site.port, quote(&site.verify_root)?, port));
@@ -316,5 +364,50 @@ http://:9000 {
             assert!(c.contains(text));
         }
         assert!(!c.contains("file_server\n        }\n    }"));
+    }
+}
+
+#[cfg(test)]
+mod php_tests {
+    use super::*;
+    #[test]
+    fn real_caddy_validates_php_pool_and_guards() {
+        let binary = PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA"))
+            .join("Hostify/bin/caddy.exe");
+        let d = tempfile::tempdir().unwrap();
+        let config = generate(&[Site {
+            verify_root: d.path().join("verify"),
+            port: 19000,
+            backend: Backend::Php {
+                root: d.path().to_owned(),
+                upstreams: vec![19001, 19002],
+            },
+            log: d.path().join("access.log"),
+        }])
+        .unwrap();
+        for expected in [
+            "::",
+            ":\\$",
+            "(?i)\\.php",
+            "lb_policy least_conn",
+            "lb_try_duration 30s",
+            "unhealthy_request_count 1",
+            "127.0.0.1:19001 127.0.0.1:19002",
+        ] {
+            assert!(config.contains(expected), "{expected}");
+        }
+        let path = d.path().join("Caddyfile");
+        std::fs::write(&path, config).unwrap();
+        let result = std::process::Command::new(binary)
+            .args(["validate", "--adapter", "caddyfile", "--config"])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
     }
 }

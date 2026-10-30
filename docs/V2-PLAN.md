@@ -45,7 +45,7 @@ Imported Node and PHP projects are trusted-user code. They run as the signed-in 
 | 6 | Environment variables and DPAPI vault | Codex task 11 | Done |
 | 3 | Node.js hosting | Codex task 12 | Done locally: real Express and Socket.IO through Caddy. Public HTTPS not yet tested |
 | 7 | Routing by website kind | Codex tasks 12, 13 | |
-| 4 | PHP hosting | Codex task 13 | |
+| 4 | PHP hosting | Codex task 13 | Done locally: real PHP 8.4 and 8.5 worker pools through Caddy. Public HTTPS not yet tested |
 | 5 | MySQL | Codex task 14 | |
 | 8 | UI | Claude | |
 | 9 | Reliability and security audit | Claude review | |

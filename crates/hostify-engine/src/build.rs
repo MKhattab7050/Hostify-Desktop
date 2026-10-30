@@ -90,14 +90,19 @@ pub(crate) fn environment(
     cwd: &Path,
     install: bool,
 ) -> Result<ProcessEnvironment, String> {
-    let runtime = exe.parent().ok_or("The Node runtime path is invalid.")?;
-    let path = std::env::join_paths([
-        runtime.to_path_buf(),
-        cwd.join("node_modules/.bin"),
+    let runtime = exe.parent().ok_or("The runtime path is invalid.")?;
+    let php = exe
+        .file_name()
+        .is_some_and(|n| n.eq_ignore_ascii_case("php-cgi.exe"));
+    let mut paths = vec![runtime.to_path_buf()];
+    if !php {
+        paths.push(cwd.join("node_modules/.bin"));
+    }
+    paths.push(
         PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
             .join("System32"),
-    ])
-    .map_err(|e| e.to_string())?;
+    );
+    let path = std::env::join_paths(paths).map_err(|e| e.to_string())?;
     let db = store.db().map_err(|e| e.to_string())?;
     let mut env = hostify_core::env_vars::resolved(&db, id)?
         .into_iter()
@@ -110,15 +115,17 @@ pub(crate) fn environment(
     env.retain(|(n, _)| {
         !n.eq_ignore_ascii_case("PATH") && (!install || !n.eq_ignore_ascii_case("NODE_ENV"))
     });
-    if !install && !env.iter().any(|(n, _)| n.eq_ignore_ascii_case("NODE_ENV")) {
+    if !php && !install && !env.iter().any(|(n, _)| n.eq_ignore_ascii_case("NODE_ENV")) {
         env.push(("NODE_ENV".into(), "production".into()));
     }
     env.push(("PATH".into(), path.to_string_lossy().into_owned()));
-    env.push((
-        "npm_config_cache".into(),
-        store.root.join("cache/npm").to_string_lossy().into_owned(),
-    ));
-    env.push(("npm_config_update_notifier".into(), "false".into()));
+    if !php {
+        env.push((
+            "npm_config_cache".into(),
+            store.root.join("cache/npm").to_string_lossy().into_owned(),
+        ));
+        env.push(("npm_config_update_notifier".into(), "false".into()));
+    }
     Ok((env, redact))
 }
 pub(crate) fn npm(exe: &Path) -> String {
@@ -139,8 +146,8 @@ pub(crate) async fn begin(engine: &Arc<Engine>, p: &Value) -> Result<Value> {
         .ok_or_else(|| anyhow!("Website ID is required."))?
         .to_owned();
     let site = engine.store.site(&id)?;
-    if site.kind != "node" {
-        bail!("Builds are available for Node websites.");
+    if !matches!(site.kind.as_str(), "node" | "php") {
+        bail!("Builds are available for Node and PHP websites.");
     }
     if p["trustAcknowledged"] != true {
         bail!("Acknowledge that you trust this release before running its code.");
@@ -171,15 +178,17 @@ pub(crate) async fn begin(engine: &Arc<Engine>, p: &Value) -> Result<Value> {
         .join(&id)
         .join("app")
         .join(&release);
-    config.validate(&root).map_err(|e| anyhow!(e))?;
+    config
+        .validate_kind(&root, &site.kind)
+        .map_err(|e| anyhow!(e))?;
     let exe = engine
         .store
         .runtimes
         .resolve(
-            "node",
+            &site.kind,
             site.runtime_version
                 .as_deref()
-                .ok_or_else(|| anyhow!("Choose a Node version on the Runtimes page."))?,
+                .ok_or_else(|| anyhow!("Choose a runtime version on the Runtimes page."))?,
         )
         .map_err(|e| anyhow!(e))?;
     let supervisor = engine
@@ -360,6 +369,38 @@ async fn run(
     step: &mut &'static str,
     mut cancel: watch::Receiver<bool>,
 ) -> Result<(), Failure> {
+    if store
+        .site(id)
+        .map_err(|e| ("failed", e.to_string(), None))?
+        .kind
+        == "php"
+    {
+        event(
+            store,
+            id,
+            build,
+            "install",
+            "done",
+            "PHP requires no install step; Composer is not run.",
+            None,
+        )
+        .map_err(|e| ("failed", e.to_string(), None))?;
+        *step = "build";
+        event(
+            store,
+            id,
+            build,
+            step,
+            "done",
+            "The PHP release is built and trusted. It runs as the signed-in user.",
+            None,
+        )
+        .map_err(|e| ("failed", e.to_string(), None))?;
+        if *cancel.borrow() {
+            return Err(("cancelled", "The build was cancelled.".into(), None));
+        }
+        return Ok(());
+    }
     let cwd = hostify_core::app_config::inside(root, &config.working_dir)
         .map_err(|e| ("failed", e, None))?;
     let log = store.root.join("logs").join(format!("{id}.build.log"));

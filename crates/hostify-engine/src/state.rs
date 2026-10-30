@@ -178,6 +178,7 @@ impl Store {
         let mut ports = Vec::new();
         for site in self.sites()? {
             ports.push(site.local_port);
+            ports.extend(self.app_config(&site.id)?.php_ports);
             if let Some(p) = self.app_config(&site.id)?.internal_port {
                 ports.push(p);
             }
@@ -729,8 +730,8 @@ impl Engine {
                 let _guard = self.operations.lock().await;
                 let id = arg(&p, "siteId")?;
                 let site = s.site(id)?;
-                if site.kind != "node" {
-                    bail!("Application configuration is available for Node websites.");
+                if !matches!(site.kind.as_str(), "node" | "php") {
+                    bail!("Application configuration is available for Node and PHP websites.");
                 }
                 crate::build::refuse_busy(self, id)?;
                 let old = s.app_config(id)?;
@@ -740,6 +741,7 @@ impl Engine {
                         .ok_or_else(|| anyhow!("Application configuration is required."))?,
                 )?;
                 config.internal_port = old.internal_port;
+                config.php_ports = old.php_ports.clone();
                 config.active_release = old.active_release.clone();
                 config.previous_release = old.previous_release.clone();
                 config.pending_release = old.pending_release.clone();
@@ -751,15 +753,22 @@ impl Engine {
                     .or(config.active_release.as_ref())
                     .ok_or_else(|| anyhow!("Import a release first."))?;
                 config
-                    .validate(&s.root.join("sites").join(id).join("app").join(release))
+                    .validate_kind(
+                        &s.root.join("sites").join(id).join("app").join(release),
+                        &site.kind,
+                    )
                     .map_err(|e| anyhow!(e))?;
                 let version = p
-                    .get("nodeVersion")
+                    .get(if site.kind == "php" {
+                        "phpVersion"
+                    } else {
+                        "nodeVersion"
+                    })
                     .and_then(Value::as_str)
                     .or(site.runtime_version.as_deref())
-                    .ok_or_else(|| anyhow!("Choose a Node runtime version."))?;
-                if !hostify_core::runtimes::is_pinned("node", version) {
-                    bail!("Choose a pinned Node runtime version.");
+                    .ok_or_else(|| anyhow!("Choose a runtime version."))?;
+                if !hostify_core::runtimes::is_pinned(&site.kind, version) {
+                    bail!("Choose a pinned runtime version.");
                 }
                 let rebuild = config.install != old.install
                     || config.build_script != old.build_script
@@ -1009,13 +1018,10 @@ impl Engine {
                 } else {
                     s.site(&id)?.kind
                 };
-                if site_kind == "php" {
-                    bail!("PHP hosting is not available yet.");
+                if !["static", "node", "php"].contains(&site_kind.as_str()) {
+                    bail!("Choose static, node or php as the website kind.");
                 }
-                if !["static", "node"].contains(&site_kind.as_str()) {
-                    bail!("Choose static or node as the website kind.");
-                }
-                if site_kind == "node" {
+                if matches!(site_kind.as_str(), "node" | "php") {
                     crate::build::refuse_busy(self, &id)?;
                     let inspection = hostify_core::project::inspect(Path::new(source), kind)
                         .map_err(|e| anyhow!(e))?;
@@ -1029,6 +1035,7 @@ impl Engine {
                     };
                     if method == "add_site" {
                         config.internal_port = None;
+                        config.php_ports.clear();
                         config.active_release = None;
                         config.previous_release = None;
                         config.pending_release = None;
@@ -1038,7 +1045,9 @@ impl Engine {
                     let site_dir = s.root.join("sites").join(&id);
                     let (report, release) =
                         hostify_core::import::import_release(Path::new(source), kind, &site_dir)?;
-                    if let Err(e) = config.validate(&site_dir.join("app").join(&release)) {
+                    if let Err(e) =
+                        config.validate_kind(&site_dir.join("app").join(&release), &site_kind)
+                    {
                         // Leave no refused import behind; add_site's folder is brand new.
                         let _ = std::fs::remove_dir_all(if method == "add_site" {
                             site_dir.clone()
@@ -1047,6 +1056,17 @@ impl Engine {
                         });
                         bail!(e);
                     }
+                    let recommended_runtime = if hostify_core::runtimes::is_pinned(
+                        &site_kind,
+                        &inspection.recommended_runtime,
+                    ) {
+                        inspection.recommended_runtime
+                    } else {
+                        hostify_core::runtimes::pinned_versions(&site_kind)
+                            .first()
+                            .ok_or_else(|| anyhow!("No pinned runtime for this website kind."))?
+                            .to_string()
+                    };
                     let now = Utc::now().to_rfc3339();
                     if method == "add_site" {
                         config.active_release = None;
@@ -1060,11 +1080,13 @@ impl Engine {
                             &reserved,
                         )?;
                         reserved.push(port);
-                        config.internal_port = Some(hostify_core::caddy::allocate_port(
-                            s.settings()?.base_port_start,
-                            &reserved,
-                        )?);
-                        s.db()?.execute("INSERT INTO websites(id,name,source_path,local_port,file_count,size_bytes,created_at,updated_at,kind,runtime_version,app_config_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?7,'node',?8,?9)",params![id,arg(&p,"name")?,source,port,report.file_count,report.size_bytes,now,inspection.recommended_runtime,serde_json::to_string(&config)?])?;
+                        if site_kind == "node" {
+                            config.internal_port = Some(hostify_core::caddy::allocate_port(
+                                s.settings()?.base_port_start,
+                                &reserved,
+                            )?);
+                        }
+                        s.db()?.execute("INSERT INTO websites(id,name,source_path,local_port,file_count,size_bytes,created_at,updated_at,kind,runtime_version,app_config_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?7,?10,?8,?9)",params![id,arg(&p,"name")?,source,port,report.file_count,report.size_bytes,now,recommended_runtime,serde_json::to_string(&config)?,site_kind])?;
                     } else {
                         config.pending_release = Some(release);
                         s.save_app_config(&id, &config)?;
@@ -1116,14 +1138,16 @@ impl Engine {
                     s.status(id, "starting", None)?;
                     match self.runtime.start_site(id).await {
                         Ok(_) => {
-                            if s.site(id)?.kind == "node" {
+                            if matches!(s.site(id)?.kind.as_str(), "node" | "php") {
                                 s.process_status(id, &format!("site:{id}"), "running", None)?;
                             } else {
                                 s.status(id, "running", None)?;
                             }
                         }
                         Err(e) => {
-                            if s.site(id)?.kind != "node" || s.site(id)?.status != "running" {
+                            if !matches!(s.site(id)?.kind.as_str(), "node" | "php")
+                                || s.site(id)?.status != "running"
+                            {
                                 s.status(id, "error", Some(e.clone()))?;
                             }
                             bail!("{e}")

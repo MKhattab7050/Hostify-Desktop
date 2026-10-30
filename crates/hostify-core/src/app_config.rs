@@ -42,9 +42,53 @@ fn dot() -> String {
 fn slash() -> String {
     "/".into()
 }
+fn workers() -> u8 {
+    4
+}
+fn extensions() -> Vec<String> {
+    [
+        "mbstring",
+        "openssl",
+        "curl",
+        "fileinfo",
+        "mysqli",
+        "pdo_mysql",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+pub const PHP_EXTENSIONS: &[&str] = &[
+    "mbstring",
+    "openssl",
+    "curl",
+    "fileinfo",
+    "mysqli",
+    "pdo_mysql",
+    "gd",
+    "intl",
+    "exif",
+    "zip",
+    "soap",
+    "sodium",
+    "pdo_sqlite",
+    "sqlite3",
+];
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
+    #[serde(default = "dot")]
+    pub document_root: String,
+    #[serde(default = "workers")]
+    pub php_workers: u8,
+    #[serde(default = "extensions")]
+    pub php_extensions: Vec<String>,
+    #[serde(default)]
+    pub php_settings: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub persistent_paths: Vec<String>,
+    #[serde(default)]
+    pub php_ports: Vec<u16>,
     #[serde(default)]
     pub install: Install,
     #[serde(default)]
@@ -111,6 +155,60 @@ pub fn inside(release: &Path, text: &str) -> Result<PathBuf, String> {
 }
 impl AppConfig {
     pub fn validate(&self, release: &Path) -> Result<(), String> {
+        self.validate_kind(release, "node")
+    }
+    pub fn validate_php(&self) -> Result<(), String> {
+        if !(1..=16).contains(&self.php_workers) {
+            return Err("PHP workers must be between 1 and 16.".into());
+        }
+        for name in &self.php_extensions {
+            if !PHP_EXTENSIONS.contains(&name.as_str()) {
+                return Err(format!("PHP extension {name} is not allowed."));
+            }
+        }
+        for (key, value) in &self.php_settings {
+            let seconds = key == "max_execution_time";
+            if !seconds
+                && !["memory_limit", "upload_max_filesize", "post_max_size"].contains(&key.as_str())
+            {
+                return Err("PHP setting is not allowed.".into());
+            }
+            let digits = if !seconds {
+                value.trim_end_matches(['K', 'M', 'G'])
+            } else {
+                value
+            };
+            if digits.is_empty()
+                || value.len() > digits.len() + 1
+                || !digits.bytes().all(|b| b.is_ascii_digit())
+            {
+                return Err(format!("Invalid PHP setting {key}."));
+            }
+        }
+        Ok(())
+    }
+    pub fn validate_kind(&self, release: &Path, kind: &str) -> Result<(), String> {
+        self.validate_php()?;
+        if !inside(release, &self.document_root)?.is_dir() {
+            return Err("The document root must be a directory.".into());
+        }
+        for text in &self.persistent_paths {
+            let candidate = release.join(relative(text)?);
+            let ancestor = candidate
+                .ancestors()
+                .find(|p| p.exists())
+                .ok_or("Cannot resolve persistent path.")?;
+            if !ancestor
+                .canonicalize()
+                .map_err(|e| e.to_string())?
+                .starts_with(release.canonicalize().map_err(|e| e.to_string())?)
+            {
+                return Err(
+                    "Persistent paths must stay inside the release, including through junctions."
+                        .into(),
+                );
+            }
+        }
         let cwd = inside(release, &self.working_dir)?;
         if !cwd.is_dir() {
             return Err("The working directory must be a directory.".into());
@@ -146,6 +244,9 @@ impl AppConfig {
         .flatten()
         {
             uuid::Uuid::parse_str(id).map_err(|_| "The release ID is invalid.")?;
+        }
+        if kind == "php" {
+            return Ok(());
         }
         let script = |name: &str| -> Result<(), String> {
             let p = cwd.join("package.json");
@@ -272,5 +373,38 @@ mod junction_config_tests {
         };
         assert!(c.validate(release.path()).unwrap_err().contains("inside"));
         std::fs::remove_dir(&link).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod php_tests {
+    use super::*;
+    #[test]
+    fn php_defaults_validation_and_no_package_requirement() {
+        let d = tempfile::tempdir().unwrap();
+        let mut c = AppConfig::default();
+        assert!(c.validate_kind(d.path(), "php").is_ok());
+        assert!(c.validate(d.path()).is_err());
+        for value in ["", "1MM", "-1", "128m", "1\nx=1"] {
+            c.php_settings.insert("memory_limit".into(), value.into());
+            assert!(c.validate_php().is_err(), "{value}");
+        }
+        c.php_settings.insert("memory_limit".into(), "128M".into());
+        assert!(c.validate_php().is_ok());
+        c.php_settings
+            .insert("max_execution_time".into(), "1M".into());
+        assert!(c.validate_php().is_err());
+        c.php_settings.clear();
+        c.php_workers = 17;
+        assert!(c.validate_php().is_err());
+        c.php_workers = 1;
+        c.php_extensions.push("not_allowed".into());
+        assert!(c.validate_php().is_err());
+        c.php_extensions.pop();
+        c.document_root = "../outside".into();
+        assert!(c.validate_kind(d.path(), "php").is_err());
+        c.document_root = ".".into();
+        c.persistent_paths = vec!["../outside".into()];
+        assert!(c.validate_kind(d.path(), "php").is_err());
     }
 }

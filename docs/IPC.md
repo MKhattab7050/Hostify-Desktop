@@ -122,3 +122,26 @@ Event `app-build`: `{siteId,buildId,step:'install'|'build'|'start'|'verify',stat
 Inspection executes no project code, limits each parsed file to 2 MiB, and returns dotenv names only. Root `.env` is excluded from app imports; the UI must explicitly submit its contents through `import_env` for encrypted secret storage. Project code runs as the signed-in Windows user after explicit trust acknowledgment. npm install lifecycle scripts run only when `allowInstallScripts` is enabled.
 
 The engine emits app-build on its pipe. The existing desktop reader whitelist in src-tauri/src/engine.rs does not forward that event to Tauri; that file is outside Task 12 ownership. Desktop consumers currently need get_build_status, pending the shell integration change.
+
+
+## PHP hosting IPC (Task 13)
+
+PHP imports and updates now use the same immutable releases, explicit trust, build events, promotion and rollback as Node. `build_app` acknowledges trust and marks a PHP release built without running Composer, npm, install hooks or build scripts. Code runs as the signed-in user. `set_app_config` accepts `phpVersion` for PHP sites and checks the pinned runtime manifest; `nodeVersion` retains its Node meaning. Both optional version arguments are forwarded by the desktop shell. The desktop event reader forwards `app-build` as well as `runtime-progress`.
+
+Additional defaulted `AppConfig` fields:
+
+```ts
+interface PhpAppConfigFields {
+  documentRoot: string;             // default ".", relative to release
+  phpWorkers: number;               // default 4, range 1..16
+  phpExtensions: string[];          // mbstring, openssl, curl, fileinfo, mysqli, pdo_mysql
+  phpSettings: Record<string,string>; // memory_limit, upload_max_filesize,
+                                     // post_max_size, max_execution_time only
+  persistentPaths: string[];        // default [], applies to Node too
+  phpPorts: number[];               // engine managed, default []
+}
+```
+
+Extension names are restricted to the task's allowlist and must have a DLL in the selected runtime's ext directory. Size settings accept digits with an optional uppercase K/M/G suffix; max_execution_time accepts digits only. Relative document and persistent paths use the release's lexical and canonical containment checks, including junction checks. Inspection suggests public when only public/index.php exists, identifies WordPress from wp-config-sample.php, suggests wp-content and wp-config.php persistence, checks simple Composer require.php constraints against pinned PHP versions, reports database use, and warns about Composer dependencies without vendor. Inspection runs no project code.
+
+For PHP, `app_status` additionally returns `workers: {port:number,pid:number|null,health:string}[]`. `processCount`, `memoryBytes`, `cpuPercent`, `restarts`, and the most recent `lastExitCode`/`lastExitAt` aggregate the pool. `activeRelease` identifies the promoted release; there is no single PHP internalPort or pid. Statistics are sampled only on request. A worker's crash-loop error remains visible even while the other workers and Caddy respond.

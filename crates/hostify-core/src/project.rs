@@ -29,7 +29,7 @@ pub struct ProjectReport {
     pub warnings: Vec<String>,
 }
 fn wanted(p: &Path) -> bool {
-    ["package.json", "package-lock.json", ".env"]
+    ["package.json", "package-lock.json", ".env", "composer.json"]
         .iter()
         .any(|n| p == Path::new(n))
 }
@@ -65,6 +65,10 @@ fn files(path: &Path, kind: &str) -> Result<ProjectFiles, String> {
             "app.js",
             "index.js",
             "index.php",
+            "public/index.php",
+            "wp-config-sample.php",
+            "wp-config.php",
+            "vendor",
             "composer.json",
             "index.html",
             "dist/index.html",
@@ -78,7 +82,7 @@ fn files(path: &Path, kind: &str) -> Result<ProjectFiles, String> {
                 }
             }
             if let Ok(m) = fs::symlink_metadata(&p) {
-                if m.is_file() {
+                if m.is_file() || n == "vendor" && m.is_dir() {
                     names.insert(PathBuf::from(n));
                     if wanted(Path::new(n)) {
                         data.insert(
@@ -127,6 +131,9 @@ fn files(path: &Path, kind: &str) -> Result<ProjectFiles, String> {
             }
             if !seen.insert(p.to_string_lossy().to_lowercase()) {
                 return Err("Duplicate archive path.".into());
+            }
+            if dir && p == Path::new("vendor") {
+                names.insert(p.clone());
             }
             if !dir {
                 names.insert(p.clone());
@@ -193,6 +200,24 @@ fn satisfies(pin: &str, range: &str) -> bool {
         })
     })
 }
+// Composer's ~8.4 permits 8.5, while ~8.4.0 stops before 8.5.
+fn php_satisfies(pin: &str, range: &str) -> bool {
+    let pin = pin.split('-').next().unwrap_or(pin);
+    let normalized = range.replace(',', " ");
+    normalized.split('|').any(|or| {
+        !or.trim().is_empty()
+            && or.split_whitespace().all(|part| {
+                if let Some(raw) = part.strip_prefix('~')
+                    && raw.split('.').count() <= 2
+                {
+                    return version(pin)
+                        .zip(version(raw))
+                        .is_some_and(|(v, w)| v >= w && v[0] == w[0]);
+                }
+                satisfies(pin, part)
+            })
+    })
+}
 pub fn inspect(path: &Path, kind: &str) -> Result<ProjectReport, String> {
     let (names, files) = files(path, kind)?;
     let has = |s: &str| names.contains(Path::new(s));
@@ -215,14 +240,19 @@ pub fn inspect(path: &Path, kind: &str) -> Result<ProjectReport, String> {
         .into_iter()
         .find(|n| has(n));
     let main = p["main"].as_str();
-    let node = scripts["start"].is_string()
-        || main.is_some()
-        || entry.is_some()
-        || deps["next"].is_string();
+    let node = !has("wp-config-sample.php")
+        && (scripts["start"].is_string()
+            || main.is_some()
+            || entry.is_some()
+            || deps["next"].is_string());
     let mut r = ProjectReport {
         site_kind: if node {
             "node"
-        } else if has("index.php") || has("composer.json") {
+        } else if has("index.php")
+            || has("public/index.php")
+            || has("composer.json")
+            || has("wp-config-sample.php")
+        {
             "php"
         } else if has("index.html") || (has("package.json") && has("dist/index.html")) {
             "static"
@@ -295,6 +325,46 @@ pub fn inspect(path: &Path, kind: &str) -> Result<ProjectReport, String> {
         }
         r.dotenv_names.sort();
         r.dotenv_names.dedup();
+    }
+    if r.site_kind == "php" {
+        let composer = parse("composer.json")?;
+        r.engines = composer["require"]["php"].as_str().map(str::to_owned);
+        let pins = crate::runtimes::pinned_versions("php");
+        r.recommended_runtime = pins
+            .iter()
+            .copied()
+            .find(|v| r.engines.as_ref().is_none_or(|e| php_satisfies(v, e)))
+            .unwrap_or(pins[0])
+            .into();
+        if r.engines
+            .as_ref()
+            .is_some_and(|range| !php_satisfies(&r.recommended_runtime, range))
+        {
+            r.warnings.push("No pinned PHP runtime satisfies require.php; the newest pinned runtime is suggested.".into());
+        }
+        r.suggested.install = Install::None;
+        if has("public/index.php") && !has("index.php") {
+            r.suggested.document_root = "public".into();
+        }
+        if has("wp-config-sample.php") {
+            r.framework = Some("wordpress".into());
+            r.suggested.persistent_paths = vec!["wp-content".into(), "wp-config.php".into()];
+        }
+        r.uses_database = has("wp-config-sample.php")
+            || ["require", "require-dev"].iter().any(|section| {
+                ["ext-mysqli", "ext-pdo_mysql", "mysqli", "pdo_mysql"]
+                    .iter()
+                    .any(|k| composer[section][k].is_string())
+            });
+        if ["require", "require-dev"].iter().any(|section| {
+            composer[section]
+                .as_object()
+                .is_some_and(|d| d.keys().any(|k| k != "php" && !k.starts_with("ext-")))
+        }) && !names.iter().any(|p| p.starts_with("vendor"))
+        {
+            r.warnings.push("Composer dependencies are present but vendor is missing. Run composer install yourself; Hostify does not run it.".into());
+        }
+        return Ok(r);
     }
     // Only pinned LTS versions are candidates, newest first.
     let pins = ["26.13.0", "24.22.2"];
@@ -449,5 +519,64 @@ mod report_regressions {
             writer.finish().unwrap();
             assert!(inspect(&z, "zip").is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod php_inspection {
+    use super::*;
+    #[test]
+    fn plain_public_wordpress_composer_and_versions() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("index.php"), "<?php").unwrap();
+        let r = inspect(d.path(), "directory").unwrap();
+        assert_eq!(r.site_kind, "php");
+        assert_eq!(r.recommended_runtime, "8.5.12-1");
+        fs::remove_file(d.path().join("index.php")).unwrap();
+        fs::create_dir(d.path().join("public")).unwrap();
+        fs::write(d.path().join("public/index.php"), "<?php").unwrap();
+        assert_eq!(
+            inspect(d.path(), "directory")
+                .unwrap()
+                .suggested
+                .document_root,
+            "public"
+        );
+        fs::write(d.path().join("wp-config-sample.php"), "<?php").unwrap();
+        fs::write(
+            d.path().join("package.json"),
+            r#"{"scripts":{"start":"asset-builder"}}"#,
+        )
+        .unwrap();
+        let r = inspect(d.path(), "directory").unwrap();
+        assert_eq!(r.site_kind, "php");
+        assert_eq!(r.framework.as_deref(), Some("wordpress"));
+        assert!(r.uses_database);
+        assert_eq!(
+            r.suggested.persistent_paths,
+            ["wp-content", "wp-config.php"]
+        );
+        fs::remove_file(d.path().join("wp-config-sample.php")).unwrap();
+        fs::remove_file(d.path().join("package.json")).unwrap();
+        fs::write(
+            d.path().join("composer.json"),
+            r#"{"require":{"php":">=8.4 <8.5","ext-pdo_mysql":"*","a/b":"1"}}"#,
+        )
+        .unwrap();
+        let r = inspect(d.path(), "directory").unwrap();
+        assert_eq!(r.recommended_runtime, "8.4.27-1");
+        assert!(r.uses_database);
+        assert!(r.warnings.iter().any(|w| w.contains("vendor")));
+        fs::create_dir(d.path().join("vendor")).unwrap();
+        assert!(
+            !inspect(d.path(), "directory")
+                .unwrap()
+                .warnings
+                .iter()
+                .any(|w| w.contains("vendor"))
+        );
+        assert!(php_satisfies("8.5.12-1", "~8.4"));
+        assert!(!php_satisfies("8.5.12-1", "~8.4.0"));
+        assert!(php_satisfies("8.4.27-1", "^8.4 || ^8.5"));
     }
 }

@@ -269,3 +269,77 @@ The DPAPI failures in the section above are limited to the Codex sandbox. Outsid
 `peakMemoryBytes` comes from Windows `PeakJobMemoryUsed`, which counts a refused allocation. A 256 MiB job refusing a 900 MiB allocation reported a peak of 970 MB while using 52 MB, so it can exceed the limit. Do not present it as memory used. `memoryBytes` is the measured figure.
 
 Not exercised: the 20-minute build timeout, cancelling during promotion, Caddy rejecting a generated configuration.
+
+
+## PHP application hosting (Task 13)
+
+PHP generalizes the Node import/build/activation path rather than creating another release manager. Both kinds preserve configured persistentPaths from the active release before stopping it for promotion. Recursive copies reject links and junctions, fail on incompatible destination types or copy errors, and leave the active process pool running on failure. Failed startup or Caddy health restores the previous release using the shared rollback path. Static routing and its literal Caddyfile regression remain unchanged.
+
+Each PHP site starts 1 to 16 php-cgi workers, default 4, on separately reserved internal loopback ports. Workers are keyed php:<id>:<n>, have App role, individual managed Job Objects, the document-root working directory, the site's redacted environment/output and <id>.app.log. The shared environment builder puts the PHP runtime first on PATH followed by System32; workers do not receive PORT or HOST, npm additions or a default NODE_ENV. PHP_FCGI_MAX_REQUESTS is fixed at 10000 and PHP_INI_SCAN_DIR is empty.
+
+The per-site run/php/<id>/php.ini is generated only after validating settings, extension names/DLLs and quoted paths, then written using a temporary file and rename. Paths use forward slashes and reject quotes/control characters. Sessions and temporary uploads have directories created before launch. The ini disables user ini scanning, public PHP error display, expose_php, URL includes and URL fopen, enables logging and strict/httponly sessions, sets UTC/GPCS and the CGI directives, and points extension_dir/error_log/session/upload/temp paths at managed locations. This configuration does not restrict imported code's access to the user's files, network or registry.
+
+Workers use TCP readiness/health; HTTP health is requested only through Caddy at the configured healthPath, with the same ten-second healthy interval as Node. Clean worker exit immediately enters the restart path without delay, crash counting or activity, including onFailure policy; never prevents restart. Nonzero exits retain the shared crash-loop policy and Microsoft Visual C++ loader error wording. The site aggregates every worker and Caddy, and CPU/memory measurement is on demand. Stop ends Caddy before the pool; workers use the existing console graceful path with a three-second deadline and then Job Object termination.
+
+PHP Caddyfiles keep marker routing, separate Caddy readiness, verification headers and access logs. An explicit route enforces deny rules before PHP/file handling: hidden path segments, NTFS stream syntax, trailing dots/spaces, Composer files, ini/log files and root vendor. php_fastcgi uses every worker with least_conn, lb_try_duration 30s and unhealthy_request_count 1, all accepted by the real installed Caddy. A case-insensitive PHP filename guard after php_fastcgi prevents any PHP fallback being served by file_server. Win32 extended-path prefixes are removed from PHP's Caddy root because PHP CGI rejects them in SCRIPT_FILENAME. Caddy is validated before replacing its configuration; the final health request uses a foreign Host header and requires a response below 500.
+
+The ignored tests in crates/hostify-engine/tests/php_live.rs use copied pinned runtimes and the installed Caddy executable in temporary fixture data. They never start an installed engine or modify live installation data. The low-request recycling fixture compiles a small test-only wrapper which starts the real copied php-cgi with a request count of three; production always uses 10000. Live scenarios cover the repo sample, both PHP versions concurrently, environment injection, loaded extensions, source-disclosure spellings, simultaneous slow requests, recycling, killed-worker recovery, persistent data, copy failure, failed-health rollback, mixed PHP/Node/static sites, trust/path/junction refusal, disabled .user.ini, child cleanup and released ports.
+
+
+### Task 13 validation on 2026-10-31
+
+CARGO_BUILD_JOBS remained 4. All Cargo compilation and test commands were offline. The first workspace pass exposed Task 12's obsolete PHP-refusal assertion; it was updated to check stopped/untrusted PHP import, a pinned PHP runtime, version refusal and engine-owned ports. Inspection also now keeps WordPress classified as PHP when package.json contains asset start scripts and checks require-dev dependencies. Final workspace checks were repeated after those fixes. Actual final summary lines follow; logs are under target/task13-checks/verified, with the final ignored PHP suite under target/task13-checks/final.
+
+```text
+cargo fmt --all
+EXIT CODE: 0
+
+cargo build --workspace --offline
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.92s
+EXIT CODE: 0
+
+cargo test --workspace --offline --no-fail-fast
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 24.03s
+test result: FAILED. 124 passed; 2 failed; 4 ignored; 0 measured; 0 filtered out; finished in 1.59s
+error: test failed, to rerun pass `-p hostify-core --lib`
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.45s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+error: test failed, to rerun pass `-p hostify-engine --test pipe_integration`
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+error: 2 targets failed:
+EXIT CODE: 101
+
+cargo clippy --workspace --all-targets --offline
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.36s
+EXIT CODE: 0
+
+HOSTIFY_LIVE_RUNTIMES=D:\Hostify-Desktop\target\live-runtimes
+cargo test -p hostify-engine --test php_live --offline -- --ignored --test-threads=1 --nocapture
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.64s
+1 PHP workers, four 2-second requests: 8.519s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 204.71s
+EXIT CODE: 0
+
+```
+
+Workspace totals: 163 passed, 3 failed, 19 ignored. The separate ignored PHP suite passed all 6 grouped tests, covering the twelve requested live scenarios. Latest four-worker concurrency was 2.011 seconds; one-worker concurrency was 8.519 seconds. The recycling fixture observed 25 worker restarts without a crash-loop or unexpected-restart activity. An earlier unstaggered concurrency attempt took 4.019 seconds with four workers and failed the strict limit; the identical simultaneous-request test was retained, without launch staggering or a relaxed threshold, and passed its subsequent runs (2.010, 2.014 and 2.011 seconds). Consistently sub-four-second burst performance across runs is therefore not established.
+
+Failed or unverified:
+
+- vault::tests::round_trip_and_tamper fails in real user-scoped DPAPI with os error 2.
+- env_vars::tests::secret_is_ciphertext_and_never_listed fails at DPAPI sealing with os error 2.
+- environment_secrets_are_not_in_pipe_errors_or_activity fails at DPAPI sealing with os error 2. Rerun these three tests outside this sandbox with a loaded Windows user profile. No plaintext fallback was added.
+- One earlier four-worker burst failed at 4.019 seconds despite later passes; strict burst timing was not consistently met in every run.
+- The missing Visual C++ runtime exit path was not exercised live. Existing runtime wording tests pass; installed runtimes have their dependencies available.
+- The other ignored Node/network suites were not run. The PHP suite exercises the requested simultaneous PHP/Node/static scenario. Real installed-engine, desktop UI, Cloudflare publishing and public DNS/TLS flows were not exercised.
+
+Clippy exits 0 with no errors; style warnings remain. cargo fmt --all and git diff --check pass. File ownership checks pass, including append-only IPC/ENGINE documentation with normalized line endings. No new crates or Cargo.lock changes, commits, branch changes, installed-engine start/stop, or live installation modifications were made. The installed Caddy executable was only read/executed or copied into temporary fixture data. Protected source, samples, UI tests and SECURITY.md remain unchanged.

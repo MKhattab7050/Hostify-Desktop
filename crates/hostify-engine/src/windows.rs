@@ -220,6 +220,9 @@ impl Job {
 }
 /// Ctrl+C console attachment mutates process-wide state and must be serialized.
 pub fn graceful_stop(job: &Job, pid: u32) -> bool {
+    graceful_stop_timeout(job, pid, std::time::Duration::from_secs(10))
+}
+pub fn graceful_stop_timeout(job: &Job, pid: u32, timeout: std::time::Duration) -> bool {
     use windows_sys::Win32::System::Console::*;
     static CONSOLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let Ok(_lock) = CONSOLE.lock() else {
@@ -241,7 +244,7 @@ pub fn graceful_stop(job: &Job, pid: u32) -> bool {
     let mut graceful = false;
     if sent {
         let began = std::time::Instant::now();
-        let deadline = began + std::time::Duration::from_secs(10);
+        let deadline = began + timeout;
         while std::time::Instant::now() < deadline {
             if matches!(job.running(), Ok(false)) {
                 graceful = true;

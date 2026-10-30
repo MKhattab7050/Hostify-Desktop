@@ -51,16 +51,59 @@ async fn node_import_only_allocates_ports_and_requires_trust() {
             .to_string()
             .contains("Runtimes")
     );
+    let php = engine
+        .dispatch(
+            "add_site",
+            json!({"name":"PHP","sourcePath":source,"kind":"directory","siteKind":"php"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(php["kind"], "php");
+    assert_eq!(php["status"], "stopped");
+    assert!(hostify_core::runtimes::is_pinned(
+        "php",
+        php["runtimeVersion"].as_str().unwrap()
+    ));
+    let php_id = php["id"].as_str().unwrap();
+    let config = store.app_config(php_id).unwrap();
+    assert!(config.trusted_release.is_none() && config.built_release.is_none());
+    assert!(config.internal_port.is_none() && config.php_ports.is_empty());
     assert!(
         engine
             .dispatch(
-                "add_site",
-                json!({"name":"PHP","sourcePath":source,"kind":"directory","siteKind":"php"})
+                "set_app_config",
+                json!({"siteId":php_id,"config":config,"phpVersion":"99.0.0"})
             )
             .await
             .unwrap_err()
             .to_string()
-            .contains("PHP hosting is not available")
+            .contains("pinned")
+    );
+    let mut requested = serde_json::to_value(&config).unwrap();
+    requested["phpPorts"] = json!([1, 2]);
+    engine
+        .dispatch(
+            "set_app_config",
+            json!({"siteId":php_id,"config":requested,"phpVersion":"8.4.27-1"}),
+        )
+        .await
+        .unwrap();
+    assert!(store.app_config(php_id).unwrap().php_ports.is_empty());
+    assert_eq!(
+        store.site(php_id).unwrap().runtime_version.as_deref(),
+        Some("8.4.27-1")
+    );
+
+    assert!(
+        engine
+            .dispatch(
+                "build_app",
+                json!({"siteId":php_id,"trustAcknowledged":false})
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("trust")
     );
     engine.shutdown().await;
 }

@@ -802,3 +802,86 @@ mod app_release_tests {
         assert!(root.exists());
     }
 }
+
+/// Copy configured application data before activation. Links are never followed.
+pub fn copy_persistent(old: &Path, new: &Path, paths: &[String]) -> Result<(), String> {
+    fn copy(source: &Path, target: &Path) -> Result<(), String> {
+        let meta = fs::symlink_metadata(source).map_err(|e| e.to_string())?;
+        if is_link(&meta) {
+            return Err("Persistent paths cannot contain links or junctions.".into());
+        }
+        if let Ok(m) = fs::symlink_metadata(target) {
+            if is_link(&m) {
+                return Err("Persistent destination cannot contain links or junctions.".into());
+            }
+            if m.is_dir() != meta.is_dir() {
+                return Err("Persistent path changed file type.".into());
+            }
+        }
+        if meta.is_dir() {
+            fs::create_dir_all(target).map_err(|e| e.to_string())?;
+            for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                copy(&entry.path(), &target.join(entry.file_name()))?;
+            }
+        } else if meta.is_file() {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let mut input = open_regular(source, &meta).map_err(|e| e.to_string())?;
+            let mut output = File::create(target).map_err(|e| e.to_string())?;
+            std::io::copy(&mut input, &mut output).map_err(|e| e.to_string())?;
+        } else {
+            return Err("Persistent path must be a regular file or directory.".into());
+        }
+        Ok(())
+    }
+    for text in paths {
+        let rel = crate::app_config::relative(text)?;
+        let source = old.join(&rel);
+        reject_link_ancestors(&source).map_err(|e| e.to_string())?;
+        let target = new.join(&rel);
+        reject_link_ancestors(&target).map_err(|e| e.to_string())?;
+        if source.exists() {
+            copy(&source, &target)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod persistent_tests {
+    use super::*;
+    #[test]
+    fn persistent_data_copy_and_failure_leave_active_data_unchanged() {
+        let d = tempfile::tempdir().unwrap();
+        let old = d.path().join("old");
+        let new = d.path().join("new");
+        fs::create_dir_all(old.join("uploads")).unwrap();
+        fs::create_dir_all(&new).unwrap();
+        fs::write(old.join("uploads/file"), "data").unwrap();
+        fs::write(old.join("config.php"), "config").unwrap();
+        copy_persistent(
+            &old,
+            &new,
+            &["uploads".into(), "config.php".into(), "absent".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(new.join("uploads/file")).unwrap(),
+            "data"
+        );
+        assert_eq!(
+            fs::read_to_string(new.join("config.php")).unwrap(),
+            "config"
+        );
+        fs::remove_file(new.join("config.php")).unwrap();
+        fs::create_dir(new.join("config.php")).unwrap();
+        assert!(copy_persistent(&old, &new, &["config.php".into()]).is_err());
+        assert_eq!(
+            fs::read_to_string(old.join("config.php")).unwrap(),
+            "config"
+        );
+        assert!(copy_persistent(&old, &new, &["../escape".into()]).is_err());
+    }
+}

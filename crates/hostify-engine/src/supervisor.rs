@@ -84,8 +84,19 @@ pub async fn http_ok(port: u16, path: &str) -> bool {
 pub(crate) enum Health {
     Strict2xx,
     AnyBelow500,
+    TcpConnect,
 }
 pub(crate) async fn http_health(port: u16, path: &str, health: Health) -> bool {
+    if health == Health::TcpConnect {
+        return matches!(
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                tokio::net::TcpStream::connect(("127.0.0.1", port))
+            )
+            .await,
+            Ok(Ok(_))
+        );
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let result = tokio::time::timeout(Duration::from_secs(2), async {
         let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
@@ -99,7 +110,7 @@ pub(crate) async fn http_health(port: u16, path: &str, health: Health) -> bool {
         let n = stream.read(&mut bytes).await?;
         let text = String::from_utf8_lossy(&bytes[..n]);
         let code=text.split_whitespace().nth(1).and_then(|s|s.parse::<u16>().ok());
-        Ok::<bool, io::Error>(code.is_some_and(|c|match health {Health::Strict2xx=>(200..300).contains(&c),Health::AnyBelow500=>(100..500).contains(&c)}))
+        Ok::<bool, io::Error>(code.is_some_and(|c|match health {Health::Strict2xx=>(200..300).contains(&c),Health::AnyBelow500=>(100..500).contains(&c),Health::TcpConnect=>false}))
     })
     .await;
     matches!(result, Ok(Ok(true)))
@@ -208,6 +219,9 @@ struct CrashLoop {
     short_exits: u32,
 }
 impl CrashLoop {
+    fn php_exit(&mut self, duration: Duration, clean: bool) -> bool {
+        !clean && self.exited(duration)
+    }
     fn exited(&mut self, duration: Duration) -> bool {
         self.short_exits = if duration < Duration::from_secs(30) {
             self.short_exits.saturating_add(1)
@@ -466,6 +480,7 @@ impl Supervisor {
         let task = tokio::spawn(async move {
             let mut child = Some(child);
             let mut failures = 0u32;
+            let mut quiet_restart = false;
             let mut crash_loop = CrashLoop::default();
             let mut next = tokio::time::Instant::now();
             let mut started = tokio::time::Instant::now();
@@ -483,14 +498,26 @@ impl Supervisor {
                         Ok(None) => {
                             // A health path can touch a database, so a healthy app is asked less
                             // often. Process exit is still noticed every second above.
-                            if spec.role == Role::App
+                            if (spec.role == Role::App
+                                || (spec.role == Role::Caddy
+                                    && spec.site.as_deref().is_some_and(|id| {
+                                        store.site(id).is_ok_and(|s| s.kind == "php")
+                                    })))
                                 && healthy == Some(true)
                                 && last_probe.elapsed() < Duration::from_secs(10)
                             {
                                 continue;
                             }
                             last_probe = tokio::time::Instant::now();
-                            let ok = http_health(spec.port, &spec.path, spec.health).await;
+                            let mut ok = http_health(spec.port, &spec.path, spec.health).await;
+                            if spec.role == Role::Caddy
+                                && let Some(id) = &spec.site
+                                && store.site(id).is_ok_and(|s| s.kind == "php")
+                                && let Ok(c) = store.app_config(id)
+                            {
+                                ok &= http_health(spec.port, &c.health_path, Health::AnyBelow500)
+                                    .await;
+                            }
                             if still_starting(healthy, ok, started.elapsed()) {
                                 continue;
                             }
@@ -562,7 +589,13 @@ impl Supervisor {
                                 Err(e) => format!("unknown ({e})"),
                                 _ => unreachable!(),
                             };
-                            let last_exit = format!("exit code {code}");
+                            let last_exit = if spec.health == Health::TcpConnect
+                                && code == "-1073741515"
+                            {
+                                "The Microsoft Visual C++ runtime is absent. Install Microsoft's Visual C++ Redistributable for x64 from https://aka.ms/vs/17/release/vc_redist.x64.exe, then retry.".to_owned()
+                            } else {
+                                format!("exit code {code}")
+                            };
                             #[cfg(windows)]
                             let _ = process.job.terminate();
                             if let Ok(mut all) = info.lock()
@@ -576,8 +609,12 @@ impl Supervisor {
                             let _ = process.wait();
                             process.finish_output().await;
                             child = None;
+                            let recycling = spec.health == Health::TcpConnect && code == "0";
+                            quiet_restart = recycling;
                             if spec.restart == RestartPolicy::Never
-                                || (spec.restart == RestartPolicy::OnFailure && code == "0")
+                                || (spec.restart == RestartPolicy::OnFailure
+                                    && code == "0"
+                                    && !recycling)
                             {
                                 let message = format!("{} stopped ({last_exit}).", spec.label());
                                 if let Some(id) = &spec.site {
@@ -588,10 +625,12 @@ impl Supervisor {
                                         Some(message.clone()),
                                     );
                                 }
-                                let _ = store.activity("info", spec.site.as_deref(), &message);
+                                if !recycling {
+                                    let _ = store.activity("info", spec.site.as_deref(), &message);
+                                }
                                 break;
                             }
-                            if crash_loop.exited(started.elapsed())
+                            if crash_loop.php_exit(started.elapsed(), recycling)
                                 && spec.site.is_some()
                                 && !(spec.role == Role::Caddy && retained_static(&store, &spec))
                             {
@@ -610,10 +649,11 @@ impl Supervisor {
                                 let _ = store.activity("error", spec.site.as_deref(), &message);
                                 break;
                             }
-                            failures = failures.saturating_add(1);
-                            next = tokio::time::Instant::now() + restart_delay(failures);
-                            if let Some(id) = &spec.site {
-                                let _ = store.process_status(
+                            if !recycling {
+                                failures = failures.saturating_add(1);
+                                next = tokio::time::Instant::now() + restart_delay(failures);
+                                if let Some(id) = &spec.site {
+                                    let _ = store.process_status(
                                     id, &spec.key,
                                     "error",
                                     Some(format!(
@@ -622,8 +662,8 @@ impl Supervisor {
                                         restart_delay(failures).as_secs()
                                     )),
                                 );
-                            }
-                            let _ = store.activity(
+                                }
+                                let _ = store.activity(
                                 "warn",
                                 spec.site.as_deref(),
                                 &format!(
@@ -632,6 +672,9 @@ impl Supervisor {
                                     restart_delay(failures).as_secs()
                                 ),
                             );
+                            } else {
+                                next = tokio::time::Instant::now();
+                            }
                         }
                     }
                 }
@@ -692,11 +735,13 @@ impl Supervisor {
                         started = tokio::time::Instant::now();
                         healthy = None;
                         checked_exposure = false;
-                        let _ = store.activity(
-                            "info",
-                            spec.site.as_deref(),
-                            &format!("{} restarted", spec.label()),
-                        );
+                        if !quiet_restart {
+                            let _ = store.activity(
+                                "info",
+                                spec.site.as_deref(),
+                                &format!("{} restarted", spec.label()),
+                            );
+                        }
                     }
                     Err(e) => {
                         failures = failures.saturating_add(1);
@@ -721,8 +766,17 @@ impl Supervisor {
                     {
                         let j = c.job.clone();
                         let pid = c.id();
+                        let seconds = if spec.health == Health::TcpConnect {
+                            3
+                        } else {
+                            10
+                        };
                         let graceful = tokio::task::spawn_blocking(move || {
-                            crate::windows::graceful_stop(&j, pid)
+                            crate::windows::graceful_stop_timeout(
+                                &j,
+                                pid,
+                                Duration::from_secs(seconds),
+                            )
                         })
                         .await
                         .unwrap_or(false);
@@ -813,7 +867,14 @@ pub(crate) fn pump_redacted(
 #[async_trait]
 impl SiteRuntime for Supervisor {
     async fn start_site(&self, id: &str) -> Result<bool, String> {
-        if self.store.site(id).map_err(|e| e.to_string())?.kind == "node" {
+        if matches!(
+            self.store
+                .site(id)
+                .map_err(|e| e.to_string())?
+                .kind
+                .as_str(),
+            "node" | "php"
+        ) {
             return self.start_node(id).await;
         }
         if !self.store.detection.caddy_ready().await {
@@ -905,6 +966,23 @@ impl SiteRuntime for Supervisor {
     async fn stop_site(&self, id: &str) -> Result<(), String> {
         self.stop(&format!("site:{id}")).await?;
         self.stop(&format!("app:{id}")).await?;
+        let prefix = format!("php:{id}:");
+        let keys = self
+            .workers
+            .lock()
+            .await
+            .keys()
+            .filter(|key| key.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.stop(&key).await?;
+        }
+        if let Ok(mut health) = self.store.process_health.lock()
+            && let Some(p) = health.get_mut(id)
+        {
+            p.retain(|key, _| !key.starts_with(&prefix));
+        }
         self.store
             .status(id, "stopped", None)
             .map_err(|e| e.to_string())
@@ -1328,69 +1406,110 @@ impl Supervisor {
     }
     pub fn app_status(&self, id: &str) -> Result<Value, String> {
         let config = self.store.app_config(id).map_err(|e| e.to_string())?;
+        let php = self.store.site(id).map_err(|e| e.to_string())?.kind == "php";
         let health = self
             .store
             .process_health
             .lock()
             .map_err(|_| "Process health unavailable.")?
             .get(id)
-            .and_then(|p| p.get(&format!("app:{id}")))
-            .map(|p| p.0.clone())
-            .unwrap_or_else(|| "stopped".into());
-        let mut value = json!({"health":health,"exposedAddresses":[]});
+            .cloned()
+            .unwrap_or_default();
+        let mut value = json!({"health": if php { self.store.site(id).map_err(|e| e.to_string())?.status } else { health.get(&format!("app:{id}")).map(|p| p.0.clone()).unwrap_or_else(|| "stopped".into()) },"exposedAddresses":[]});
         if let Some(port) = config.internal_port {
             value["internalPort"] = json!(port);
         }
         if let Some(release) = config.active_release {
             value["activeRelease"] = json!(release);
         }
-        let info = self
+        let all = self
             .info
             .lock()
             .map_err(|_| "Process information unavailable.")?;
-        if let Some(i) = info.get(&format!("app:{id}")) {
-            if let Some(pid) = i.pid {
-                value["pid"] = json!(pid);
+        // Keep Node's optional statistics absent until its first launch.
+        if !php && !all.contains_key(&format!("app:{id}")) {
+            return Ok(value);
+        }
+        let keys = if php {
+            (0..config.php_ports.len())
+                .map(|n| format!("php:{id}:{n}"))
+                .collect::<Vec<_>>()
+        } else {
+            vec![format!("app:{id}")]
+        };
+        let mut restarts = 0u64;
+        let mut workers = Vec::new();
+        #[cfg(windows)]
+        let mut ids = Vec::new();
+        #[cfg(windows)]
+        let mut peak = 0u64;
+        let mut latest = None;
+        for (n, key) in keys.iter().enumerate() {
+            let info = all.get(key);
+            if php {
+                workers.push(json!({"port":config.php_ports[n],"pid": info.and_then(|i| i.pid),"health":health.get(key).map(|p| p.0.as_str()).unwrap_or("stopped")}));
             }
-            value["restarts"] = json!(i.restarts);
-            if let Some(code) = i.last_exit_code {
-                value["lastExitCode"] = json!(code);
-            }
-            if let Some(at) = &i.last_exit_at {
-                value["lastExitAt"] = json!(at);
-            }
-            value["exposedAddresses"] = json!(i.exposed_addresses);
-            #[cfg(windows)]
-            {
-                let ids = i.job.process_ids().map_err(|e| e.to_string())?;
-                value["processCount"] = json!(ids.len());
-                let mut system = sysinfo::System::new();
-                let pids = ids
-                    .iter()
-                    .map(|id| sysinfo::Pid::from_u32(*id))
-                    .collect::<Vec<_>>();
-                system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&pids), true);
-                let memory = pids
-                    .iter()
-                    .filter_map(|pid| system.process(*pid))
-                    .map(|p| p.memory())
-                    .sum::<u64>();
-                value["memoryBytes"] = json!(memory);
-                value["peakMemoryBytes"] = json!(i.job.peak_memory().map_err(|e| e.to_string())?);
-                // A second sample is needed for a meaningful CPU measurement; take it only on request.
-                if !pids.is_empty() {
-                    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
-                    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&pids), true);
-                    value["cpuPercent"] = json!(
-                        pids.iter()
-                            .filter_map(|pid| system.process(*pid))
-                            .map(|p| p.cpu_usage())
-                            .sum::<f32>()
-                            / std::thread::available_parallelism()
-                                .map(|n| n.get())
-                                .unwrap_or(1) as f32
-                    );
+            if let Some(i) = info {
+                if !php {
+                    if let Some(pid) = i.pid {
+                        value["pid"] = json!(pid);
+                    }
+                    value["exposedAddresses"] = json!(i.exposed_addresses);
                 }
+                restarts += i.restarts;
+                if let Some(at) = &i.last_exit_at
+                    && latest.as_ref().is_none_or(|(last, _)| at > last)
+                {
+                    latest = Some((at.clone(), i.last_exit_code));
+                }
+                #[cfg(windows)]
+                {
+                    ids.extend(i.job.process_ids().map_err(|e| e.to_string())?);
+                    peak += i.job.peak_memory().map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        value["restarts"] = json!(restarts);
+        if let Some((at, code)) = latest {
+            value["lastExitAt"] = json!(at);
+            value["lastExitCode"] = json!(code);
+        }
+        if php {
+            value["workers"] = json!(workers);
+        }
+        #[cfg(windows)]
+        {
+            ids.sort_unstable();
+            ids.dedup();
+            value["processCount"] = json!(ids.len());
+            let pids = ids
+                .iter()
+                .map(|id| sysinfo::Pid::from_u32(*id))
+                .collect::<Vec<_>>();
+            let mut system = sysinfo::System::new();
+            system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&pids), true);
+            value["memoryBytes"] = json!(
+                pids.iter()
+                    .filter_map(|p| system.process(*p))
+                    .map(|p| p.memory())
+                    .sum::<u64>()
+            );
+            value["peakMemoryBytes"] = json!(peak);
+            let mut cpu = 0.0;
+            if !pids.is_empty() {
+                std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+                system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&pids), true);
+                cpu = pids
+                    .iter()
+                    .filter_map(|p| system.process(*p))
+                    .map(|p| p.cpu_usage())
+                    .sum::<f32>()
+                    / std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(1) as f32;
+            }
+            if php || !pids.is_empty() {
+                value["cpuPercent"] = json!(cpu);
             }
         }
         Ok(value)
@@ -1437,7 +1556,11 @@ impl Supervisor {
     ) -> Result<bool, String> {
         use hostify_core::app_config::{Start, inside};
         let root = self.release_root(id, release)?;
-        config.validate(&root)?;
+        let kind = self.store.site(id).map_err(|e| e.to_string())?.kind;
+        config.validate_kind(&root, &kind)?;
+        if kind == "php" {
+            return self.start_php_release(id, config, &root).await;
+        }
         let site = self.store.site(id).map_err(|e| e.to_string())?;
         let exe = self.store.runtimes.resolve(
             "node",
@@ -1549,7 +1672,8 @@ impl Supervisor {
         self.store
             .process_status(id, &key, "running", None)
             .map_err(|e| e.to_string())?;
-        self.start_proxy(id, port).await?;
+        self.start_proxy(id, hostify_core::caddy::Backend::Proxy { port })
+            .await?;
         if !http_health(site.local_port, &config.health_path, Health::AnyBelow500).await {
             return Err("The application did not respond through the website server with a public Host header.".into());
         }
@@ -1558,7 +1682,126 @@ impl Supervisor {
             .map_err(|e| e.to_string())?;
         Ok(true)
     }
-    async fn start_proxy(&self, id: &str, internal: u16) -> Result<(), String> {
+    async fn start_php_release(
+        &self,
+        id: &str,
+        config: &mut hostify_core::app_config::AppConfig,
+        root: &Path,
+    ) -> Result<bool, String> {
+        let prefix = format!("php:{id}:");
+        if self
+            .workers
+            .lock()
+            .await
+            .iter()
+            .any(|(k, w)| k.starts_with(&prefix) && !w.task.is_finished())
+        {
+            return Ok(false);
+        }
+        let site = self.store.site(id).map_err(|e| e.to_string())?;
+        let exe = self.store.runtimes.resolve(
+            "php",
+            site.runtime_version
+                .as_deref()
+                .ok_or("Choose a PHP runtime version.")?,
+        )?;
+        let ini = crate::php::write(config, &self.store.root, id, &exe)?;
+        let cwd = hostify_core::app_config::inside(root, &config.document_root)?;
+        let mut reserved = self.store.reserved_ports().map_err(|e| e.to_string())?;
+        let start = self
+            .store
+            .settings()
+            .map_err(|e| e.to_string())?
+            .base_port_start;
+        config.php_ports.clear();
+        for _ in 0..config.php_workers {
+            let port =
+                hostify_core::caddy::allocate_port(start, &reserved).map_err(|e| e.to_string())?;
+            config.php_ports.push(port);
+            reserved.push(port);
+        }
+        self.store
+            .save_app_config(id, config)
+            .map_err(|e| e.to_string())?;
+        let (mut env, redact) = crate::build::environment(&self.store, id, &exe, &cwd, false)?;
+        env.retain(|(n, _)| {
+            !["PORT", "HOST", "PHP_FCGI_MAX_REQUESTS", "PHP_INI_SCAN_DIR"]
+                .iter()
+                .any(|key| n.eq_ignore_ascii_case(key))
+        });
+        env.extend([
+            ("PHP_FCGI_MAX_REQUESTS".into(), "10000".into()),
+            ("PHP_INI_SCAN_DIR".into(), String::new()),
+        ]);
+        for (n, port) in config.php_ports.iter().enumerate() {
+            let key = format!("php:{id}:{n}");
+            self.launch(Spec {
+                key: key.clone(),
+                site: Some(id.into()),
+                exe: exe.clone(),
+                args: vec![
+                    "-c".into(),
+                    ini.to_string_lossy().into_owned(),
+                    "-b".into(),
+                    format!("127.0.0.1:{port}"),
+                ],
+                token: None,
+                cwd: Some(cwd.clone()),
+                env: env.clone(),
+                redact: redact.clone(),
+                log: self.store.root.join("logs").join(format!("{id}.app.log")),
+                port: *port,
+                path: String::new(),
+                role: Role::App,
+                health: Health::TcpConnect,
+                restart: config.restart,
+                memory_limit_mb: config.memory_limit_mb,
+            })
+            .await?;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+            while !http_health(*port, "", Health::TcpConnect).await {
+                if let Some((status, detail)) = self
+                    .store
+                    .process_health
+                    .lock()
+                    .map_err(|_| "Process health unavailable.")?
+                    .get(id)
+                    .and_then(|p| p.get(&key))
+                    .cloned()
+                    && status == "error"
+                {
+                    return Err(detail.unwrap_or("PHP worker failed.".into()));
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err("PHP worker did not open its TCP port within 60 seconds.".into());
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            self.store
+                .process_status(id, &key, "running", None)
+                .map_err(|e| e.to_string())?;
+        }
+        self.start_proxy(
+            id,
+            hostify_core::caddy::Backend::Php {
+                root: cwd,
+                upstreams: config.php_ports.clone(),
+            },
+        )
+        .await?;
+        if !http_health(site.local_port, &config.health_path, Health::AnyBelow500).await {
+            return Err("PHP did not respond through Caddy with a foreign Host header.".into());
+        }
+        self.store
+            .process_status(id, &format!("site:{id}"), "running", None)
+            .map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+    async fn start_proxy(
+        &self,
+        id: &str,
+        backend: hostify_core::caddy::Backend,
+    ) -> Result<(), String> {
         if !self.store.detection.caddy_ready().await {
             return Err(hostify_core::components::CADDY_UNAVAILABLE.into());
         }
@@ -1568,7 +1811,7 @@ impl Supervisor {
         let config = hostify_core::caddy::generate(&[hostify_core::caddy::Site {
             verify_root: self.store.root.join("run/verify").join(id),
             port: site.local_port,
-            backend: hostify_core::caddy::Backend::Proxy { port: internal },
+            backend,
             log: self.store.root.join("logs").join(format!("{id}.log")),
         }])
         .map_err(|e| e.to_string())?;
@@ -1662,6 +1905,13 @@ impl Supervisor {
         }
         let old = config.active_release.clone();
         if promoting {
+            if let Some(previous) = &old {
+                hostify_core::import::copy_persistent(
+                    &self.release_root(id, previous)?,
+                    &self.release_root(id, &candidate)?,
+                    &config.persistent_paths,
+                )?;
+            }
             self.stop_site(id).await?;
         }
         let result = self.start_node_release(id, &mut config, &candidate).await;
@@ -1762,5 +2012,21 @@ impl Supervisor {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod php_recycle_tests {
+    use super::*;
+    #[test]
+    fn clean_recycling_does_not_count_or_reset_real_crashes() {
+        let mut crashes = CrashLoop::default();
+        for _ in 0..4 {
+            assert!(!crashes.php_exit(Duration::ZERO, false));
+        }
+        for _ in 0..100 {
+            assert!(!crashes.php_exit(Duration::ZERO, true));
+        }
+        assert!(crashes.php_exit(Duration::ZERO, false));
     }
 }

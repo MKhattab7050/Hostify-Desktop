@@ -1,6 +1,7 @@
 //! Headless Hostify engine and its per-user control protocol.
 #[cfg(windows)]
 pub mod cli;
+mod php;
 #[cfg(windows)]
 pub mod pipe;
 pub mod state;
