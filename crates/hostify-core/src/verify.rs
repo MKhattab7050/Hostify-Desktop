@@ -411,14 +411,19 @@ pub async fn attempt(
                 .into());
                 return v;
             }
-            Ok(Err(class)) => failure = (4, class, format!("{ip}: {}", class.message())),
-            Err(_) => {
+            // A response from one address says more than a failed connection to another,
+            // for example an IPv6 address on a PC with no IPv6 route.
+            Ok(Err(class)) if failure.0 == 4 => {
+                failure = (4, class, format!("{ip}: {}", class.message()))
+            }
+            Err(_) if failure.0 == 4 => {
                 failure = (
                     4,
                     VerifyClass::NetworkError,
                     format!("{ip}: HTTPS timed out"),
                 )
             }
+            Ok(Err(_)) | Err(_) => {}
         }
     }
     if failure.0 > 4 {

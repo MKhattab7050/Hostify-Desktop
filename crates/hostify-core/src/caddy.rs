@@ -29,7 +29,9 @@ fn quote(path: &std::path::Path) -> Result<String, CaddyError> {
 pub fn generate(sites: &[Site]) -> Result<String, CaddyError> {
     let mut result = String::from("{\n    admin off\n}\n");
     for site in sites {
-        result.push_str(&format!("\nhttp://127.0.0.1:{} {{\n    route {{\n        handle_path /.well-known/hostify-verify/* {{\n            root * {}\n            header Cache-Control no-store\n            file_server\n        }}\n        handle {{\n            root * {}\n            @hidden path_regexp hidden (^|/)\\.\n            respond @hidden 404\n            header {{\n                X-Hostify-Verify hostify\n                X-Content-Type-Options nosniff\n                X-Frame-Options DENY\n                Referrer-Policy strict-origin-when-cross-origin\n            }}\n            file_server\n        }}\n    }}\n",site.port,quote(&site.verify_root)?,quote(&site.root)?));
+        // No hostname in the address: tunnel requests carry the public Host, and Caddy answers
+        // 200 with an empty body when no site matches. `bind` keeps the listener on loopback.
+        result.push_str(&format!("\nhttp://:{} {{\n    bind 127.0.0.1\n    route {{\n        handle_path /.well-known/hostify-verify/* {{\n            root * {}\n            header Cache-Control no-store\n            file_server\n        }}\n        handle {{\n            root * {}\n            @hidden path_regexp hidden (^|/)\\.\n            respond @hidden 404\n            header {{\n                X-Hostify-Verify hostify\n                X-Content-Type-Options nosniff\n                X-Frame-Options DENY\n                Referrer-Policy strict-origin-when-cross-origin\n            }}\n            file_server\n        }}\n    }}\n",site.port,quote(&site.verify_root)?,quote(&site.root)?));
         result.push_str(&format!(
             "    log {{\n        output file {}\n    }}\n}}\n",
             quote(&site.log)?
@@ -58,7 +60,8 @@ mod tests {
         }])
         .expect("config");
         assert!(s.contains("admin off"));
-        assert!(s.contains("127.0.0.1:9000"));
+        assert!(s.contains("http://:9000 {"));
+        assert!(s.contains("bind 127.0.0.1"));
         assert!(s.contains("respond @hidden 404"));
         assert!(s.contains("X-Hostify-Verify hostify"));
         assert!(!s.contains("browse"));
@@ -162,6 +165,31 @@ mod marker_integration {
         assert_eq!(response.status(), 200);
         assert_eq!(response.headers()["Cache-Control"], "no-store");
         assert_eq!(response.text().await.unwrap(), nonce);
+        // The tunnel forwards the public hostname; a Host-bound site returns 200 with no body.
+        for (path, body) in [
+            ("/".to_string(), "website"),
+            (
+                format!("/.well-known/hostify-verify/{nonce}"),
+                nonce.as_str(),
+            ),
+        ] {
+            let response = client
+                .get(format!("{base}{path}"))
+                .header(reqwest::header::HOST, "www.example.test")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200, "{path}");
+            assert_eq!(response.text().await.unwrap(), body, "{path}");
+        }
+        assert!(
+            std::net::TcpStream::connect_timeout(
+                &std::net::SocketAddr::from(([127, 0, 0, 2], port)),
+                std::time::Duration::from_millis(500)
+            )
+            .is_err(),
+            "the listener must stay on 127.0.0.1"
+        );
         for path in [
             "/.env",
             "/.well-known/anything-else",

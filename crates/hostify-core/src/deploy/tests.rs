@@ -1190,6 +1190,64 @@ async fn all_evidence_failures_have_specific_classes_states_and_ordered_checks()
         );
     }
 }
+/// Production case: IPv4 answers 200 with an empty body (Caddy matched no site for the public
+/// Host) while the PC has no IPv6 route, so every IPv6 address fails to connect.
+struct EmptyBodyOnIpv4 {
+    inner: Probe,
+}
+#[async_trait]
+impl PublicProbe for EmptyBodyOnIpv4 {
+    async fn zone(&self, id: &str) -> Result<crate::cloudflare::Zone, String> {
+        self.inner.zone(id).await
+    }
+    async fn record(&self, z: &str, h: &str) -> Result<Option<Value>, String> {
+        self.inner.record(z, h).await
+    }
+    async fn connector(&self, t: &str) -> Result<(bool, u64), String> {
+        self.inner.connector(t).await
+    }
+    async fn authoritative(&self, _: &str, _: &str) -> Result<Vec<IpAddr>, String> {
+        Ok(vec![
+            "192.0.2.1".parse().unwrap(),
+            "2001:db8::1".parse().unwrap(),
+        ])
+    }
+    async fn recursive(&self, h: &str, endpoint: &str) -> Result<Vec<IpAddr>, String> {
+        self.inner.recursive(h, endpoint).await
+    }
+    async fn system(&self, h: &str) -> Result<Vec<IpAddr>, String> {
+        self.inner.system(h).await
+    }
+    async fn https(&self, _: &str, ip: IpAddr, _: &str) -> Result<HttpEvidence, VerifyClass> {
+        if ip.is_ipv6() {
+            return Err(VerifyClass::NetworkError);
+        }
+        Ok(HttpEvidence {
+            marker_status: 200,
+            marker_body: String::new(),
+            root_status: 0,
+        })
+    }
+}
+#[tokio::test]
+async fn failed_ipv6_connection_does_not_hide_an_empty_response_over_ipv4() {
+    let f = setup(99, false, true).await;
+    let d = f.deployer.deploy(f.q.clone(), &|_| {}).await.unwrap();
+    let v = d.verification.as_ref().unwrap();
+    let probe = EmptyBodyOnIpv4 {
+        inner: Probe {
+            class: None,
+            wrong: false,
+        },
+    };
+    let evidence =
+        crate::verify::attempt(&probe, "z", &f.q.hostname, Some("dns"), "t", "nonce", v).await;
+    assert_eq!(evidence.error_class, Some(VerifyClass::RoutingMismatch));
+    assert_eq!(
+        evidence.message.as_deref(),
+        Some(VerifyClass::RoutingMismatch.message())
+    );
+}
 #[tokio::test]
 async fn rewritten_root_body_is_irrelevant_when_nonce_and_root_status_are_correct() {
     let f = setup(99, false, true).await;
