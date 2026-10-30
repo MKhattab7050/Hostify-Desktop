@@ -120,3 +120,5 @@ cargo build --workspace --offline
 ```
 
 The orchestrator must still verify actual cleanup of the two account tunnels, real Cloudflare configuration response variants, DNS tags and apex flattening, the active-connection deletion response code, cloudflared readiness/metrics, and public HTTPS propagation. This offline pass did not access the user's live Cloudflare account or modify the real deployment database.
+
+DNS create and update requests omit `tags` for Cloudflare Free accounts. Ownership comes from SQLite deployment journals and tunnel IDs, never DNS labels: the planner reuses an exact tunnel target, permits consented repointing only from locally recorded Hostify tunnels, and rejects other A/AAAA/CNAME/TXT records. Cleanup rechecks the journaled record ID and CNAME tunnel target; crash recovery adopts an ID only for an exact hostname targeting the tunnel that deployment created. Comments remain informational, and rollback restores prior content without sending tags.

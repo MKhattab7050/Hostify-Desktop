@@ -23,7 +23,7 @@ impl Respond for Api {
                 let raw:String=db.query_row("SELECT created_resources_json FROM deployments WHERE state='running' ORDER BY rowid DESC LIMIT 1",[],|r|r.get(0)).unwrap();
                 let journal:Resources=serde_json::from_str(&raw).unwrap();
                 if path.ends_with("cfd_tunnel") {assert_eq!(journal.tunnel_intent.as_deref(),body["name"].as_str());}
-                else {assert!(journal.dns_intent); assert_eq!(body["tags"][0],format!("hostify-deployment:{}",journal.owner));}
+                else {assert!(journal.dns_intent); assert!(body.get("tags").is_none());}
             }
             if method=="PUT" && path.ends_with("configurations") {
                 let raw:String=self.db.lock().unwrap().query_row("SELECT created_resources_json FROM deployments ORDER BY rowid DESC LIMIT 1",[],|r|r.get(0)).unwrap();
@@ -192,10 +192,12 @@ async fn interrupt_after_create(dns:bool) {
 }
 #[tokio::test] async fn tagged_dns_for_different_tunnel_repoints_and_rollback_restores() {
     let f=setup(6,false,true).await;
+    let prior=Resources{request:Some(DeployRequest{hostname:"prior.example.com".into(),..f.q.clone()}),owner:"prior".into(),tunnel_created:true,tunnel_id:Some("different".into()),..Default::default()};
+    f.deployer.db.lock().unwrap().execute("INSERT INTO deployments(id,site_id,state,snapshot_json,created_resources_json,started_at) VALUES('prior','s','live','{}',?1,'before')",[serde_json::to_string(&prior).unwrap()]).unwrap();
     let old=json!({"id":"dns","name":f.q.hostname,"type":"CNAME","content":"different.cfargotunnel.com","proxied":false,"comment":"managed-by=hostify","tags":["hostify-deployment:old"]});
     f.remote.lock().unwrap().records.push(old.clone());
     assert_eq!(f.deployer.deploy(f.q,&|_|{}).await.unwrap().state,"failed");
-    let r=f.remote.lock().unwrap();assert_eq!(r.records[1],old);assert_eq!(r.writes.iter().filter(|s|s.starts_with("PUT /zones")).count(),2);
+    let r=f.remote.lock().unwrap();let mut expected=old;expected.as_object_mut().unwrap().remove("tags");assert_eq!(r.records[1],expected);assert_eq!(r.writes.iter().filter(|s|s.starts_with("PUT /zones")).count(),2);
 }
 #[tokio::test] async fn recovery_does_not_delete_another_deployments_tagged_dns() {
     let f=setup(99,true,false).await;
@@ -306,6 +308,8 @@ async fn cancel_after_remote_create(kind:&'static str) {
 
 #[tokio::test] async fn failed_dns_restore_retries_after_owned_tunnel_has_been_deleted() {
     let f=setup(6,false,true).await;
+    let prior=Resources{request:Some(DeployRequest{hostname:"prior.example.com".into(),..f.q.clone()}),owner:"prior".into(),tunnel_created:true,tunnel_id:Some("old".into()),..Default::default()};
+    f.deployer.db.lock().unwrap().execute("INSERT INTO deployments(id,site_id,state,snapshot_json,created_resources_json,started_at) VALUES('prior','s','live','{}',?1,'before')",[serde_json::to_string(&prior).unwrap()]).unwrap();
     let old=json!({"id":"dns","name":f.q.hostname,"type":"CNAME","content":"old.cfargotunnel.com","proxied":true,"comment":"managed-by=hostify"});
     {let mut remote=f.remote.lock().unwrap();remote.records.push(old.clone());remote.fail=Some("restore_dns_once");}
     let failed=f.deployer.deploy(f.q,&|_|{}).await.unwrap();assert!(failed.error.unwrap().contains("rollback incomplete"));
@@ -316,6 +320,8 @@ async fn cancel_after_remote_create(kind:&'static str) {
 }
 #[tokio::test] async fn tagged_stale_dns_success_repoints_then_republish_has_no_dns_write() {
     let f=setup(99,false,true).await;
+    let prior=Resources{request:Some(DeployRequest{hostname:"prior.example.com".into(),..f.q.clone()}),owner:"prior".into(),tunnel_created:true,tunnel_id:Some("old".into()),..Default::default()};
+    f.deployer.db.lock().unwrap().execute("INSERT INTO deployments(id,site_id,state,snapshot_json,created_resources_json,started_at) VALUES('prior','s','live','{}',?1,'before')",[serde_json::to_string(&prior).unwrap()]).unwrap();
     f.remote.lock().unwrap().records.push(json!({"id":"dns","name":f.q.hostname,"type":"CNAME","content":"old.cfargotunnel.com","proxied":false,"comment":"managed-by=hostify","tags":["hostify-deployment:old"]}));
     assert_eq!(f.deployer.deploy(f.q.clone(),&|_|{}).await.unwrap().state,"live");
     let writes=f.remote.lock().unwrap().writes.clone();assert_eq!(writes.iter().filter(|s|s.starts_with("PUT /zones")).count(),1);

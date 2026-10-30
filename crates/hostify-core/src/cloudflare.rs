@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{time::{Duration, Instant}, sync::{Arc, Mutex}};
+use std::{time::{Duration, Instant}, sync::{Arc, Mutex}, collections::HashSet};
 pub type TunnelConfig = Value;
 type ApiLogger = Arc<dyn Fn(&str) + Send + Sync>;
 use thiserror::Error;
@@ -77,16 +77,18 @@ impl CloudflareClient {
     }
     pub async fn dns_preflight(&self, zone: &str, hostname: &str) -> Result<(), CfError> {
         for v in self.records(zone, hostname).await? {
-            if ["A","AAAA","CNAME","TXT"].contains(&v["type"].as_str().unwrap_or("")) && (v["type"] != "CNAME" || v["comment"] != "managed-by=hostify") { return Err(CfError::Conflict); }
+            if ["A","AAAA","CNAME","TXT"].contains(&v["type"].as_str().unwrap_or("")) { return Err(CfError::Conflict); }
         }
         Ok(())
     }
-    pub async fn find_deployment_dns(&self, zone: &str, hostname: &str, owner: &str) -> Result<Option<String>, CfError> {
-        Ok(self.records(zone, hostname).await?.iter().find(|v| v["comment"] == "managed-by=hostify" && v["tags"].as_array().is_some_and(|tags| tags.contains(&json!(format!("hostify-deployment:{owner}"))))).and_then(|v| v["id"].as_str()).map(str::to_owned))
+    /// Call only for a journaled create intent on a tunnel this deployment created.
+    pub async fn find_deployment_dns(&self, zone: &str, hostname: &str, tunnel: &str) -> Result<Option<String>, CfError> {
+        let target=format!("{tunnel}.cfargotunnel.com");
+        Ok(self.records(zone, hostname).await?.iter().find(|v| v["type"] == "CNAME" && v["content"] == target).and_then(|v| v["id"].as_str()).map(str::to_owned))
     }
-    pub async fn create_deployment_dns(&self, zone: &str, hostname: &str, tunnel: &str, owner: &str) -> Result<String, CfError> {
+    pub async fn create_deployment_dns(&self, zone: &str, hostname: &str, tunnel: &str, _owner: &str) -> Result<String, CfError> {
         if self.plan_dns(zone, hostname, tunnel).await?.action != "create" { return Err(CfError::Conflict); }
-        let v = self.request(reqwest::Method::POST, &format!("/zones/{zone}/dns_records"), Some(json!({"type":"CNAME","name":hostname,"content":format!("{tunnel}.cfargotunnel.com"),"proxied":true,"comment":"managed-by=hostify","tags":[format!("hostify-deployment:{owner}")]}))).await?;
+        let v = self.request(reqwest::Method::POST, &format!("/zones/{zone}/dns_records"), Some(json!({"type":"CNAME","name":hostname,"content":format!("{tunnel}.cfargotunnel.com"),"proxied":true,"comment":"managed-by=hostify"}))).await?;
         { let id=v["result"]["id"].as_str().ok_or_else(||CfError::Unexpected("Missing DNS record ID".into()))?; Ok(id.to_owned()) }
     }
     pub fn new(base_url: impl AsRef<str>, token: impl Into<String>) -> Self { Self { base: base_url.as_ref().trim_end_matches('/').to_owned(), token: token.into(), logger: None, secrets: Arc::new(Mutex::new(Vec::new())), client: reqwest::Client::builder().timeout(Duration::from_secs(20)).build().unwrap_or_default() } }
@@ -156,38 +158,60 @@ impl CloudflareClient {
         }
     }
     pub async fn put_tunnel_ingress(&self, account: &str, id: &str, entries: &[(String,String)]) -> Result<(), CfError> { let mut ingress: Vec<Value>=entries.iter().map(|(hostname,service)| json!({"hostname":hostname,"service":service})).collect(); ingress.push(json!({"service":"http_status:404"})); self.request(reqwest::Method::PUT,&format!("/accounts/{account}/cfd_tunnel/{id}/configurations"),Some(json!({"config":{"ingress":ingress}}))).await.map(|_| ()) }
-    async fn records(&self, zone: &str, hostname: &str) -> Result<Vec<Value>, CfError> { let url=reqwest::Url::parse_with_params("http://localhost/", &[("name",hostname)]).map_err(|e| CfError::Unexpected(e.to_string()))?; self.pages(&format!("/zones/{zone}/dns_records?{}",url.query().unwrap_or(""))).await }
+    async fn records(&self, zone: &str, hostname: &str) -> Result<Vec<Value>, CfError> {
+        let url=reqwest::Url::parse_with_params("http://localhost/", &[("name",hostname)]).map_err(|e| CfError::Unexpected(e.to_string()))?;
+        // Cloudflare's name filter is exact; also reject other names defensively.
+        Ok(self.pages(&format!("/zones/{zone}/dns_records?{}",url.query().unwrap_or(""))).await?.into_iter().filter(|v|v["name"].as_str().is_none_or(|name|name.trim_end_matches('.').eq_ignore_ascii_case(hostname.trim_end_matches('.')))).collect())
+    }
+    /// Compatibility shim: without local ownership evidence, only create/reuse is safe.
     pub async fn plan_dns(&self, zone: &str, hostname: &str, tunnel: &str) -> Result<DnsPlan, CfError> {
-        let target=format!("{tunnel}.cfargotunnel.com"); let mut own=None;
-        for v in self.records(zone,hostname).await? { let kind=v["type"].as_str().unwrap_or(""); if !["A","AAAA","CNAME","TXT"].contains(&kind) { continue; } let content=v["content"].as_str().unwrap_or(""); let existing=Some(ExistingRecord{kind:kind.into(),content:content.into()}); if kind=="CNAME" && v["comment"].as_str()==Some("managed-by=hostify") { own=existing; } else { return Ok(DnsPlan{hostname:hostname.into(),action:"conflict".into(),existing,message:"An existing DNS record conflicts with this hostname".into()}); } }
-        Ok(DnsPlan{hostname:hostname.into(),action:if own.is_some(){"update_own"}else{"create"}.into(),message:if own.as_ref().is_some_and(|e|e.content.eq_ignore_ascii_case(&target)){"Already points at this tunnel; reuse without changes"}else{"DNS record can be configured"}.into(),existing:own})
+        self.plan_dns_with_owned_tunnels(zone,hostname,tunnel,&HashSet::new()).await
+    }
+    pub async fn plan_dns_with_owned_tunnels(&self, zone: &str, hostname: &str, tunnel: &str, owned: &HashSet<String>) -> Result<DnsPlan, CfError> {
+        let target=format!("{tunnel}.cfargotunnel.com"); let mut own=None; let mut action="create";
+        for v in self.records(zone,hostname).await? {
+            let kind=v["type"].as_str().unwrap_or("");
+            if !["A","AAAA","CNAME","TXT"].contains(&kind) {continue;}
+            let content=v["content"].as_str().unwrap_or("");
+            let existing=Some(ExistingRecord{kind:kind.into(),content:content.into()});
+            let known=content.strip_suffix(".cfargotunnel.com").is_some_and(|id|owned.contains(id));
+            if own.is_some() || kind!="CNAME" || (content!=target && !known) {
+                return Ok(DnsPlan{hostname:hostname.into(),action:"conflict".into(),existing,message:"An existing DNS record conflicts with this hostname".into()});
+            }
+            action=if content==target {"reuse"} else {"update_own"}; own=existing;
+        }
+        Ok(DnsPlan{hostname:hostname.into(),action:action.into(),message:if action=="reuse" {"Already points at this tunnel; reuse without changes"} else {"DNS record can be configured"}.into(),existing:own})
     }
     pub async fn create_dns(&self, zone: &str, hostname: &str, tunnel: &str) -> Result<String, CfError> {
         let plan=self.plan_dns(zone,hostname,tunnel).await?;
-        if plan.action=="update_own" && plan.existing.as_ref().is_some_and(|e|e.content.eq_ignore_ascii_case(&format!("{tunnel}.cfargotunnel.com"))) {
+        if plan.action=="reuse" {
             return self.dns_record(zone,hostname).await?.and_then(|v|v["id"].as_str().map(str::to_owned)).ok_or_else(||CfError::Unexpected("Missing reusable DNS record ID".into()));
         }
         if plan.action != "create" {return Err(CfError::Conflict);}
  let v=self.request(reqwest::Method::POST,&format!("/zones/{zone}/dns_records"),Some(json!({"type":"CNAME","name":hostname,"content":format!("{tunnel}.cfargotunnel.com"),"proxied":true,"comment":"managed-by=hostify"}))).await?; { let id=v["result"]["id"].as_str().ok_or_else(||CfError::Unexpected("Missing DNS record ID".into()))?; self.verify_dns(zone,id,tunnel).await?; Ok(id.to_owned()) } }
     pub async fn dns_record(&self,zone:&str,hostname:&str)->Result<Option<Value>,CfError> {
-        Ok(self.records(zone,hostname).await?.into_iter().find(|v|v["type"]=="CNAME" && v["comment"]=="managed-by=hostify"))
+        Ok(self.records(zone,hostname).await?.into_iter().find(|v|v["type"]=="CNAME"))
     }
     pub async fn write_dns(&self,zone:&str,id:&str,record:Value)->Result<(),CfError> {
         let mut body=serde_json::Map::new();
-        for key in ["type","name","content","proxied","ttl","comment","tags","settings"] {if let Some(value)=record.get(key) {body.insert(key.into(),value.clone());}}
+        for key in ["type","name","content","proxied","ttl","comment","settings"] {if let Some(value)=record.get(key) {body.insert(key.into(),value.clone());}}
         self.request(reqwest::Method::PUT,&format!("/zones/{zone}/dns_records/{id}"),Some(Value::Object(body))).await?; Ok(())
     }
     pub async fn verify_dns(&self,zone:&str,id:&str,tunnel:&str)->Result<(),CfError> {
         let v=self.request(reqwest::Method::GET,&format!("/zones/{zone}/dns_records/{id}"),None).await?;
         if v["result"]["content"]!=format!("{tunnel}.cfargotunnel.com") || v["result"]["proxied"]!=true {return Err(CfError::Unexpected("DNS readback must match tunnel target and proxied=true".into()));} Ok(())
     }
-    pub async fn delete_owned_dns(&self,zone:&str,id:&str,owner:&str)->Result<bool,CfError> {
+    /// `id` must come from this deployment's persisted dns_id, never hostname lookup.
+    pub async fn delete_owned_dns(&self,zone:&str,id:&str,tunnel:&str)->Result<bool,CfError> {
+        if tunnel.is_empty() {return Ok(false);}
         let path=format!("/zones/{zone}/dns_records/{id}");
         let v=match self.request(reqwest::Method::GET,&path,None).await {Ok(v)=>v,Err(e) if e.is_not_found()=>return Ok(false),Err(e)=>return Err(e)};
-        if v["result"]["comment"]!="managed-by=hostify" || !v["result"]["tags"].as_array().is_some_and(|tags|tags.contains(&json!(format!("hostify-deployment:{owner}")))) {return Ok(false);}
+        if v["result"]["id"]!=id || v["result"]["type"]!="CNAME" || v["result"]["content"]!=format!("{tunnel}.cfargotunnel.com") {return Ok(false);}
         match self.request(reqwest::Method::DELETE,&path,None).await {Ok(_)=>Ok(true),Err(e) if e.is_not_found()=>Ok(false),Err(e)=>Err(e)}
     }
-    pub async fn delete_dns_if_ours(&self, zone: &str, id: &str) -> Result<bool, CfError> { let path=format!("/zones/{zone}/dns_records/{id}"); let v=match self.request(reqwest::Method::GET,&path,None).await { Ok(v)=>v, Err(e) if e.is_not_found()=>return Ok(false), Err(e)=>return Err(e) }; if v["result"]["comment"].as_str()!=Some("managed-by=hostify") { return Ok(false); } match self.request(reqwest::Method::DELETE,&path,None).await {Ok(_)=>Ok(true),Err(e) if e.is_not_found()=>Ok(false),Err(e)=>Err(e)} }
+    /// Legacy callers without a journaled tunnel identity cannot authorize deletion.
+    pub async fn delete_dns_if_ours(&self, _zone: &str, _id: &str) -> Result<bool, CfError> { Ok(false) }
+
 }
 #[cfg(test)] mod tests {
     use super::*;
@@ -214,9 +238,9 @@ impl CloudflareClient {
         let s=MockServer::start().await;
         Mock::given(method("GET")).and(path("/zones/z/dns_records")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true,"result":[{"type":"A","content":"192.0.2.1"}]}))).mount(&s).await;
         Mock::given(method("GET")).and(path("/zones/z/dns_records/other")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true,"result":{"comment":"other"}}))).mount(&s).await;
-        Mock::given(method("GET")).and(path("/zones/z/dns_records/ours")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true,"result":{"comment":"managed-by=hostify"}}))).mount(&s).await;
+        Mock::given(method("GET")).and(path("/zones/z/dns_records/ours")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true,"result":{"id":"ours","type":"CNAME","content":"t.cfargotunnel.com","comment":"managed-by=hostify"}}))).mount(&s).await;
         Mock::given(method("DELETE")).and(path("/zones/z/dns_records/ours")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true,"result":{}}))).expect(1).mount(&s).await;
-        let c=CloudflareClient::new(s.uri(),"x"); assert_eq!(c.plan_dns("z","www.example.com","t").await.expect("plan").action,"conflict"); assert!(!c.delete_dns_if_ours("z","other").await.expect("other")); assert!(c.delete_dns_if_ours("z","ours").await.expect("ours"));
+        let c=CloudflareClient::new(s.uri(),"x"); assert_eq!(c.plan_dns("z","www.example.com","t").await.expect("plan").action,"conflict"); assert!(!c.delete_owned_dns("z","other","t").await.expect("other")); assert!(c.delete_owned_dns("z","ours","t").await.expect("ours"));
     }
 }
 
