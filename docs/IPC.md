@@ -8,18 +8,28 @@ Tauri commands, camelCase JSON. Rust returns `Result<T, String>`; the error stri
 type SiteStatus = 'stopped'|'starting'|'running'|'error'|'deploying';
 interface Site { id:string; name:string; sourcePath:string; localPort:number; localUrl:string;
   status:SiteStatus; statusDetail?:string; domainId?:string; publicUrl?:string; autoStart:boolean;
-  fileCount:number; sizeBytes:number; createdAt:string; updatedAt:string; }
+  fileCount:number; sizeBytes:number; createdAt:string; updatedAt:string;
+  publishState?:DeploymentState; publishDeploymentId?:string; publishHostname?:string; }
 interface Domain { id:string; hostname:string; zoneName:string; zoneId:string; siteId?:string;
   dnsStatus:'unconfigured'|'pending'|'configured'|'conflict'|'error'; httpsVerified:boolean; }
 interface CloudflareAccount { connected:boolean; accountName?:string; accountId?:string; tokenHint?:string; }
 interface DeploymentStep { key:string; label:string; state:'pending'|'running'|'done'|'failed'|'skipped'; detail?:string; }
-interface Deployment { id:string; siteId:string; state:'running'|'live'|'failed'|'rolled_back'; steps:DeploymentStep[]; error?:string; startedAt:string; finishedAt?:string; }
+type DeploymentState = 'validating'|'starting_local'|'provisioning_tunnel'|'configuring_dns'|'starting_connector'
+  |'waiting_dns'|'waiting_tls'|'verifying_public'|'published'|'failed'|'recovery_required'|'rolled_back';
+type VerifyClass = 'zone_not_active'|'dns_record_missing'|'dns_not_visible'|'tls_pending'|'connector_down'|'origin_unreachable'
+  |'routing_mismatch'|'network_error'|'cloudflare_api';
+interface VerifyCheck { key:'zone'|'dns_record'|'connector'|'dns_public'|'tls'|'http'|'content'; label:string; state:'pending'|'passed'|'failed'; detail?:string; }
+interface Verification { attempt:number; nextRetryAt?:string; deadlineAt:string; errorClass?:VerifyClass; message?:string;
+  checks:VerifyCheck[]; lastCheckedAt?:string; visibleFromThisPc?:boolean; nameservers?:string[]; }
+interface Deployment { id:string; siteId:string; hostname?:string; state:DeploymentState; steps:DeploymentStep[]; verification?:Verification; error?:string; startedAt:string; finishedAt?:string; }
 interface DnsPlan { hostname:string; action:'create'|'update_own'|'conflict'; existing?:{type:string;content:string}; message:string; }
 interface SystemStats { cpuPercent:number; ramUsedBytes:number; ramTotalBytes:number; diskUsedBytes:number; diskTotalBytes:number; hostifyDataBytes:number; }
 interface TunnelHealth { tunnelId:string; name:string; connected:boolean; connections:number; lastChange:string; }
 interface ActivityEntry { id:number; ts:string; level:'info'|'warn'|'error'; siteId?:string; message:string; }
 interface AppSettings { launchOnLogin:boolean; startEngineOnBoot:boolean; closeToTray:boolean; theme:'system'|'light'|'dark'; basePortStart:number; }
-interface EngineStatus { running:boolean; version:string; mode:'user'|'service'; caddyVersion?:string; cloudflaredVersion?:string; componentsReady:boolean; }
+interface ComponentStatus { installed:boolean; ready:boolean; version?:string; path:string; error?:string; }
+interface EngineStatus { running:boolean; version:string; mode:'user'|'service'; caddyVersion?:string; cloudflaredVersion?:string; componentsReady:boolean;
+  localHostingReady?:boolean; caddy?:ComponentStatus; cloudflared?:ComponentStatus; dataDir?:string; binDir?:string; }
 interface SourceReport { ok:boolean; fileCount:number; sizeBytes:number; hasIndex:boolean; warnings:string[]; errors:string[]; }
 interface DomainCheck { zoneName:string; zoneId:string; canManageDns:boolean; problems:string[]; }
 ```
@@ -47,7 +57,9 @@ interface DomainCheck { zoneName:string; zoneId:string; canManageDns:boolean; pr
 | publish_site | {siteId, hostname, consentDns} | Deployment (async; progress via `deployment-update`) |
 | get_deployment | {id} | Deployment |
 | list_deployments | {siteId} | Deployment[] |
-| unpublish_site | {siteId} | void (removes only the DNS record + ingress it created) |
+| retry_verification | {id} | Deployment (non-destructive; only from waiting_*, verifying_public or recovery_required; restarts the budget and checks now) |
+| cancel_deployment | {id} | Deployment (before resources exist or during provisioning: rolls back what this deployment created; during verification: stops checking, keeps every Cloudflare resource, state becomes recovery_required) |
+| unpublish_site | {siteId} | void (removes only the DNS record + ingress it created; also valid from waiting_*, verifying_public and recovery_required) |
 | list_domains | - | Domain[] |
 | tunnel_health | - | TunnelHealth[] |
 | list_activity | {siteId?, limit} | ActivityEntry[] |
