@@ -132,8 +132,11 @@ impl Store {
             .lock()
             .map_err(|_| anyhow!("Status unavailable"))?;
         for site in &mut sites {
-            let latest:Option<(String,String,String)>=db.query_row("SELECT id,state,snapshot_json FROM deployments WHERE site_id=?1 AND state!='rolled_back' ORDER BY rowid DESC LIMIT 1",[&site.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).ok();
-            if let Some((id, state, snapshot)) = latest {
+            let latest:Option<(String,String,String)>=db.query_row("SELECT id,state,snapshot_json FROM deployments WHERE site_id=?1 ORDER BY rowid DESC LIMIT 1",[&site.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).ok();
+            // Only the newest attempt counts: an unpublished site must not show an older failure.
+            if let Some((id, state, snapshot)) =
+                latest.filter(|(_, state, _)| state != "rolled_back")
+            {
                 site.publish_state = Some(state);
                 site.publish_deployment_id = Some(id);
                 site.publish_hostname = serde_json::from_str::<Value>(&snapshot)
@@ -1512,6 +1515,25 @@ mod path_safety_tests {
                 .contains("Invalid website ID")
         );
         assert!(store.site(id).is_ok());
+    }
+    #[test]
+    fn unpublished_site_does_not_show_an_older_failed_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("data")).unwrap();
+        super::publishing_tests::seed(&store, "s", "failed", false);
+        assert_eq!(
+            store.site("s").unwrap().publish_state.as_deref(),
+            Some("failed")
+        );
+        store
+            .db()
+            .unwrap()
+            .execute(
+                "INSERT INTO deployments(id,site_id,state,snapshot_json,started_at) VALUES('new','s','rolled_back','{}','now')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(store.site("s").unwrap().publish_state, None);
     }
     #[tokio::test]
     async fn unpublish_during_provisioning_leaves_rows_unchanged() {
