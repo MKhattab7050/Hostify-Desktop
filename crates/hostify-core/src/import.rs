@@ -13,13 +13,14 @@ const MAX_RATIO: u64 = 200;
 #[derive(Debug, Default, Serialize)] #[serde(rename_all = "camelCase")]
 pub struct SourceReport { pub ok: bool, pub file_count: u64, pub size_bytes: u64, pub has_index: bool, pub warnings: Vec<String>, pub errors: Vec<String> }
 fn safe_name(name: &str) -> Result<PathBuf, ImportError> {
+    if name.encode_utf16().count()>240 {return Err(ImportError::Invalid("Import path is too long".into()));}
     if name.is_empty() || name.starts_with(['/', '\\']) || name.contains(':') { return Err(ImportError::Invalid(format!("Unsafe path: {name}"))); }
     let mut result = PathBuf::new();
     for component in name.split(['/', '\\']) {
         if component.is_empty() { continue; }
         let upper = component.split('.').next().unwrap_or("").to_ascii_uppercase();
-        let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") || (upper.len() == 4 && (upper.starts_with("COM") || upper.starts_with("LPT")) && matches!(upper.as_bytes()[3], b'1'..=b'9'));
-        if component == "." || component == ".." || component.ends_with(['.', ' ']) || reserved || component.chars().any(|c| c.is_control() || matches!(c, '<'|'>'|'"'|'|'|'?'|'*')) { return Err(ImportError::Invalid(format!("Unsafe path: {name}"))); }
+        let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") || (upper.len() == 4 && (upper.starts_with("COM") || upper.starts_with("LPT")) && matches!(upper.as_bytes()[3], b'1'..=b'9'));
+        if ["COM?","COM?","COM?","LPT?","LPT?","LPT?"].contains(&upper.as_str()) || component == "." || component == ".." || component.ends_with(['.', ' ']) || reserved || component.chars().any(|c| c.is_control() || matches!(c, '<'|'>'|'"'|'|'|'?'|'*')) { return Err(ImportError::Invalid(format!("Unsafe path: {name}"))); }
         result.push(component);
     }
     if result.as_os_str().is_empty() { return Err(ImportError::Invalid("Empty path".into())); }
@@ -74,6 +75,7 @@ fn open_directory(source: &Path) -> Result<File, ImportError> {
     Ok(file)
 }
 fn copy_dir(source: &Path, dest: &Path, relative: &Path, report: &mut SourceReport) -> Result<(), ImportError> {
+    if relative.as_os_str().to_string_lossy().encode_utf16().count()>240 {return Err(ImportError::Invalid("Import path is too long".into()));}
     let meta = fs::symlink_metadata(source)?;
     if is_link(&meta) { return Err(ImportError::Invalid("Links and reparse points are not allowed".into())); }
     if meta.is_dir() {
@@ -133,6 +135,7 @@ fn reject_link_ancestors(path: &Path) -> Result<(), ImportError> {
 pub fn import(source: &Path, kind: &str, site_dir: &Path) -> Result<SourceReport, ImportError> {
     reject_link_ancestors(site_dir)?;
     fs::create_dir_all(site_dir)?;
+    if kind=="directory" && fs::canonicalize(site_dir)?.starts_with(fs::canonicalize(source)?) {return Err(ImportError::Invalid("The import destination must be outside the source directory".into()));}
     reject_link_ancestors(&site_dir.join("current"))?;
     reject_link_ancestors(&site_dir.join("releases"))?;
     if is_link(&fs::symlink_metadata(source)?) { return Err(ImportError::Invalid("Links and reparse points are not allowed".into())); }
@@ -146,7 +149,7 @@ pub fn import(source: &Path, kind: &str, site_dir: &Path) -> Result<SourceReport
         let previous = releases.join(format!("{nonce}")); let had_current = current.exists();
         if had_current { fs::rename(&current, &previous)?; }
         if let Err(err) = fs::rename(&stage, &current) { if had_current { fs::rename(&previous, &current).map_err(|restore| ImportError::Invalid(format!("Swap failed: {err}; restoring previous release failed: {restore}")))?; } return Err(err.into()); }
-        prune_releases(&releases)?;
+        if let Err(e)=prune_releases(&releases) {report.warnings.push(format!("Website files were updated, but old release cleanup needs attention: {e}"));}
         report.ok = true; Ok(report)
     })();
     if stage.exists() { let _ = fs::remove_dir_all(&stage); }
@@ -206,4 +209,31 @@ pub fn import(source: &Path, kind: &str, site_dir: &Path) -> Result<SourceReport
         assert!(fs::rename(&directory,t.path().join("moved")).is_err());drop(guard);
         fs::rename(&directory,t.path().join("moved")).unwrap();
     }
+}
+
+#[cfg(test)] mod audit_tests {
+ use super::*;
+ #[test] fn rejects_device_aliases_and_long_paths() {for name in ["CONIN$.txt","CONOUT$","COM?.txt","LPT?","LPT?.txt"]{assert!(safe_name(name).is_err(),"{name}");}assert!(safe_name(&"a".repeat(241)).is_err());}
+ #[test] fn rejects_destination_inside_source() {let t=tempfile::tempdir().unwrap();fs::write(t.path().join("index.html"),"ok").unwrap();assert!(import(t.path(),"directory",&t.path().join("site")).is_err());}
+ #[test] fn case_duplicate_zip_preserves_current() {
+    use zip::write::SimpleFileOptions;
+    let t=tempfile::tempdir().unwrap();let site=t.path().join("site");fs::create_dir_all(site.join("current")).unwrap();fs::write(site.join("current/index.html"),"old").unwrap();
+    let path=t.path().join("source.zip");let mut zip=zip::ZipWriter::new(File::create(&path).unwrap());for name in ["index.html","INDEX.html"]{zip.start_file(name,SimpleFileOptions::default()).unwrap();zip.write_all(b"new").unwrap();}zip.finish().unwrap();
+    assert!(import(&path,"zip",&site).is_err());assert_eq!(fs::read_to_string(site.join("current/index.html")).unwrap(),"old");
+ }
+ #[cfg(windows)] #[test] fn locked_current_preserves_site_and_cleans_stage() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let t=tempfile::tempdir().unwrap();let source=t.path().join("source");let site=t.path().join("site");fs::create_dir(&source).unwrap();fs::write(source.join("index.html"),"old").unwrap();import(&source,"directory",&site).unwrap();
+    let _held=fs::OpenOptions::new().read(true).share_mode(1).open(site.join("current/index.html")).unwrap();fs::write(source.join("index.html"),"new").unwrap();
+    assert!(import(&source,"directory",&site).is_err());assert_eq!(fs::read_to_string(site.join("current/index.html")).unwrap(),"old");assert!(!fs::read_dir(&site).unwrap().any(|e|e.unwrap().file_name().to_string_lossy().starts_with(".staging")));
+ }
+}
+
+#[cfg(test)] mod committed_swap_tests {
+ use super::*;
+ #[test] fn cleanup_failure_does_not_report_committed_update_as_failed() {
+    let t=tempfile::tempdir().unwrap();let source=t.path().join("source");let site=t.path().join("site");fs::create_dir(&source).unwrap();fs::write(source.join("index.html"),"old").unwrap();import(&source,"directory",&site).unwrap();
+    fs::write(site.join("releases/unexpected"),"keep").unwrap();fs::write(source.join("index.html"),"new").unwrap();let report=import(&source,"directory",&site).unwrap();
+    assert!(report.ok);assert!(report.warnings.iter().any(|w|w.contains("cleanup needs attention")));assert_eq!(fs::read_to_string(site.join("current/index.html")).unwrap(),"new");
+ }
 }

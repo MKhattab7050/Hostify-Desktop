@@ -18,6 +18,7 @@ pub trait SiteRuntime: Send + Sync {
     /// Returns true only when this call started a new connector.
     async fn start_tunnel(&self, token: &str) -> Result<bool, String>;
     async fn stop_tunnel(&self) -> Result<(), String>;
+    async fn resume_tunnel(&self, _id:&str,token:&str)->Result<bool,String>{self.start_tunnel(token).await}
     async fn stop_owned_tunnel(&self,_id:&str)->Result<(),String>{self.stop_tunnel().await}
     async fn site_responds(&self, port: u16) -> Result<bool, String>;
     async fn connector_health(&self, _tunnel: &str) -> Result<(bool,u64),String> {
@@ -102,9 +103,9 @@ const LABELS: [&str;7]=["Validate website","Start local server","Verify local si
 impl Deployer {
     fn save(&self,d:&Deployment,r:&Resources)->Result<(),DeployError> { let db=self.db.lock().map_err(|_| DeployError::Message("Database lock poisoned".into()))?; let previous:Option<String> = db.query_row("SELECT state FROM deployments WHERE id=?1",[&d.id],|row|row.get(0)).ok();
         if previous.as_deref()!=Some(d.state.as_str()) {
-            db.execute("INSERT INTO activity_logs(ts,level,site_id,message) VALUES(?1,'info',?2,?3)",params![Utc::now().to_rfc3339(),d.site_id,format!("Publishing: {}",d.state)])?;
+            db.execute("INSERT INTO activity_logs(ts,level,site_id,message) VALUES(?1,'info',?2,?3)",params![Utc::now().to_rfc3339(),d.site_id,verify::state_message(d.state.as_str(),d.hostname.as_deref().unwrap_or("this website"))])?;
         }
-        db.execute("INSERT INTO deployments (id,site_id,state,snapshot_json,created_resources_json,started_at,finished_at) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(id) DO UPDATE SET state=excluded.state,snapshot_json=excluded.snapshot_json,created_resources_json=excluded.created_resources_json,finished_at=excluded.finished_at",params![d.id,d.site_id,d.state,serde_json::to_string(d)?,serde_json::to_string(r)?,d.started_at,d.finished_at])?; Ok(()) }
+        db.execute("INSERT INTO deployments (id,site_id,state,snapshot_json,created_resources_json,started_at,finished_at) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(id) DO UPDATE SET state=excluded.state,snapshot_json=excluded.snapshot_json,created_resources_json=excluded.created_resources_json,finished_at=excluded.finished_at",params![d.id,d.site_id,d.state,serde_json::to_string(d)?,serde_json::to_string(r)?,d.started_at,d.finished_at])?; if matches!(d.state.as_str(),"published"|"failed"|"rolled_back"|"recovery_required"){crate::db::prune(&db)?;} Ok(()) }
     fn emit(&self,d:&Deployment,r:&Resources,callback:&(dyn Fn(&Deployment)+Send+Sync))->Result<(),DeployError> { self.save(d,r)?; callback(d); Ok(()) }
     pub fn owned_tunnel_ids(&self,account:&str)->Result<HashSet<String>,DeployError> {
         let db=self.db.lock().map_err(|_|DeployError::Message("Database lock poisoned".into()))?;
@@ -318,12 +319,12 @@ impl Deployer {
         let mut v=verify::attempt(self.probe.as_ref(),&q.zone_id,&q.hostname,r.dns_id.as_deref(),r.tunnel_id.as_deref().unwrap_or(""),r.nonce.as_deref().unwrap_or(""),previous).await;
         if v.error_class.is_none() {
             d.state="published".into(); d.finished_at=Some(Utc::now().to_rfc3339());
-            d.steps[6].state="done".into(); self.remove_marker(&r)?; self.upsert_domain(q,true)?;
+            d.steps.get_mut(6).ok_or_else(||DeployError::Message("Saved deployment is missing its verification step".into()))?.state="done".into(); self.remove_marker(&r)?; self.upsert_domain(q,true)?;
         } else {
             let deadline=chrono::DateTime::parse_from_rfc3339(&v.deadline_at).map_err(|e|DeployError::Message(e.to_string()))?.with_timezone(&Utc);
             if verify::budget_expired(Utc::now(),deadline) {
                 d.state="recovery_required".into();
-                v.message=Some(format!("{} Automatic checks have paused; use retry_verification to check again. All publishing resources are retained.",v.message.as_deref().unwrap_or("Verification incomplete.")));
+                v.message=Some(format!("{} Automatic checks have paused; choose Check again. All publishing resources are retained.",v.message.as_deref().unwrap_or("Verification incomplete.")));
             } else {
                 d.state=v.error_class.unwrap().state().into();
                 let delay=verify::backoff(v.attempt,uuid::Uuid::new_v4().as_bytes()[0]);
@@ -334,7 +335,7 @@ impl Deployer {
     }
     pub fn reset_verification(&self,id:&str,force:bool)->Result<Deployment,DeployError> {
         let (mut d,mut r)=self.load(id)?;
-        if !verification_state(&d.state) {return Err(DeployError::Message("Use retry_verification only for waiting or recovery_required deployments".into()));}
+        if !verification_state(&d.state) {return Err(DeployError::Message("Choose Check again only while publication is waiting or needs attention".into()));}
         let now=Utc::now();
         let v=d.verification.get_or_insert_with(||Verification::new(now));
         if force || chrono::DateTime::parse_from_rfc3339(&v.deadline_at).map_or(true,|t|t.with_timezone(&Utc)<=now) {
@@ -369,7 +370,7 @@ impl Deployer {
         let (mut d,mut r)=self.load(id)?;
         if verification_state(&d.state) {
             d.state="recovery_required".into();
-            if let Some(v)=&mut d.verification {v.next_retry_at=None;v.message=Some("Verification cancelled. All publishing resources are retained; use retry_verification to check again.".into());}
+            if let Some(v)=&mut d.verification {v.next_retry_at=None;v.message=Some("Verification cancelled. All publishing resources are retained; choose Check again.".into());}
         } else if !matches!(d.state.as_str(),"published"|"rolled_back") {
             let q=r.request.clone().ok_or_else(unsupported)?;
             r.rollback_pending=true;self.save(&d,&r)?;
@@ -394,18 +395,21 @@ impl Deployer {
         let records={let db=self.db.lock().map_err(|_| DeployError::Message("Database lock poisoned".into()))?;
             let mut stmt=db.prepare("SELECT snapshot_json,created_resources_json FROM deployments WHERE state IN ('running','validating','starting_local','provisioning_tunnel','configuring_dns','starting_connector','failed')")?;
             let rows=stmt.query_map([],|row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?; rows.collect::<Result<Vec<_>,_>>()?};
-        let mut recovered=Vec::new();
+        let mut recovered=Vec::new();let mut errors=Vec::new();
         for (snapshot,resources) in records {
+            let result:Result<Option<Deployment>,DeployError>=async {
             let mut d:Deployment=serde_json::from_str(&snapshot)?; let mut r:Resources=serde_json::from_str(&resources)?;
-            if d.state=="failed" && !r.rollback_pending {continue;}
+            if d.state=="failed" && !r.rollback_pending {return Ok(None);}
             let q=r.request.clone().ok_or_else(||DeployError::Message("Missing recovery data".into()))?;
             r.rollback_pending=true; self.save(&d,&r)?;
             match self.rollback(&q,&mut r,&d).await {
                 Ok(())=>{d.state="rolled_back".into(); d.error=Some("Deployment interrupted and rolled back".into());},
                 Err(e)=>{d.state="failed".into();d.error=Some(format!("Recovery rollback incomplete: {e}"));}
             }
-            d.finished_at=Some(Utc::now().to_rfc3339()); self.emit(&d,&r,callback)?; recovered.push(d);
-        } Ok(recovered)
+            d.finished_at=Some(Utc::now().to_rfc3339()); self.emit(&d,&r,callback)?;Ok(Some(d))
+            }.await;
+            match result {Ok(Some(d))=>recovered.push(d),Ok(None)=>(),Err(e)=>errors.push(e.to_string())}
+        } if errors.is_empty(){Ok(recovered)}else{Err(DeployError::Message(errors.join("; ")))}
     }
 }
 #[cfg(test)] mod tests;

@@ -70,7 +70,6 @@ export function Settings() {
           <Card className="divide-y divide-line px-4">
             <Switch label="Start hosting when I sign in to Windows" desc="Your websites come back online after a restart, once you sign in." on={settings.launchOnLogin} onChange={(v) => set({ launchOnLogin: v })} />
             <Switch label="Keep hosting when the window is closed" desc="Closing Hostify hides it to the tray. Your websites stay online." on={settings.closeToTray} onChange={(v) => set({ closeToTray: v })} />
-            <Switch label="Host before anyone signs in" desc="Runs the engine as a Windows service. Needs Hostify to be running as administrator, otherwise this shows an error and nothing changes." on={settings.startEngineOnBoot} onChange={(v) => set({ startEngineOnBoot: v })} />
           </Card>
         </Section>
         <Section id="engine" title="Hosting engine">

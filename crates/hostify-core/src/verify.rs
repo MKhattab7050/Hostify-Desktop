@@ -62,7 +62,7 @@ impl DeploymentState {
 
 impl From<&str> for DeploymentState {
     fn from(value: &str) -> Self {
-        serde_json::from_value(serde_json::Value::String(value.into())).expect("internal deployment state must match IPC")
+        serde_json::from_value(serde_json::Value::String(value.into())).unwrap_or(Self::RecoveryRequired)
     }
 }
 
@@ -285,8 +285,8 @@ pub async fn attempt(
     }
     match bounded(probe.connector(tunnel)).await {
         Ok((true, n)) if n>0 => v.check(2, true, format!("{n} connections")),
-        other => {
-            v.fail(2, VerifyClass::ConnectorDown, format!("{other:?}"));
+        _ => {
+            v.fail(2, VerifyClass::ConnectorDown, "Connector: not connected");
             return v;
         }
     }
@@ -294,17 +294,17 @@ pub async fn attempt(
     let mut observations = Vec::new();
     for ns in &zone.name_servers {
         let result = bounded(probe.authoritative(hostname, ns)).await;
-        observations.push(format!("{ns}: {result:?}"));
+        observations.push(dns_detail(ns,&result));
         addresses.extend(result.unwrap_or_default());
     }
     for endpoint in ["https://cloudflare-dns.com/dns-query","https://dns.google/resolve"] {
         let result = bounded(probe.recursive(hostname, endpoint)).await;
-        observations.push(format!("{endpoint}: {result:?}"));
+        observations.push(dns_detail(if endpoint.contains("google") {"Google DNS"} else {"Cloudflare DNS"},&result));
         addresses.extend(result.unwrap_or_default());
     }
     let system = bounded(probe.system(hostname)).await;
     v.visible_from_this_pc = Some(system.as_ref().is_ok_and(|a|!a.is_empty()));
-    observations.push(format!("This PC: {system:?}"));
+    observations.push(dns_detail("This PC",&system));
     addresses.extend(system.unwrap_or_default());
     addresses.sort_by_key(|ip|(ip.is_ipv6(), *ip));
     addresses.dedup();
@@ -703,3 +703,90 @@ mod tests {
 
 }
 
+
+/// User-facing text never exposes internal state keys.
+pub fn state_message(state:&str,host:&str)->String {
+    let action=match state {
+        "running"|"validating"=>"Checking", "starting_local"=>"Starting the local server for",
+        "provisioning_tunnel"=>"Creating a Cloudflare tunnel for", "configuring_dns"=>"Configuring DNS for",
+        "starting_connector"=>"Connecting", "waiting_dns"=>"Waiting for DNS for",
+        "waiting_tls"=>"Waiting for an HTTPS certificate for", "verifying_public"=>"Checking public access to",
+        "published"|"live"=>"Published", "failed"=>"Publishing failed for",
+        "recovery_required"=>"Publishing needs attention for", "rolled_back"=>"Publishing was undone for",
+        _=>"Publishing status is unknown for",
+    }; format!("{action} {host}")
+}
+fn dns_detail(label:&str,result:&Result<Vec<IpAddr>,String>)->String {
+    match result {Ok(a) if !a.is_empty()=>format!("{label}: {} addresses",a.len()),_=>format!("{label}: no answer yet")}
+}
+#[cfg(test)] mod audit_tests {
+    use super::*;
+    #[test] fn unknown_state_does_not_panic() {assert_eq!(DeploymentState::from("future_state"),DeploymentState::RecoveryRequired);assert!(serde_json::from_str::<DeploymentState>("\"future_state\"").is_err());}
+    #[test] fn readable_evidence_and_states() {
+        assert_eq!(dns_detail("luke.ns.cloudflare.com",&Ok(vec!["1.1.1.1".parse().unwrap();2])),"luke.ns.cloudflare.com: 2 addresses");
+        assert_eq!(dns_detail("This PC",&Err("debug".into())),"This PC: no answer yet");
+        assert_eq!(state_message("waiting_dns","www.example.com"),"Waiting for DNS for www.example.com");
+        assert_eq!(state_message("published","www.example.com"),"Published www.example.com");
+    }
+}
+
+/// Real network, read-only: `cargo test -p hostify-core --offline live_ -- --ignored --nocapture`.
+/// Touches public DNS and HTTPS only. Never calls the Cloudflare API and never writes anything.
+#[cfg(test)]
+mod live_read_only {
+    use super::*;
+    struct NoRuntime;
+    #[async_trait]
+    impl SiteRuntime for NoRuntime {
+        async fn start_site(&self, _: &str) -> Result<bool, String> { Err("unused".into()) }
+        async fn stop_site(&self, _: &str) -> Result<(), String> { Err("unused".into()) }
+        async fn start_tunnel(&self, _: &str) -> Result<bool, String> { Err("unused".into()) }
+        async fn stop_tunnel(&self) -> Result<(), String> { Err("unused".into()) }
+        async fn site_responds(&self, _: u16) -> Result<bool, String> { Err("unused".into()) }
+    }
+    fn probe() -> NetworkProbe {
+        NetworkProbe { cf: CloudflareClient::production(""), runtime: Arc::new(NoRuntime) }
+    }
+
+    #[tokio::test]
+    #[ignore = "uses the real network"]
+    async fn live_dns_sources_and_marker_rejection_on_a_proxied_cloudflare_host() {
+        let probe = probe();
+        let host = "cloudflare.com";
+        let authoritative = probe.authoritative(host, "ns3.cloudflare.com").await.unwrap();
+        println!("authoritative {authoritative:?}");
+        assert!(!authoritative.is_empty());
+        for endpoint in ["https://cloudflare-dns.com/dns-query", "https://dns.google/resolve"] {
+            let found = probe.recursive(host, endpoint).await.unwrap();
+            println!("{endpoint} {found:?}");
+            assert!(!found.is_empty());
+        }
+        // An unrelated site over valid TLS must never pass as this deployment.
+        let evidence = probe.https(host, authoritative[0], "0123456789abcdef0123456789abcdef").await.unwrap();
+        println!("marker {} root {}", evidence.marker_status, evidence.root_status);
+        assert!(evidence.classify("0123456789abcdef0123456789abcdef").is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "uses the real network"]
+    async fn live_invalid_certificates_are_refused_not_accepted() {
+        let probe = probe();
+        for host in ["wrong.host.badssl.com", "expired.badssl.com", "self-signed.badssl.com"] {
+            let address = probe.system(host).await.unwrap()[0];
+            let result = probe.https(host, address, "nonce").await;
+            println!("{host} {:?}", result.as_ref().map(|e| e.marker_status));
+            assert!(matches!(result, Err(VerifyClass::TlsPending)), "{host} must fail TLS validation");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "uses the real network"]
+    async fn live_pinned_address_wins_over_a_failing_system_resolver() {
+        // The production failure: the OS resolver has nothing, yet the edge is reachable.
+        let probe = probe();
+        let address = probe.recursive("cloudflare.com", "https://dns.google/resolve").await.unwrap()[0];
+        assert!(probe.system("hostify-no-such-name.invalid").await.is_err());
+        let evidence = probe.https("cloudflare.com", address, "nonce").await.unwrap();
+        assert_ne!(evidence.marker_status, 0);
+    }
+}

@@ -27,7 +27,7 @@ FunctionEnd
 !macro NSIS_HOOK_PREINSTALL
   ; During upgrades release the existing engine binary before replacing it.
   ${If} ${FileExists} "$INSTDIR\stop-engine.ps1"
-    nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\stop-engine.ps1" -EnginePath "$INSTDIR\hostify-engine.exe"'
+    nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\stop-engine.ps1" -EnginePath "$INSTDIR\hostify-engine.exe"'
     Pop $0
     Pop $1
     ${If} $0 != 0
@@ -49,18 +49,18 @@ FunctionEnd
 
 !macro NSIS_HOOK_PREUNINSTALL
   ; Stop only the engine at this installation path; its Job Object closes children.
-  nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\stop-engine.ps1" -EnginePath "$INSTDIR\hostify-engine.exe"'
-  Pop $0
-  Pop $1
-  ${If} $0 != 0
-    MessageBox MB_OK|MB_ICONSTOP "Hostify could not stop the engine. Close the running engine and retry uninstall. Website data has been kept."
-    Abort
-  ${EndIf}
-  nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\remove-task.ps1" -EnginePath "$INSTDIR\hostify-engine.exe"'
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\remove-task.ps1" -EnginePath "$INSTDIR\hostify-engine.exe"'
   Pop $0
   Pop $1
   ${If} $0 != 0
     MessageBox MB_OK|MB_ICONSTOP "Hostify could not remove its startup task. Retry uninstall after closing Hostify. Website data has been kept."
+    Abort
+  ${EndIf}
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\stop-engine.ps1" -RemoveService -EnginePath "$INSTDIR\hostify-engine.exe"'
+  Pop $0
+  Pop $1
+  ${If} $0 != 0
+    MessageBox MB_OK|MB_ICONSTOP "Hostify could not stop the engine. Close the running engine and retry uninstall. Website data has been kept."
     Abort
   ${EndIf}
 !macroend

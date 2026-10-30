@@ -39,7 +39,7 @@ mod marker_integration {
         let binary=PathBuf::from(local).join("Hostify/bin/caddy.exe");
         if !binary.is_file(){println!("SKIP real Caddy: {} does not exist",binary.display());return;}
         let dir=tempfile::tempdir().unwrap();
-        let root=dir.path().join("public");let marker=dir.path().join("verify");
+        let root=dir.path().join("site/current");let marker=dir.path().join("verify");
         std::fs::create_dir_all(root.join(".well-known")).unwrap();std::fs::create_dir_all(&marker).unwrap();
         let nonce=uuid::Uuid::new_v4().simple().to_string();
         std::fs::write(marker.join(&nonce),&nonce).unwrap();
@@ -61,6 +61,13 @@ mod marker_integration {
         for path in ["/.env","/.well-known/anything-else","/.well-known/hostify-verify/"] {
             assert_eq!(client.get(format!("{base}{path}")).send().await.unwrap().status(),404,"{path}");
         }
+        let source=dir.path().join("source");std::fs::create_dir(&source).unwrap();
+        for i in 0..5 {
+            let text=format!("updated {i}");std::fs::write(source.join("index.html"),&text).unwrap();
+            crate::import::import(&source,"directory",&dir.path().join("site")).unwrap();
+            assert_eq!(client.get(&base).send().await.unwrap().text().await.unwrap(),text);
+        }
+        assert_eq!(std::fs::read_dir(dir.path().join("site/releases")).unwrap().count(),3);
         println!("Real Caddy validated and served the marker; hidden paths and directory listing returned 404");
     }
 }

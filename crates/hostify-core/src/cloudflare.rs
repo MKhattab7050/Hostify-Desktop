@@ -50,7 +50,7 @@ pub struct DnsPlan { pub hostname: String, pub action: String, #[serde(skip_seri
 impl CloudflareClient {
     pub async fn zone(&self,id:&str)->Result<Zone,CfError> {
         let v=self.request(reqwest::Method::GET,&format!("/zones/{id}"),None).await?;
-        serde_json::from_value(v["result"].clone()).map_err(|e|CfError::Unexpected(e.to_string()))
+        serde_json::from_value(v["result"].clone()).map_err(|e|CfError::Unexpected(self.redact(&e.to_string())))
     }
 
     /// Split operations so deploy can journal the remote ID before fetching credentials.
@@ -101,7 +101,7 @@ impl CloudflareClient {
     pub fn with_logger(mut self, logger: impl Fn(&str)+Send+Sync+'static)->Self { self.logger=Some(Arc::new(logger)); self }
     async fn request(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value, CfError> {
         let start=Instant::now();
-        let mut req=self.client.request(method.clone(),format!("{}{path}",self.base)).bearer_auth(&self.token);
+        let mut req=self.client.request(method.clone(),format!("{}{path}",self.base)).bearer_auth(&self.token).timeout(Duration::from_secs(20));
         if let Some(v)=body {req=req.json(&v);}
         let response=match req.send().await {Ok(r)=>r,Err(_)=>{
             self.log(&method,path,0,"transport failure",start); return Err(CfError::Network("Could not reach Cloudflare".into()));
@@ -123,6 +123,7 @@ impl CloudflareClient {
         if v["success"]!=true {return Err(CfError::Unexpected("Missing success flag".into()));}
         Ok(v)
     }
+    pub fn remember_secret(&self,secret:String) {if !secret.is_empty(){self.secrets.lock().unwrap().push(secret);}}
     fn redact(&self, text:&str)->String {
         let mut out=if self.token.is_empty(){text.to_owned()}else{text.replace(&self.token,"[redacted]")};
         for secret in self.secrets.lock().unwrap().iter() {if !secret.is_empty(){out=out.replace(secret,"[redacted]");}}
@@ -139,11 +140,11 @@ impl CloudflareClient {
         } Ok(all)
     }
     pub async fn verify_token(&self) -> Result<(), CfError> { let v=self.request(reqwest::Method::GET, "/user/tokens/verify", None).await?; match v.pointer("/result/status").and_then(Value::as_str) {Some("active")=>Ok(()),Some(_)=>Err(CfError::InvalidToken),None=>Err(CfError::Unexpected("Missing token verification status".into()))} }
-    pub async fn list_accounts(&self) -> Result<Vec<Account>, CfError> { self.pages("/accounts").await?.into_iter().map(|v| serde_json::from_value(v).map_err(|e| CfError::Unexpected(e.to_string()))).collect() }
+    pub async fn list_accounts(&self) -> Result<Vec<Account>, CfError> { self.pages("/accounts").await?.into_iter().map(|v| serde_json::from_value(v).map_err(|e| CfError::Unexpected(self.redact(&e.to_string())))).collect() }
     pub async fn find_zone(&self, hostname: &str) -> Result<Zone, CfError> {
         let labels: Vec<_> = hostname.trim_end_matches('.').split('.').collect();
-        for i in 0..labels.len().saturating_sub(1) { let name=labels[i..].join("."); let url = reqwest::Url::parse_with_params("http://localhost/", &[("name", &name)]).map_err(|e| CfError::Unexpected(e.to_string()))?; let path = format!("/zones?{}", url.query().unwrap_or(""));
-            for v in self.pages(&path).await? { let z: Zone=serde_json::from_value(v).map_err(|e| CfError::Unexpected(e.to_string()))?; if z.name.eq_ignore_ascii_case(&name) { return Ok(z); } }
+        for i in 0..labels.len().saturating_sub(1) { let name=labels[i..].join("."); let url = reqwest::Url::parse_with_params("http://localhost/", &[("name", &name)]).map_err(|e| CfError::Unexpected(self.redact(&e.to_string())))?; let path = format!("/zones?{}", url.query().unwrap_or(""));
+            for v in self.pages(&path).await? { let z: Zone=serde_json::from_value(v).map_err(|e| CfError::Unexpected(self.redact(&e.to_string())))?; if z.name.eq_ignore_ascii_case(&name) { return Ok(z); } }
         } Err(CfError::ZoneNotFound)
     }
     pub async fn check_dns_permission(&self, zone: &str) -> Result<(), CfError> { self.pages(&format!("/zones/{zone}/dns_records")).await.map(|_| ()) }
@@ -164,7 +165,7 @@ impl CloudflareClient {
     }
     pub async fn put_tunnel_ingress(&self, account: &str, id: &str, entries: &[(String,String)]) -> Result<(), CfError> { let mut ingress: Vec<Value>=entries.iter().map(|(hostname,service)| json!({"hostname":hostname,"service":service})).collect(); ingress.push(json!({"service":"http_status:404"})); self.request(reqwest::Method::PUT,&format!("/accounts/{account}/cfd_tunnel/{id}/configurations"),Some(json!({"config":{"ingress":ingress}}))).await.map(|_| ()) }
     async fn records(&self, zone: &str, hostname: &str) -> Result<Vec<Value>, CfError> {
-        let url=reqwest::Url::parse_with_params("http://localhost/", &[("name",hostname)]).map_err(|e| CfError::Unexpected(e.to_string()))?;
+        let url=reqwest::Url::parse_with_params("http://localhost/", &[("name",hostname)]).map_err(|e| CfError::Unexpected(self.redact(&e.to_string())))?;
         // Cloudflare's name filter is exact; also reject other names defensively.
         Ok(self.pages(&format!("/zones/{zone}/dns_records?{}",url.query().unwrap_or(""))).await?.into_iter().filter(|v|v["name"].as_str().is_none_or(|name|name.trim_end_matches('.').eq_ignore_ascii_case(hostname.trim_end_matches('.')))).collect())
     }
@@ -312,5 +313,14 @@ impl CloudflareClient {
   Mock::given(path("/zones/z/dns_records/r")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true,"result":{"content":"t.cfargotunnel.com","proxied":false}}))).mount(&s).await;
   let c=CloudflareClient::new(s.uri(),"api-secret");assert_eq!(c.find_zone("example.com").await.unwrap().id,"z");
   assert!(matches!(c.verify_dns("z","r","t").await,Err(CfError::Unexpected(_))));
+ }
+}
+
+#[cfg(test)] mod secrecy_audit_tests {
+ use super::*;use wiremock::{Mock,MockServer,ResponseTemplate,matchers::path};
+ #[tokio::test] async fn malformed_zone_error_redacts_token_before_activity_can_log_it() {
+    let server=MockServer::start().await;let token="fabricated-api-secret";
+    Mock::given(path("/zones/z")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true,"result":{"id":"z","name":"example.com","name_servers":token}}))).mount(&server).await;
+    let client=CloudflareClient::new(server.uri(),"another-api-token");client.remember_secret(token.into());let error=client.zone("z").await.unwrap_err().to_string();assert!(!error.contains(token));assert!(error.contains("[redacted]"));
  }
 }

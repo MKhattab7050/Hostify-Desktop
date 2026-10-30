@@ -26,6 +26,8 @@ pub fn single_instance()->io::Result<Handle>{unsafe{let security=Security::user_
 pub struct Job(Handle);
 impl Job{
  pub fn new()->io::Result<Self>{unsafe{let h=CreateJobObjectW(ptr::null(),ptr::null());if h.is_null(){return Err(io::Error::last_os_error())}let job=Self(Handle(h));let mut info:JOBOBJECT_EXTENDED_LIMIT_INFORMATION=std::mem::zeroed();info.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;if SetInformationJobObject(job.0.0,JobObjectExtendedLimitInformation,(&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),std::mem::size_of_val(&info) as u32)==0{return Err(io::Error::last_os_error())}Ok(job)}}
+ // A HANDLE is an opaque kernel value passed straight to Win32; it is never dereferenced here.
+ #[allow(clippy::not_unsafe_ptr_arg_deref)]
  pub fn assign(&self,process:HANDLE)->io::Result<()>{unsafe{if AssignProcessToJobObject(self.0.0,process)==0{Err(io::Error::last_os_error())}else{Ok(())}}}
 }
 

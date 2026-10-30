@@ -18,6 +18,9 @@ struct Worker{stop:watch::Sender<bool>,task:tokio::task::JoinHandle<()>}
 pub struct Supervisor{pub store:Arc<Store>,workers:Arc<Mutex<HashMap<String,Worker>>>,scope:Option<String>,#[cfg(windows)]job:Arc<Job>}
 impl Supervisor{
  pub fn for_site(&self,id:&str)->Arc<Self>{Arc::new(Self{store:self.store.clone(),workers:self.workers.clone(),scope:Some(id.into()),#[cfg(windows)]job:self.job.clone()})}
+ async fn launch_tunnel(&self,token:&str)->Result<(String,bool),String>{let resources={let db=self.store.db().map_err(|e|e.to_string())?;let mut st=db.prepare("SELECT created_resources_json FROM deployments WHERE state IN ('running','validating','starting_local','provisioning_tunnel','configuring_dns','starting_connector','waiting_dns','waiting_tls','verifying_public','recovery_required','published')").map_err(|e|e.to_string())?;let rows=st.query_map([],|r|r.get::<_,String>(0)).map_err(|e|e.to_string())?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?};let secrets=WindowsCredentialStore;let mut id=None;for r in resources{let r:serde_json::Value=serde_json::from_str(&r).map_err(|e|e.to_string())?;if let Some(t)=r["tunnel_id"].as_str(){if secrets.get(&format!("tunnel:{t}")).map_err(|e|e.to_string())?.as_deref()==Some(token){id=Some(t.to_owned());break}}}let id=id.ok_or("Tunnel credential is not associated with a deployment")?;let started=self.launch_connector(&id,token).await?;
+Ok((id,started))}
+ async fn launch_connector(&self,id:&str,token:&str)->Result<bool,String>{let port=metrics_port(&id);let started=self.launch(Spec{key:format!("tunnel:{id}"),site:None,exe:self.store.root.join("bin").join(hostify_core::paths::CLOUDFLARED_EXE),args:vec!["tunnel".into(),"--no-autoupdate".into(),"--metrics".into(),format!("127.0.0.1:{port}"),"run".into()],token:Some(token.into()),log:self.store.root.join("logs").join(format!("tunnel-{id}.log")),port,path:"/ready"}).await?;Ok(started)}
  pub async fn stop_site_tunnel(&self,id:&str)->Result<(),String>{self.for_site(id).stop_tunnel().await}
  pub fn new(store:Arc<Store>)->io::Result<Arc<Self>>{Ok(Arc::new(Self{store,workers:Arc::new(Mutex::new(HashMap::new())),scope:None,#[cfg(windows)]job:Arc::new(Job::new()?)}))}
  fn spawn(&self,spec:&Spec)->io::Result<Child>{let mut cmd=Command::new(&spec.exe);cmd.args(&spec.args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());if let Some(token)=&spec.token{cmd.env("TUNNEL_TOKEN",token);}else{cmd.env_remove("TUNNEL_TOKEN");}
@@ -43,7 +46,7 @@ impl Supervisor{
  async fn stop(&self,key:&str)->Result<(),String>{let worker=self.workers.lock().await.remove(key);if let Some(w)=worker{let _=w.stop.send(true);w.task.await.map_err(|e|e.to_string())?;}Ok(())}
  pub async fn shutdown(&self){let keys=self.workers.lock().await.keys().cloned().collect::<Vec<_>>();for key in keys{let _=self.stop(&key).await;}}
 }
-fn pump(input:impl std::io::Read+Send+'static,path:PathBuf,secret:Option<String>){std::thread::spawn(move||{for line in std::io::BufReader::new(input).lines(){match line{Ok(mut line)=>{if let Some(secret)=&secret{line=line.replace(secret,"[redacted]");}let _=append_log(&path,&line);},Err(_)=>break}}});}
+fn pump(input:impl std::io::Read+Send+'static,path:PathBuf,secret:Option<String>)->std::thread::JoinHandle<()>{std::thread::spawn(move||{for line in std::io::BufReader::new(input).lines(){match line{Ok(mut line)=>{if let Some(secret)=&secret{if !secret.is_empty(){line=line.replace(secret,"[redacted]");}}let _=append_log(&path,&line);},Err(_)=>break}}})}
 #[async_trait]impl SiteRuntime for Supervisor{
  async fn start_site(&self,id:&str)->Result<bool,String>{
  if !self.store.detection.caddy_ready().await { let message=hostify_core::components::CADDY_UNAVAILABLE.to_owned();let _=self.store.status(id,"error",Some(message.clone()));return Err(message); }
@@ -53,7 +56,8 @@ fn pump(input:impl std::io::Read+Send+'static,path:PathBuf,secret:Option<String>
  match result{Err(e)=>{let _=self.store.status(id,"error",Some(e.clone()));Err(e)},Ok(false)=>Ok(false),Ok(true)=>{if self.site_responds(site.local_port).await?{self.store.status(id,"running",None).map_err(|e|e.to_string())?;Ok(true)}else{let _=self.stop(&format!("site:{id}")).await;let message=format!("Website did not become healthy on port {}. Check its logs and whether another application took the port.",site.local_port);let _=self.store.status(id,"error",Some(message.clone()));Err(message)}}}
  }
  async fn stop_site(&self,id:&str)->Result<(),String>{self.stop(&format!("site:{id}")).await?;self.store.status(id,"stopped",None).map_err(|e|e.to_string())}
- async fn start_tunnel(&self,token:&str)->Result<bool,String>{let resources={let db=self.store.db().map_err(|e|e.to_string())?;let mut st=db.prepare("SELECT created_resources_json FROM deployments WHERE state IN ('running','validating','starting_local','provisioning_tunnel','configuring_dns','starting_connector','waiting_dns','waiting_tls','verifying_public','recovery_required','published')").map_err(|e|e.to_string())?;let rows=st.query_map([],|r|r.get::<_,String>(0)).map_err(|e|e.to_string())?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?};let secrets=WindowsCredentialStore;let mut id=None;for r in resources{let r:serde_json::Value=serde_json::from_str(&r).map_err(|e|e.to_string())?;if let Some(t)=r["tunnel_id"].as_str(){if secrets.get(&format!("tunnel:{t}")).map_err(|e|e.to_string())?.as_deref()==Some(token){id=Some(t.to_owned());break}}}let id=id.ok_or("Tunnel credential is not associated with a deployment")?;let port=metrics_port(&id);let started=self.launch(Spec{key:format!("tunnel:{id}"),site:None,exe:self.store.root.join("bin").join(hostify_core::paths::CLOUDFLARED_EXE),args:vec!["tunnel".into(),"--no-autoupdate".into(),"--metrics".into(),format!("127.0.0.1:{port}"),"run".into()],token:Some(token.into()),log:self.store.root.join("logs").join(format!("tunnel-{id}.log")),port,path:"/ready"}).await?;
+ async fn resume_tunnel(&self,id:&str,token:&str)->Result<bool,String>{self.launch_connector(id,token).await}
+ async fn start_tunnel(&self,token:&str)->Result<bool,String>{let (id,started)=self.launch_tunnel(token).await?;let port=metrics_port(&id);
  let deadline=tokio::time::Instant::now()+Duration::from_secs(60);
  loop {if http_ok(port,"/ready").await && tunnel_connections(port).await>0{return Ok(started)}if tokio::time::Instant::now()>=deadline{if started{self.stop(&format!("tunnel:{id}")).await?;}return Err("Cloudflare connector did not connect. Check tunnel logs and network access.".into())}tokio::time::sleep(Duration::from_millis(500)).await;}
  }
@@ -67,3 +71,43 @@ fn pump(input:impl std::io::Read+Send+'static,path:PathBuf,secret:Option<String>
 
 
 
+
+#[cfg(test)] mod secrecy_tests {
+ use super::*;
+ #[test] fn realistic_cloudflared_error_redacts_token() {
+    let dir=tempfile::tempdir().unwrap();let path=dir.path().join("tunnel-test.log");let token="eyJhIjoiYWNjb3VudCIsInQiOiJ0dW5uZWwiLCJzIjoic2VjcmV0In0=";
+    let error=format!("2026-10-30T09:00:00Z ERR Unable to establish connection with Cloudflare edge error=\"Unauthorized: tunnel token {token} is invalid\" connIndex=0 event=0 ip=198.41.192.167\n");
+    pump(std::io::Cursor::new(error.into_bytes()),path.clone(),Some(token.into())).join().unwrap();
+    let logged=std::fs::read_to_string(path).unwrap();assert!(!logged.contains(token));assert!(logged.contains("[redacted]"));assert!(logged.contains("connIndex=0"));
+ }
+}
+
+#[cfg(test)] mod recovery_tests {
+ use super::*;
+ #[tokio::test] async fn startup_connector_returns_offline_and_keeps_supervised_worker() {
+    let dir=tempfile::tempdir().unwrap();let store=Store::open(dir.path().join("data")).unwrap();
+    // The test harness exits on cloudflared arguments; the worker must remain to retry it.
+    std::fs::copy(std::env::current_exe().unwrap(),store.root.join("bin").join(hostify_core::paths::CLOUDFLARED_EXE)).unwrap();
+    let supervisor=Supervisor::new(store).unwrap();let id=uuid::Uuid::new_v4().to_string();
+    tokio::time::timeout(Duration::from_secs(3),supervisor.resume_tunnel(&id,"fake-token")).await.unwrap().unwrap();
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(supervisor.workers.lock().await.contains_key(&format!("tunnel:{id}")));
+    assert!(!supervisor.resume_tunnel(&id,"fake-token").await.unwrap());supervisor.shutdown().await;
+    assert!(supervisor.workers.lock().await.is_empty());
+ }
+}
+
+#[cfg(all(test,windows))] mod ownership_tests {
+ use super::*;
+ #[tokio::test] async fn closing_job_kills_child_and_foreign_port_is_preserved() {
+    let dir=tempfile::tempdir().unwrap();let store=Store::open(dir.path().join("data")).unwrap();let supervisor=Supervisor::new(store).unwrap();
+    let listener=std::net::TcpListener::bind(("127.0.0.1",0)).unwrap();let port=listener.local_addr().unwrap().port();
+    let mut spec=Spec{key:"test".into(),site:None,exe:std::env::current_exe().unwrap(),args:vec!["--exact".into(),"supervisor::ownership_tests::waiting_child_fixture".into()],token:None,log:dir.path().join("child.log"),port,path:"/"};
+    assert!(supervisor.launch(spec.clone()).await.unwrap_err().contains("already in use"));assert!(listener.local_addr().is_ok());drop(listener);
+    // Reuse the pump's token environment mechanism to select a separate waiting fixture.
+    spec.args=vec!["--exact".into(),"supervisor::ownership_tests::waiting_child_fixture".into()];spec.token=Some("test".into());
+    let mut child=supervisor.spawn(&spec).unwrap();tokio::time::sleep(Duration::from_millis(150)).await;assert!(child.try_wait().unwrap().is_none());drop(supervisor);
+    tokio::time::timeout(Duration::from_secs(3),async {while child.try_wait().unwrap().is_none(){tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();let _=child.wait();
+ }
+ #[test] fn waiting_child_fixture() {if std::env::var("TUNNEL_TOKEN").as_deref()==Ok("test"){std::thread::sleep(Duration::from_secs(30));}}
+}

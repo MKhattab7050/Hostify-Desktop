@@ -435,7 +435,7 @@ async fn rewritten_root_body_is_irrelevant_when_nonce_and_root_status_are_correc
 async fn attempts_do_not_repeat_transition_activity_and_snapshots_surface_pending_domain() {
     let mut f=setup(99,false,true).await;f.deployer.probe=Arc::new(Probe{class:Some(VerifyClass::DnsNotVisible),wrong:false});
     let d=f.deployer.test_publish(f.q.clone(),&|_|{}).await.unwrap();
-    let count=||f.deployer.db.lock().unwrap().query_row("SELECT count(*) FROM activity_logs WHERE message='Publishing: waiting_dns'",[],|r|r.get::<_,i64>(0)).unwrap();
+    let count=||f.deployer.db.lock().unwrap().query_row("SELECT count(*) FROM activity_logs WHERE message='Waiting for DNS for www.example.com'",[],|r|r.get::<_,i64>(0)).unwrap();
     assert_eq!(count(),1);f.deployer.verify_once(&d.id,&|_|{}).await.unwrap();assert_eq!(count(),1);
     let domain:(String,bool)=f.deployer.db.lock().unwrap().query_row("SELECT dns_status,https_verified FROM domains",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();assert_eq!(domain,("pending".into(),false));
 }
@@ -449,4 +449,19 @@ async fn resume_preserves_future_deadline_and_renews_an_expired_budget() {
     let renewed=f.deployer.reset_verification(&d.id,false).unwrap().verification.unwrap();
     let remaining=chrono::DateTime::parse_from_rfc3339(&renewed.deadline_at).unwrap().with_timezone(&Utc)-Utc::now();
     assert!(remaining.num_seconds()>=1798 && remaining.num_seconds()<=1800);
+}
+
+#[tokio::test] async fn malformed_recovery_row_does_not_block_other_rows() {
+    let f=setup(99,false,false).await;
+    f.deployer.db.lock().unwrap().execute("INSERT INTO deployments(id,site_id,state,snapshot_json,created_resources_json,started_at) VALUES('bad','s','validating','{}','{}','now')",[]).unwrap();
+    let d=Deployment{hostname:Some(f.q.hostname.clone()),verification:None,id:"good".into(),site_id:"s".into(),state:"validating".into(),steps:vec![],error:None,started_at:"now".into(),finished_at:None};
+    f.deployer.save(&d,&Resources{request:Some(f.q.clone()),owner:d.id.clone(),..Default::default()}).unwrap();
+    assert!(f.deployer.recover_interrupted(&|_|{}).await.is_err());
+    assert_eq!(f.deployer.load("good").unwrap().0.state,"rolled_back");
+    assert_eq!(f.deployer.db.lock().unwrap().query_row("SELECT state FROM deployments WHERE id='bad'",[],|r|r.get::<_,String>(0)).unwrap(),"validating");
+}
+
+#[tokio::test] async fn truncated_deployment_steps_return_error_without_panicking() {
+    let f=setup(99,false,true).await;let d=f.deployer.deploy(f.q.clone(),&|_|{}).await.unwrap();let (mut d,r)=f.deployer.load(&d.id).unwrap();d.steps.clear();f.deployer.save(&d,&r).unwrap();
+    assert!(f.deployer.verify_once(&d.id,&|_|{}).await.unwrap_err().to_string().contains("missing its verification step"));assert_eq!(f.deployer.load(&d.id).unwrap().0.state,"verifying_public");
 }
