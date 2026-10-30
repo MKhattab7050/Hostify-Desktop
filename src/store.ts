@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { api, listen } from "./lib/api";
 import type {
-  ActivityEntry, AppSettings, CloudflareAccount, Deployment, Domain, EngineStatus, Site, SystemStats, TunnelHealth,
+  ComponentName, ActivityEntry, AppSettings, CloudflareAccount, Deployment, Domain, EngineStatus, Site, SystemStats, TunnelHealth,
 } from "./lib/types";
 
 export type Page = "dashboard" | "websites" | "domains" | "activity" | "settings";
@@ -33,7 +33,8 @@ interface State {
   refresh: () => Promise<void>;
   refreshStats: () => Promise<void>;
   setDeployment: (d: Deployment) => void;
-  installComponents: () => Promise<void>;
+  installComponents: (names?: ComponentName[]) => Promise<void>;
+  refreshEngine: () => Promise<void>;
   saveSettings: (s: AppSettings) => Promise<void>;
   boot: () => Promise<void>;
 }
@@ -55,7 +56,11 @@ export const useStore = create<State>((set, get) => ({
   },
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
   setDeployment: (d) => set((s) => ({ deployments: { ...s.deployments, [d.id]: d } })),
-  installComponents: async () => { set({ engine: await api.ensureComponents() }); },
+  installComponents: async (names) => { set({ engine: await api.ensureComponents(names), engineError: undefined }); },
+  // Status is detected live by the engine, so a re-read is all it takes to notice installs, deletions or a different engine.
+  refreshEngine: async () => {
+    try { set({ engine: await api.engineStatus(), engineError: undefined }); } catch (e) { set({ engineError: (e as Error).message }); }
+  },
 
   refresh: async () => {
     const [sites, domains, cf, tunnels, activity] = await Promise.allSettled([
@@ -93,6 +98,8 @@ export const useStore = create<State>((set, get) => ({
     await listen<ActivityEntry>("activity", (a) => set((s) => ({ activity: [a, ...s.activity].slice(0, 200) })));
 
     setInterval(() => void get().refreshStats(), 3000);
+    setInterval(() => void get().refreshEngine(), 5000);
+    window.addEventListener("focus", () => void get().refreshEngine());
     setInterval(() => void get().refresh(), 10000);
   },
 }));

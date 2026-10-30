@@ -14,6 +14,12 @@ function Toggle({ label, desc, on, onChange }: { label: string; desc: string; on
   );
 }
 
+function compText(c?: { installed: boolean; ready: boolean; version?: string; error?: string }, legacyVersion?: string) {
+  if (!c) return legacyVersion ?? "Not installed yet";
+  if (c.ready) return c.version ?? "Ready";
+  return c.installed ? `Installed but can't run${c.error ? `: ${c.error}` : ""}` : "Not installed yet";
+}
+
 export function Settings() {
   const { settings, engine, saveSettings } = useStore();
   if (!settings) return <p className="text-ink2">Loading settings…</p>;
@@ -37,8 +43,10 @@ export function Settings() {
         <div className="mb-2 font-medium">About this installation</div>
         <dl className="grid grid-cols-[160px_1fr] gap-y-1.5 text-ink2">
           <dt>Hostify engine</dt><dd className="selectable">{engine?.running ? `Running (${engine.mode} mode) · v${engine.version}` : "Not running"}</dd>
-          <dt>Web server</dt><dd className="selectable">{engine?.caddyVersion ?? "Not installed yet"}</dd>
-          <dt>Tunnel connector</dt><dd className="selectable">{engine?.cloudflaredVersion ?? "Not installed yet"}</dd>
+          <dt>Web server (Caddy)</dt><dd className="selectable">{compText(engine?.caddy, engine?.caddyVersion)}</dd>
+          <dt>Tunnel (cloudflared)</dt><dd className="selectable">{compText(engine?.cloudflared, engine?.cloudflaredVersion)}</dd>
+          {engine?.dataDir && <><dt>Data folder</dt><dd className="selectable break-all">{engine.dataDir}</dd></>}
+          {engine?.binDir && <><dt>Components folder</dt><dd className="selectable break-all">{engine.binDir}</dd></>}
         </dl>
       </Card>
     </div>

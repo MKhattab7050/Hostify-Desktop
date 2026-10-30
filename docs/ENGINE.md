@@ -1,6 +1,6 @@
 # Hostify engine implementation status
 
-This pass hardens `hostify-core` deployment and import only. The offline workspace build confirms that the existing engine and shell still compile with the core APIs; it does not certify an end-to-end hosting product.
+The earlier core pass hardened `hostify-core` deployment and import only. Its offline workspace build confirmed compatibility with the core APIs. The Task 5 engine changes and validation are described below; these do not certify a fully installed end-to-end hosting product.
 
 ## Deployment journal and rollback
 
@@ -53,4 +53,31 @@ Cloudflare calls are not a distributed transaction: another account actor can ch
 
 `SiteRuntime` must report `true` only when it actually starts a resource, and must clean up partial starts before returning an error. A process death between a local start taking effect and its boolean result being saved is outside the remote-create journal guarantee; the engine must reconcile its own child processes. Core cannot identify an unknown start through the existing runtime API. Callers must serialize publish/recovery operations for the same site or shared tunnel; this pass adds no cross-process deployment lock.
 
-Component acquisition still expects a cloudflared `.sha256` release asset and fails closed when it is unavailable. Real checksum formats and Windows installation replacement remain unverified. Port selection remains advisory and can race with another process. Engine and shell runtime behavior beyond compilation is outside this core-only pass.
+Component acquisition now uses compiled-in pinned versions and publisher hashes as described below. Real release downloads remain unverified. Port selection remains advisory and can race with another process.
+
+
+## Component detection and startup (Task 5)
+
+The pure resolver in hostify-core/src/paths.rs is the single source for argument/environment precedence and executable names. It resolves --data-dir first, then HOSTIFY_DATA_DIR, then %LOCALAPPDATA%\Hostify, deriving bin from that root. The engine makes its root absolute. Scheduled tasks retain their explicit root in XML; service launch arguments retain the same root plus owner SID, so the service does not fall back to LocalSystem's environment.
+
+The shell still spawns the engine beside its executable (or target/debug in development) without passing a data-dir override, inheriting the environment. It compiles the same resolver source to compare the connected engine's dataDir echo against its expected root and logs discrepancies to stderr. It does not redirect the existing per-user pipe to another root.
+
+engine_status retains componentsReady and legacy version fields and adds:
+
+- caddy and cloudflared: {installed, ready, version?, path, error?}.
+- dataDir, binDir, and localHostingReady.
+- localHostingReady equals Caddy readiness; componentsReady requires both components for publishing.
+
+Installed means a regular file exists. Ready also requires a successful version command (version for Caddy, --version for cloudflared); empty files are rejected without execution. Probes run through spawn_blocking, have a five-second process deadline, and capture bounded stdout. Status results are cached for about two seconds, keyed by each executable's existence, length, and modified time. External replacement, emptying, or deletion is reflected on the next engine_status call; start preflight and installation checks bypass the cache. Each install attempt invalidates the cache immediately, including failure paths.
+
+ensure_components accepts optional {"names":["caddy"]}; omitted/null names default to both. It validates names before downloads, preserves ready binaries, and reinstalls missing, empty, corrupt, or non-running files. Progress {name,percent} is emitted per selected component. Downloads and expanded executables are limited to 256 MiB. Verification remains fail-closed: the single PINNED_COMPONENTS table in crates/hostify-core/src/components.rs pins Caddy v2.11.7 and cloudflared 2026.10.6, their asset filenames, direct release download URLs, and lowercase SHA-256 hashes; Caddy also requires its published SHA-512. All listed hashes must match before any file is written. Installation makes no GitHub API request, latest-release lookup, or release-note/checksum-list parsing. To bump a pin: download the intended asset, compute its hashes, verify them against the publisher's checksum list, then update the version, filename, URL, and all hashes in that table. After replacement, the version probe must succeed and its output must contain the pinned version; installation returns the binary's reported version and errors with a warning on a version mismatch. Only the exact root ZIP entry caddy.exe is read; archive paths are never used as filesystem destinations. Verified bytes are written to a unique temporary file beside the target and renamed over it. Download, checksum, extraction, and replacement failures clean up any temporary file and preserve the prior target. A post-install probe error is reported after the verified executable has replaced the target. Locked targets advise stopping websites/tunnels and retrying. Offline and GitHub rate-limit errors explain how to retry.
+
+Starting/restarting a local site checks only Caddy, before stopping/replacing a running site or spawning. Failure sets statusDetail to the Dashboard installation instruction. The production supervisor repeats this guard for startup reconciliation and automatic child restarts. A file-not-found spawn race gets the same instruction. Publishing names exactly the components that are not ready before any Cloudflare work.
+
+The CLI status prints the connected engine's data/bin directories and each component's readiness, version, and error. Startup logs Hostify engine started (data: <dir>) before reconciliation.
+
+Offline regression coverage includes resolver precedence, service/task root preservation, the readiness matrix with fake probes, metadata cache refresh/expiry/invalidation, reinstalling zero-byte Caddy through mocked HTTP, preserving ready binaries, checksum failure preserving existing bytes, locked-target cleanup on Windows, traversal ZIPs, real corrupt-executable rejection, local start/restart without cloudflared, missing-Caddy refusal without runtime calls, publish preflight, selective install validation, and the new fields over the real named-pipe transport.
+
+Real GitHub downloads, installed Caddy/cloudflared behavior, elevated service/task installation, and installed-app stderr collection remain unverified in this offline pass. Local hosting success tests use the existing fake runtime with an injected version runner.
+
+Task 5 validation on this Windows workspace: cargo test --workspace --offline passed 52 core tests, 1 shell resolver test, 6 engine unit tests, and 5 engine integration tests (64 total, zero failures). cargo build --workspace --offline passed. git diff --check passed for the owned paths. Existing conditional symlink privilege skips described above still apply. No new crates or external network access were used.

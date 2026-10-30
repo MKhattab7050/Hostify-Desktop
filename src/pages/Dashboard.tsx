@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ExternalLink, Play, Plus, RotateCw, Square } from "lucide-react";
 import { listen } from "../lib/api";
+import type { ComponentName } from "../lib/types";
 import { useStore } from "../store";
 import { Button, Card, Empty, IconButton, Meter, StatusPill, fmtBytes, fmtTime, cx } from "../components/ui";
 import { SignalPath } from "../components/SignalPath";
@@ -27,7 +28,7 @@ export function Dashboard() {
         <Button variant="primary" onClick={() => openWizard()}><Plus size={16} aria-hidden />Add website</Button>
       </header>
 
-      {engine && !engine.componentsReady && <ComponentsBanner />}
+      {engine && <ComponentsBanner />}
 
       {sites.length === 0 ? (
         <Card>
@@ -98,7 +99,7 @@ export function Dashboard() {
 }
 
 function ComponentsBanner() {
-  const { installComponents, toast } = useStore();
+  const { engine, installComponents, toast } = useStore();
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<{ name: string; percent: number }>();
   useEffect(() => {
@@ -106,17 +107,31 @@ function ComponentsBanner() {
     listen<{ name: string; percent: number }>("components-progress", setProgress).then((u) => (dead ? u() : (off = u)));
     return () => { dead = true; off?.(); };
   }, []);
+  if (!engine) return null;
+  // Older engines report only componentsReady; treat that as "both missing".
+  const caddyOk = engine.caddy?.ready ?? engine.componentsReady;
+  const tunnelOk = engine.cloudflared?.ready ?? engine.componentsReady;
+  if (caddyOk && tunnelOk) return null;
+  const names: ComponentName[] = [...(caddyOk ? [] : ["caddy" as const]), ...(tunnelOk ? [] : ["cloudflared" as const])];
+
   async function install() {
     setBusy(true);
-    try { await installComponents(); toast("ok", "Web server and tunnel connector installed"); }
+    try { await installComponents(names); toast("ok", names.length === 2 ? "Web server and tunnel connector installed" : `${names[0] === "caddy" ? "Caddy" : "cloudflared"} installed`); }
     catch (e) { toast("error", (e as Error).message); }
     finally { setBusy(false); setProgress(undefined); }
   }
+  const problem = (c?: { error?: string }) => (c?.error ? ` (${c.error})` : "");
+  const blocking = !caddyOk; // Caddy missing stops all hosting; cloudflared only affects publishing.
+  const text = !caddyOk && !tunnelOk
+    ? <><strong>Caddy and cloudflared are not installed.</strong> Caddy hosts your websites on this computer; cloudflared connects them to your domain.</>
+    : !caddyOk
+      ? <><strong>Caddy, the web server, is missing or can't run{problem(engine.caddy)}.</strong> Websites can't start until it is installed.</>
+      : <><strong>cloudflared is missing{problem(engine.cloudflared)}.</strong> Hosting on this computer works. You only need it to publish to a domain.</>;
   return (
-    <Card className="flex items-center justify-between gap-4 border-lantern p-4">
-      <p><strong>Two hosting components are missing.</strong> Hostify downloads Caddy (web server) and cloudflared (tunnel) from their official releases and checks each against the publisher's checksum.</p>
-      <Button variant="primary" busy={busy} onClick={install} className="shrink-0">
-        {busy ? `Installing${progress ? ` ${progress.name} ${progress.percent}%` : "…"}` : "Install components"}
+    <Card className={cx("flex items-center justify-between gap-4 p-4", blocking ? "border-lantern" : "border-line")}>
+      <p>{text} Hostify downloads each from its official release and checks it against the publisher's checksum.</p>
+      <Button variant={blocking ? "primary" : "secondary"} busy={busy} onClick={install} className="shrink-0">
+        {busy ? `Installing${progress ? ` ${progress.name} ${progress.percent}%` : "…"}` : names.length === 2 ? "Install components" : `Install ${names[0] === "caddy" ? "Caddy" : "cloudflared"}`}
       </Button>
     </Card>
   );

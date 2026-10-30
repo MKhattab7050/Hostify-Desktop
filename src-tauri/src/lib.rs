@@ -4,6 +4,10 @@ use tauri::{Manager, State, menu::{Menu, MenuItem}, tray::TrayIconBuilder};
 use tauri_plugin_dialog::DialogExt;
 mod engine;
 mod windows;
+// Compile the shared pure resolver without adding a workspace dependency.
+#[path = "../../crates/hostify-core/src/paths.rs"]
+#[allow(dead_code)]
+mod paths;
 use engine::EngineClient;
 type Client<'a> = State<'a, Arc<EngineClient>>;
 
@@ -16,7 +20,7 @@ macro_rules! forward {
     )*};
 }
 forward! {
-    engine_status(); ensure_components(); system_stats(); list_sites();
+    engine_status(); system_stats(); list_sites();
     get_site(id: String => "id");
     validate_source(path: String => "path", kind: String => "kind");
     add_site(name: String => "name", source_path: String => "sourcePath", kind: String => "kind");
@@ -32,6 +36,10 @@ forward! {
     list_activity(site_id: Option<String> => "siteId", limit: u32 => "limit");
     site_logs(site_id: String => "siteId", lines: u32 => "lines");
     get_settings();
+}
+#[tauri::command]
+async fn ensure_components(client: Client<'_>, names: Option<Vec<String>>) -> Result<Value, String> {
+    client.call("ensure_components", json!({"names":names})).await
 }
 #[tauri::command]
 async fn save_settings(client: Client<'_>, settings: Value) -> Result<Value, String> {

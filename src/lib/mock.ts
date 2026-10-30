@@ -25,8 +25,8 @@ export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise
   await wait(120);
   const r = (v: unknown) => v as T;
   switch (cmd) {
-    case "engine_status": return r({ running: true, version: "preview", mode: "user", componentsReady: true, caddyVersion: "preview", cloudflaredVersion: "preview" });
-    case "ensure_components": return r({ running: true, version: "preview", mode: "user", componentsReady: true });
+    case "engine_status": return r({ running: true, version: "preview", mode: "user", componentsReady: true, localHostingReady: true, caddyVersion: "preview", cloudflaredVersion: "preview", caddy: { installed: true, ready: true, version: "preview", path: "C:\Hostify\bin\caddy.exe" }, cloudflared: { installed: true, ready: true, version: "preview", path: "C:\Hostify\bin\cloudflared.exe" }, dataDir: "C:\Hostify", binDir: "C:\Hostify\bin" });
+    case "ensure_components": return mock<T>("engine_status");
     case "system_stats": return r({ cpuPercent: 4 + Math.random() * 9, ramUsedBytes: 9.1e9, ramTotalBytes: 17e9, diskUsedBytes: 310e9, diskTotalBytes: 512e9, hostifyDataBytes: 8.5e6 });
     case "list_sites": return r(sites);
     case "get_site": return r(sites.find((s) => s.id === a.id));

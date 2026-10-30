@@ -118,6 +118,16 @@ impl EngineClient {
         };
         connection.replies.lock().await.remove(&id);
         if let Ok(settings) = &result {
+            if matches!(method, "engine_status" | "ensure_components") {
+                if let Some(actual)=settings.get("dataDir").and_then(Value::as_str) {
+                    if let Ok(expected)=crate::paths::HostifyPaths::discover() {
+                        let expected=std::path::absolute(&expected.root).unwrap_or(expected.root);
+                        if std::path::Path::new(actual)!=expected {
+                            eprintln!("Hostify engine data directory mismatch: shell expects {}, connected engine uses {actual}",expected.display());
+                        }
+                    }
+                }
+            }
             if matches!(method, "get_settings" | "save_settings") {
                 self.close_to_tray.store(settings.get("closeToTray").and_then(Value::as_bool).unwrap_or(true), Ordering::Relaxed);
             }

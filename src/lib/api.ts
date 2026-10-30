@@ -1,6 +1,6 @@
 import type {
   ActivityEntry, AppSettings, CloudflareAccount, Deployment, DnsPlan, Domain, DomainCheck,
-  EngineStatus, Site, SourceKind, SourceReport, SystemStats, TunnelHealth,
+  EngineStatus, ComponentName, Site, SourceKind, SourceReport, SystemStats, TunnelHealth,
 } from "./types";
 import { mock } from "./mock";
 
@@ -38,7 +38,7 @@ export async function onFileDrop(cb: (over: boolean, paths: string[]) => void): 
 
 export const api = {
   engineStatus: () => call<EngineStatus>("engine_status"),
-  ensureComponents: () => call<EngineStatus>("ensure_components"),
+  ensureComponents: (names?: ComponentName[]) => call<EngineStatus>("ensure_components", names ? { names } : {}),
   systemStats: () => call<SystemStats>("system_stats"),
   listSites: () => call<Site[]>("list_sites"),
   validateSource: (path: string, kind: SourceKind) => call<SourceReport>("validate_source", { path, kind }),
