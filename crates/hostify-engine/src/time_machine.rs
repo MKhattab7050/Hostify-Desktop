@@ -85,7 +85,8 @@ fn copy_verified_archive(
         let _=std::fs::remove_file(dest);
         return Err(error.into());
     }
-    if snapshots::checksum(dest)? != record.sha256 {
+    // Even a failed post-copy read must not leave a partially validated ZIP.
+    if !matches!(snapshots::checksum(dest),Ok(digest) if digest==record.sha256) {
         let _=std::fs::remove_file(dest);
         bail!("Export integrity validation failed.");
     }
