@@ -1525,7 +1525,13 @@ mod recovery_tests {
         )
         .unwrap();
         let supervisor = Supervisor::new(store).unwrap();
-        let id = uuid::Uuid::new_v4().to_string();
+        // Windows may occupy ports in the dynamic 49k-60k range while
+        // the CI runner executes unrelated network tests in parallel.
+        // Choose a free metrics port; never terminate a foreign process.
+        let id = (0..128)
+            .map(|_| uuid::Uuid::new_v4().to_string())
+            .find(|id| crate::port_available(metrics_port(id)))
+            .expect("No free connector metrics port available for isolated test");
         tokio::time::timeout(
             Duration::from_secs(3),
             supervisor.resume_tunnel(&id, "fake-token"),
