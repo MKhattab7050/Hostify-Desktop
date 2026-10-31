@@ -144,6 +144,15 @@ export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise
       const status = guardian.get(a.siteId) ?? { enabled: false, consecutiveFailures: 0, recoveryAttempts: 0, lastResult: "Monitoring disabled" };
       return r({ ...status, lastResult: status.enabled ? "Healthy" : "Monitoring paused" });
     }
+    case "security_posture": return r({
+      checkedAt:now(),inspectedSites:sites.length,blockingFindings:0,warningFindings:0,
+      unverifiedChecks:1,findings:[{
+        siteId:null,id:"CREDENTIAL_AUDIT",severity:"medium",status:"unverified",
+        title:"Credential rotation and off-device backup have not been verified",
+        detail:"This browser mock cannot inspect Windows credential storage or remote backups.",
+        recommendedAction:"Verify these controls in a real isolated Windows installation.",
+      }],
+    });
     case "doctor_analyze": return r({
       issues: [],linesReviewed:0,hasActionableFindings:false,engine:"offline-rules-v1"
     });

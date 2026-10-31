@@ -930,6 +930,7 @@ impl Engine {
                 s.activity(severity, Some(id), &format!("Fast Publish: {event} ({outcome})"))?;
                 Ok(Value::Null)
             }
+            "security_posture" => crate::security_center::gather(self),
             "doctor_analyze" => {
                 let id=arg(&p,"siteId")?;
                 let site=s.site(id)?;
