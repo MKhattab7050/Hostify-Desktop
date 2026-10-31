@@ -61,6 +61,7 @@ const runtimes: RuntimeStatus[] = [
 let mysql = { setUp: false, running: false } as { setUp: boolean; running: boolean; version?: string; port?: number; healthy?: boolean; dataBytes?: number; memoryBytes?: number; freeDiskBytes?: number };
 let databases: ManagedDatabase[] = [];
 const backups = new Map<string, { file: string; sizeBytes: number; createdAt: string }[]>();
+const guardian = new Map<string, { enabled: boolean; consecutiveFailures: number; recoveryAttempts: number; lastResult: string }>();
 function inspect(path: string): ProjectReport {
   const node = /node|express|socket/i.test(path); const php = /php|wordpress/i.test(path);
   return { siteKind: node ? "node" : php ? "php" : "static", framework: /socket/i.test(path) ? "socket.io" : /express|node/i.test(path) ? "express" : /wordpress/i.test(path) ? "wordpress" : null, name: null, engines: null,
@@ -94,9 +95,15 @@ export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise
     case "build_app": { if (a.trustAcknowledged !== true) throw new Error("Explicit trust is required before building an application."); const id = "b" + Date.now(); builds.set(a.siteId, { at: Date.now(), fail: /fail/i.test(sites.find((s) => s.id === a.siteId)?.sourcePath ?? ""), id }); return r({ buildId: id }); }
     case "cancel_build": builds.delete(a.siteId); return r(undefined);
     case "get_build_status": return r(buildStatus(a.siteId));
-    case "guardian_status": return r({ enabled: false, consecutiveFailures: 0, recoveryAttempts: 0, lastResult: "Monitoring disabled" });
-    case "guardian_enable": return r({ enabled: a.enabled, consecutiveFailures: 0, recoveryAttempts: 0, lastResult: a.enabled ? "Monitoring enabled" : "Monitoring disabled" });
-    case "guardian_check_now": return r({ enabled: false, consecutiveFailures: 0, recoveryAttempts: 0, lastResult: "Monitoring paused" });
+    case "guardian_status": return r(guardian.get(a.siteId) ?? { enabled: false, consecutiveFailures: 0, recoveryAttempts: 0, lastResult: "Monitoring disabled" });
+    case "guardian_enable": {
+      const status = { enabled: a.enabled, consecutiveFailures: 0, recoveryAttempts: guardian.get(a.siteId)?.recoveryAttempts ?? 0, lastResult: a.enabled ? "Monitoring enabled" : "Monitoring disabled" };
+      guardian.set(a.siteId, status); return r(status);
+    }
+    case "guardian_check_now": {
+      const status = guardian.get(a.siteId) ?? { enabled: false, consecutiveFailures: 0, recoveryAttempts: 0, lastResult: "Monitoring disabled" };
+      return r({ ...status, lastResult: status.enabled ? "Healthy" : "Monitoring paused" });
+    }
     case "app_status": { const s = sites.find((x) => x.id === a.siteId); return r(s?.status === "running" ? { health: "running", exposedAddresses: [], pid: 4242, processCount: 2, cpuPercent: 0.4, memoryBytes: 63_000_000, restarts: 0, internalPort: 19100, activeRelease: "r1" } : { health: "stopped", exposedAddresses: [] }); }
     case "app_logs": return r(a.stream === "build" ? ["[preview] npm ci", "[preview] added 69 packages"] : ["[preview] Logs appear here when the engine is running."]);
     case "list_runtimes": return r(runtimes);

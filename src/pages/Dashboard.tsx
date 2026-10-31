@@ -6,6 +6,7 @@ import { tunnelFor, useStore } from "../store";
 import { publishPill } from "../lib/publish";
 import { Button, Card, Empty, IconButton, Meter, PageHeader, Pill, Skeleton, StatusPill, fmtBytes, fmtTime, cx } from "../components/ui";
 import { SignalPath } from "../components/SignalPath";
+import { GuardianCard } from "../components/GuardianCard";
 import { useSiteActions } from "../components/siteActions";
 
 function Tile({ label, children, sub }: { label: string; children: ReactNode; sub?: string }) {
@@ -80,6 +81,8 @@ export function Dashboard() {
           })}
         </div>
       )}
+
+      <GuardianCard sites={sites} />
 
       <div className="grid grid-cols-[1.1fr_1fr] gap-3 max-[1100px]:grid-cols-1">
         <Card className="p-4">
