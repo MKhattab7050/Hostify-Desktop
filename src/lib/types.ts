@@ -97,3 +97,9 @@ export interface PublishPreflight {
   checks: { key: string; passed: boolean; detail: string }[];
   diagnostic?: PublishDiagnostic | null;
 }
+
+/** Opt-in Guardian monitoring. It never repairs project files or DNS. */
+export interface GuardianStatus {
+  enabled: boolean; consecutiveFailures: number; recoveryAttempts: number;
+  lastRestartUnix?: number | null; lastCheckedAt?: string | null; lastResult?: string | null;
+}

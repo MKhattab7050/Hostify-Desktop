@@ -555,10 +555,14 @@ impl Engine {
                 }
             }
         });
-        self.background
-            .lock()
-            .map_err(|_| anyhow!("Background tasks unavailable"))?
-            .push(retry);
+        {
+            let mut tasks = self.background.lock()
+                .map_err(|_| anyhow!("Background tasks unavailable"))?;
+            tasks.push(retry);
+            if self.supervisor.is_some() {
+                tasks.push(crate::guardian::spawn(self));
+            }
+        }
         for r in records {
             if let Some(id) = r["tunnel_id"].as_str() {
                 let result = async {
@@ -799,6 +803,16 @@ impl Engine {
                 Ok(
                     json!({"restartRequired":changed && site.status!="stopped","rebuildRequired":rebuild}),
                 )
+            }
+            "guardian_status" => {
+                Ok(json!(crate::guardian::load(self, arg(&p, "siteId")?)?))
+            }
+            "guardian_enable" => {
+                let id = arg(&p, "siteId")?;
+                crate::guardian::enable(self, id, boolean(&p, "enabled")?)
+            }
+            "guardian_check_now" => {
+                crate::guardian::check(self, arg(&p, "siteId")?).await
             }
             "publish_preflight" => {
                 let id = arg(&p, "siteId")?;
