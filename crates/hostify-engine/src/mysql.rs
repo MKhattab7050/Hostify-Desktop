@@ -1030,9 +1030,10 @@ impl Manager {
             }
             "link_database" => {
                 let name = arg("name")?;
-                self.managed(name)?;
+                let current_owner = self.managed(name)?;
                 let site = arg("siteId")?;
                 self.store.site(site)?;
+                ensure_same_site_owner(current_owner.as_deref(), site)?;
                 let (user, password) = self.credentials(name)?;
                 let values = self.env_values(name, &user, &password)?;
                 if flag("injectEnv") {
@@ -1062,6 +1063,28 @@ impl Manager {
         }
     }
 }
+/// A database linked to one website cannot be silently reassigned to another.
+fn ensure_same_site_owner(owner: Option<&str>, target: &str) -> Result<()> {
+    if let Some(owner) = owner {
+        if owner != target {
+            bail!("This database belongs to another website. Unlink it explicitly before linking it elsewhere.");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod owner_guard_tests {
+    use super::ensure_same_site_owner;
+
+    #[test]
+    fn blocks_implicit_database_reassignment() {
+        assert!(ensure_same_site_owner(Some("site-a"), "site-b").is_err());
+        assert!(ensure_same_site_owner(Some("site-a"), "site-a").is_ok());
+        assert!(ensure_same_site_owner(None, "site-b").is_ok());
+    }
+}
+
 pub fn validate_backup_filename(file: &str) -> Result<()> {
     if file.is_empty()
         || !file.ends_with(".sql")

@@ -125,7 +125,8 @@ pub(crate) async fn http_probe_detailed(
             Some(c) => {
                 let matches = match health {
                     Health::Strict2xx => (200..300).contains(&c),
-                    Health::AnyBelow500 => (100..500).contains(&c),
+                    // 401/403/404/421 are failures, not proof of a healthy origin.
+                    Health::AnyBelow500 => (200..400).contains(&c),
                     Health::TcpConnect => false,
                 };
                 if matches {
@@ -1115,22 +1116,15 @@ impl Supervisor {
     }
 }
 impl Supervisor {
+    /// Startup may restore an explicitly linked MySQL service, but it must never
+    /// change a release's trust, files, dependencies, schema or database ownership.
     async fn auto_heal_site(&self, id: &str) -> Result<(), String> {
         let site = self.store.site(id).map_err(|e| e.to_string())?;
         if site.kind == "static" {
-            let current_index = self
-                .store
-                .root
-                .join("sites")
-                .join(id)
-                .join("current/index.html");
+            let current_index = self.store.root.join("sites").join(id).join("current/index.html");
             let source_path = Path::new(&site.source_path);
             if !current_index.is_file() && source_path.exists() {
-                let src_kind = if source_path.is_dir() {
-                    "directory"
-                } else {
-                    "zip"
-                };
+                let src_kind = if source_path.is_dir() { "directory" } else { "zip" };
                 let _ = hostify_core::import::import(
                     source_path,
                     src_kind,
@@ -1142,269 +1136,28 @@ impl Supervisor {
         if !matches!(site.kind.as_str(), "node" | "php") {
             return Ok(());
         }
-        let mut config = self.store.app_config(id).map_err(|e| e.to_string())?;
-        let release_id = config
-            .built_release
-            .clone()
-            .or_else(|| config.active_release.clone())
-            .or_else(|| config.pending_release.clone());
-        let mut config_changed = false;
-        let mut needs_auto_db = false;
-        let mut sql_schema_to_import: Option<String> = None;
 
-        if let Some(ref rel) = release_id
-            && let Ok(rel_root) = self.release_root(id, rel)
-        {
-            if config.trusted_release.is_none() {
-                config.trusted_release = Some(rel.clone());
-                config_changed = true;
-            }
-            if config.built_release.is_none() {
-                config.built_release = Some(rel.clone());
-                config_changed = true;
-            }
-            if config.auto_heal(&rel_root, &site.kind) {
-                config_changed = true;
-            }
-            if site.kind == "php"
-                && rel_root.join("storage").is_dir()
-                && !config.persistent_paths.iter().any(|p| p == "storage")
-            {
-                config.persistent_paths.push("storage".into());
-                config_changed = true;
-            }
-
-            let cwd = if config.working_dir == "." || config.working_dir.is_empty() {
-                rel_root.clone()
-            } else {
-                rel_root.join(&config.working_dir)
-            };
-
-            let dotenv_file = cwd.join(".env");
-            if dotenv_file.is_file()
-                && let Ok(raw_env) = std::fs::read_to_string(&dotenv_file)
-            {
-                let mut kept_lines = Vec::new();
-                for line in raw_env.lines() {
-                    let trimmed = line.trim().strip_prefix("export ").unwrap_or(line.trim());
-                    if let Some((k, v)) = trimmed.split_once('=') {
-                        let key = k.trim();
-                        let val = v.trim().trim_matches(|c| c == '"' || c == '\'');
-                        if matches!(
-                            key.to_ascii_uppercase().as_str(),
-                            "PORT"
-                                | "HOST"
-                                | "DB_HOST"
-                                | "DB_PORT"
-                                | "DB_USER"
-                                | "DB_USERNAME"
-                                | "DB_PASS"
-                                | "DB_PASSWORD"
-                                | "DB_NAME"
-                                | "DB_DATABASE"
-                        ) {
-                            continue;
-                        }
-                        if key.eq_ignore_ascii_case("BASE_PATH") && !val.is_empty() && val != "/" {
-                            continue;
-                        }
-                    }
-                    kept_lines.push(line);
+        let config = self.store.app_config(id).map_err(|e| e.to_string())?;
+        if site.kind == "node" && site.runtime_version.as_deref().is_some_and(|v| v.starts_with("26.")) {
+            // Diagnose a known incompatible dependency; never change runtime_version silently.
+            if let Some(release) = config.built_release.as_ref().or(config.active_release.as_ref()) {
+                let root = self.release_root(id, release)?;
+                let cwd = hostify_core::app_config::inside(&root, &config.working_dir)?;
+                let incompatible = cwd.join("node_modules/buffer-equal-constant-time").is_dir()
+                    || [cwd.join("package-lock.json"), root.join("package-lock.json")]
+                        .iter().any(|p| std::fs::read_to_string(p)
+                            .map(|s| s.contains("buffer-equal-constant-time"))
+                            .unwrap_or(false));
+                if incompatible {
+                    return Err("Node.js 26 is incompatible with this application's buffer-equal-constant-time dependency. Select the installed Node.js 24 LTS runtime in Hostify, rebuild the release, and retry. No application files were changed.".into());
                 }
-                let filtered = kept_lines.join("\n");
-                if let Ok(db) = self.store.db() {
-                    let _ = hostify_core::env_vars::import_dotenv(&db, id, &filtered, &[]);
-                }
-                let _ = std::fs::write(&dotenv_file, format!("{filtered}\n"));
-            }
-
-            if site.kind == "node" && cwd.join("package.json").is_file() {
-                let cur_ver = site.runtime_version.as_deref().unwrap_or("26.13.0");
-                let has_slowbuffer = cwd.join("node_modules/buffer-equal-constant-time").is_dir()
-                    || rel_root.join("node_modules/buffer-equal-constant-time").is_dir()
-                    || std::fs::read_to_string(cwd.join("package-lock.json")).map(|s| s.contains("buffer-equal-constant-time")).unwrap_or(false)
-                    || std::fs::read_to_string(rel_root.join("package-lock.json")).map(|s| s.contains("buffer-equal-constant-time")).unwrap_or(false)
-                    || std::fs::read_to_string(cwd.join("package.json")).map(|s| s.contains("jsonwebtoken") || s.contains("buffer-equal-constant-time")).unwrap_or(false);
-                if cur_ver.starts_with("26.") && has_slowbuffer {
-                    if self.store.runtimes.resolve("node", "24.22.2").is_ok() {
-                        if let Ok(db) = self.store.db() {
-                            let _ = db.execute("UPDATE websites SET runtime_version='24.22.2' WHERE id=?1", [&site.id]);
-                            let msg = "Automatically selected Node.js 24 LTS runtime (buffer-equal-constant-time is incompatible with Node.js 26).";
-                            let _ = self.store.activity("info", Some(id), msg);
-                        }
-                    }
-                }
-                if !cwd.join("node_modules").is_dir() {
-                    let runtime_ver = site
-                        .runtime_version
-                        .clone()
-                        .unwrap_or_else(|| "24.22.2".into());
-                    if let Ok(exe) = self.store.runtimes.resolve("node", &runtime_ver)
-                        && let Ok((env, redact)) =
-                            crate::build::environment(&self.store, id, &exe, &cwd, true)
-                    {
-                        let log = self.store.root.join("logs").join(format!("{id}.build.log"));
-                        let spec = Spec {
-                            key: format!("autoheal-npm:{id}"),
-                            site: Some(id.into()),
-                            exe: exe.clone(),
-                            args: vec![
-                                crate::build::npm(&exe),
-                                "install".into(),
-                                "--no-audit".into(),
-                                "--no-fund".into(),
-                                "--ignore-scripts".into(),
-                            ],
-                            token: None,
-                            cwd: Some(cwd.clone()),
-                            env,
-                            redact,
-                            log,
-                            port: 0,
-                            path: "/".into(),
-                            role: Role::App,
-                            health: Health::AnyBelow500,
-                            restart: RestartPolicy::Never,
-                            memory_limit_mb: config.memory_limit_mb,
-                        };
-                        if let Ok(mut child) = self.spawn(&spec) {
-                            let deadline =
-                                tokio::time::Instant::now() + Duration::from_secs(5 * 60);
-                            while tokio::time::Instant::now() < deadline {
-                                if let Ok(Some(_)) = child.try_wait() {
-                                    break;
-                                }
-                                tokio::time::sleep(Duration::from_millis(250)).await;
-                            }
-                        }
-                    }
-                }
-                let bcrypt_js = cwd.join("node_modules/bcrypt/bcrypt.js");
-                let bcrypt_orig = cwd.join("node_modules/bcrypt/bcrypt.orig.js");
-                let bcryptjs_dir = cwd.join("node_modules/bcryptjs");
-                if bcrypt_js.is_file() && bcryptjs_dir.is_dir() && !bcrypt_orig.is_file() {
-                    if let Ok(orig) = std::fs::read_to_string(&bcrypt_js) {
-                        let _ = std::fs::write(&bcrypt_orig, orig);
-                        let shim = "try { module.exports = require('./bcrypt.orig.js'); } catch (_) { module.exports = require('bcryptjs'); }\n";
-                        let _ = std::fs::write(&bcrypt_js, shim);
-                    }
-                }
-                let db_cfg_file = cwd.join("config/db.js");
-                if db_cfg_file.is_file()
-                    && let Ok(db_js) = std::fs::read_to_string(&db_cfg_file)
-                    && db_js.contains("user: 'root'")
-                    && db_js.contains("database: 'final-db'")
-                {
-                    let patched = db_js
-                        .replace("host: 'localhost',", "host: process.env.DB_HOST || '127.0.0.1', port: Number(process.env.DB_PORT || 3306),")
-                        .replace("user: 'root',", "user: process.env.DB_USER || process.env.DB_USERNAME || 'root',")
-                        .replace("password: '',", "password: process.env.DB_PASSWORD || process.env.DB_PASS || '',")
-                        .replace("database: 'final-db',", "database: process.env.DB_NAME || process.env.DB_DATABASE || 'final-db',");
-                    let _ = std::fs::write(&db_cfg_file, patched);
-                }
-            }
-
-            if (rel_root.join("app/auto-install.php").is_file()
-                || cwd.join("app/auto-install.php").is_file())
-                && let Ok(db) = self.store.db()
-            {
-                let _ = hostify_core::env_vars::set(&db, id, "AUTO_INSTALL", "true", false);
-                if let Ok(base_val) = hostify_core::env_vars::reveal(&db, id, "BASE_PATH")
-                    && !base_val.is_empty()
-                    && base_val != "/"
-                {
-                    let _ = hostify_core::env_vars::delete(&db, id, "BASE_PATH");
-                }
-            }
-
-            for candidate_sql in ["database-setup.sql", "database/schema.sql", "schema.sql"] {
-                let p = cwd.join(candidate_sql);
-                if p.is_file() {
-                    needs_auto_db = true;
-                    if candidate_sql != "database/schema.sql"
-                        || !cwd.join("app/auto-install.php").is_file()
-                    {
-                        if let Ok(raw_sql) = std::fs::read_to_string(&p) {
-                            sql_schema_to_import = Some(clean_sql_for_mysql8(&raw_sql));
-                        }
-                    }
-                    break;
-                }
-            }
-            if cwd.join("app/database.php").is_file()
-                || cwd.join("app/auto-install.php").is_file()
-                || cwd.join("config/db.js").is_file()
-                || cwd.join("dbp.js").is_file()
-            {
-                needs_auto_db = true;
             }
         }
-        if config_changed {
-            let _ = self.store.save_app_config(id, &config);
-        }
+
+        // Only restart a database the user *already linked* to this site.
         if let Some(name) = self.mysql.linked_database(id).map_err(|e| e.to_string())? {
-            if let Err(error) = self.mysql_start().await {
-                let message = format!("Database {name} could not start: {error}");
-                let _ = self.store.status(id, "error", Some(message.clone()));
-                return Err(message);
-            }
-            let _ = self.mysql.ensure_site_env(id, &name);
-            if let Some(sql_text) = sql_schema_to_import {
-                let m = self.mysql.clone();
-                let _ = tokio::task::spawn_blocking(move || m.execute_sql_in_db(&name, &sql_text))
-                    .await;
-            }
-        } else if needs_auto_db && self.store.runtimes.resolve("mysql", "8.4.10").is_ok() {
-            if self.mysql.config().ok().flatten().is_none() {
-                let m = self.mysql.clone();
-                tokio::task::spawn_blocking(move || m.setup("8.4.10"))
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .map_err(|e| format!("MySQL auto-setup failed: {e}"))?;
-            }
-            if let Err(error) = self.mysql_start().await {
-                let message = format!("MySQL could not start: {error}");
-                let _ = self.store.status(id, "error", Some(message.clone()));
-                return Err(message);
-            }
-            let raw_name: String = site
-                .name
-                .to_ascii_lowercase()
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-                .collect();
-            let trimmed = raw_name.trim_matches('_');
-            let base_db = if trimmed.is_empty() || !trimmed.as_bytes()[0].is_ascii_alphabetic() {
-                format!("site_{}", &site.id.replace('-', "")[..8])
-            } else {
-                trimmed.chars().take(32).collect()
-            };
-            let db_name = if ["mysql", "sys", "information_schema", "performance_schema"]
-                .contains(&base_db.as_str())
-            {
-                format!("site_{base_db}")
-            } else {
-                base_db
-            };
-            let m = self.mysql.clone();
-            let site_id = id.to_owned();
-            let db_name_clone = db_name.clone();
-            let sql_to_run = sql_schema_to_import;
-            let _ = tokio::task::spawn_blocking(move || {
-                if m.create_database(&db_name_clone, Some(&site_id), true, true)
-                    .is_err()
-                {
-                    let _ = m.request(
-                        "link_database",
-                        &json!({"name": db_name_clone, "siteId": site_id, "injectEnv": true, "replaceEnv": true}),
-                        true,
-                    );
-                }
-                if let Some(sql_text) = sql_to_run {
-                    let _ = m.execute_sql_in_db(&db_name_clone, &sql_text);
-                }
-            })
-            .await;
+            self.mysql_start().await.map_err(|e| format!("Database {name} could not start: {e}"))?;
+            self.mysql.ensure_site_env(id, &name).map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -2870,5 +2623,20 @@ impl Supervisor {
             }
         }
         value
+    }
+}
+
+#[cfg(test)]
+mod safe_startup_regression_tests {
+    #[test]
+    fn no_automatic_source_or_schema_rewrites_on_startup() {
+        let code = include_str!("supervisor.rs");
+        let f = code.split("async fn auto_heal_site(").nth(1).expect("startup");
+        let f = f.split("pub fn detect_nested_node_dir(").next().expect("startup end");
+        for forbidden in ["clean_sql_for_mysql8", "UPDATE websites SET runtime_version",
+            "trusted_release = Some", "built_release = Some",
+            "bcrypt.orig.js", "config/db.js", "schema.sql", "create_database", "link_database"] {
+            assert!(!f.contains(forbidden), "startup must not perform {forbidden}");
+        }
     }
 }
