@@ -143,7 +143,7 @@ impl Registry {
     pub fn memory(base_domain: &str) -> Result<Self> {
         Self::initialize(Connection::open_in_memory()?,base_domain)
     }
-    fn initialize(db: Connection, base_domain: &str) -> Result<Self> {
+    fn initialize(mut db: Connection, base_domain: &str) -> Result<Self> {
         let base_domain=validate_domain(base_domain)?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch("
@@ -192,7 +192,38 @@ impl Registry {
                 ON network_agents(tenant_id,revoked_at);
             CREATE INDEX IF NOT EXISTS idx_network_routes_tenant
                 ON network_routes(tenant_id,state);
+            CREATE TABLE IF NOT EXISTS network_config(
+                key TEXT PRIMARY KEY, value TEXT NOT NULL
+            );
         ")?;
+        // An existing network registry must not silently change identity if
+        // the operator supplies a different domain during a restart.
+        let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let pinned:Option<String>=tx.query_row(
+            "SELECT value FROM network_config WHERE key='base_domain'",
+            [],|row|row.get(0)).optional()?;
+        match pinned {
+            Some(existing) if existing!=base_domain=>return Err(NetworkError::Invalid),
+            Some(_)=>{},
+            None=>{
+                // Older databases predate network_config. Check the namespace
+                // of every existing reservation before adopting the setting.
+                let suffix=format!(".{base_domain}");
+                let routes:Vec<String>={
+                    let mut stmt=tx.prepare("SELECT hostname FROM network_routes")?;
+                    stmt.query_map([],|row|row.get(0))?
+                        .collect::<std::result::Result<Vec<_>,_>>()?
+                };
+                if routes.iter().any(|hostname|
+                    !hostname.strip_suffix(&suffix)
+                        .is_some_and(|label|normalize_label(label).is_ok())){
+                    return Err(NetworkError::Invalid);
+                }
+                tx.execute("INSERT INTO network_config(key,value)
+                    VALUES('base_domain',?1)",[&base_domain])?;
+            }
+        }
+        tx.commit()?;
         Ok(Self{db,base_domain})
     }
     fn ensure_tenant(&self, id:&str)->Result<()> {
@@ -603,6 +634,38 @@ mod tests{
         assert!(registry.verify_route_signature(&tenant.id,&agent.id,&route.id,&challenge.value,
             &hex::encode(pair.sign(&message).as_ref())).is_err());
         assert!(!registry.has_verified_identity(&tenant.id,&agent.id,&route.id).unwrap());
+    }
+    #[test]
+    fn network_namespace_is_pinned_even_without_existing_routes(){
+        let tmp=tempfile::tempdir().unwrap();
+        let path=tmp.path().join("network.db");
+        drop(Registry::open(&path,"first.example.test").unwrap());
+        assert!(matches!(Registry::open(&path,"second.example.test"),Err(NetworkError::Invalid)));
+        assert!(Registry::open(&path,"FIRST.EXAMPLE.TEST").is_ok());
+    }
+    #[test]
+    fn legacy_namespace_migration_rejects_other_domain_and_preserves_routes(){
+        let tmp=tempfile::tempdir().unwrap();
+        let path=tmp.path().join("legacy.db");
+        {
+            let mut registry=Registry::open(&path,"example.test").unwrap();
+            let tenant=registry.create_tenant("Existing").unwrap();
+            let invitation=registry.issue_invitation(&tenant.id,120).unwrap();
+            let agent=registry.enroll_agent(&invitation.token,&key(15)).unwrap();
+            registry.reserve_hostname(&tenant.id,&agent.id,&Uuid::new_v4().to_string(),"existing-site").unwrap();
+            // Simulate a pre-config-metadata database.
+            registry.db.execute("DELETE FROM network_config WHERE key='base_domain'",[]).unwrap();
+        }
+        assert!(matches!(Registry::open(&path,"wrong.test"),Err(NetworkError::Invalid)));
+        let registry=Registry::open(&path,"example.test").unwrap();
+        let stored:String=registry.db.query_row(
+            "SELECT value FROM network_config WHERE key='base_domain'",
+            [],|row|row.get(0)).unwrap();
+        assert_eq!(stored,"example.test");
+        let count:i64=registry.db.query_row(
+            "SELECT COUNT(*) FROM network_routes WHERE hostname='existing-site.example.test'",
+            [],|row|row.get(0)).unwrap();
+        assert_eq!(count,1);
     }
     #[test]
     fn registry_is_durable_across_reopen_and_stores_no_raw_token(){
