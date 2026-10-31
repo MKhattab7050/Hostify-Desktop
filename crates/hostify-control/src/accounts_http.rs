@@ -43,6 +43,10 @@ impl AccountApi{
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
         struct Invite {tenant_id:String,email:String,role:Role,ttl_seconds:i64}
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
+        struct InvitationList {tenant_id:String,limit:i64,offset:i64}
+        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
+        struct InvitationRevoke {tenant_id:String,invitation_id:String}
+        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
         struct Accept {invitation:String,password:String}
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
         struct Disable {tenant_id:String,user_id:String}
@@ -113,7 +117,20 @@ impl AccountApi{
                     let p:Invite=parse(body)?;
                     let invitation=accounts.invite_member(session_token(auth)?,&p.tenant_id,
                         &p.email,p.role,p.ttl_seconds).map_err(map_account_error)?;
-                    Ok(json!({"invitation":invitation.token,"expiresUnix":invitation.expires_unix}))
+                    Ok(json!({"invitation":invitation.token,
+                        "invitationId":invitation.id,"expiresUnix":invitation.expires_unix}))
+                },
+                "/v1/members/invitations/list"=>{
+                    let p:InvitationList=parse(body)?;
+                    let items=accounts.list_pending_invitations(session_token(auth)?,
+                        &p.tenant_id,p.limit,p.offset).map_err(map_account_error)?;
+                    Ok(json!({"items":items,"limit":p.limit,"offset":p.offset}))
+                },
+                "/v1/members/invitations/revoke"=>{
+                    let p:InvitationRevoke=parse(body)?;
+                    accounts.revoke_member_invitation(session_token(auth)?,&p.tenant_id,
+                        &p.invitation_id).map_err(map_account_error)?;
+                    Ok(json!({"revoked":true}))
                 },
                 "/v1/members/list"=>{
                     let p:ListMembers=parse(body)?;
@@ -153,7 +170,8 @@ pub fn is_account_path(path:&str)->bool{
     matches!(path,"/v1/accounts/provision"|"/v1/accounts/bootstrap"|"/v1/auth/login"|
         "/v1/auth/logout"|"/v1/auth/me"|"/v1/auth/password/change"|
         "/v1/auth/sessions/list"|"/v1/auth/sessions/revoke"|"/v1/members/invite"|
-        "/v1/members/accept"|"/v1/members/disable"|"/v1/members/list"|"/v1/members/role/update")
+        "/v1/members/accept"|"/v1/members/disable"|"/v1/members/list"|"/v1/members/role/update"|
+        "/v1/members/invitations/list"|"/v1/members/invitations/revoke")
 }
 fn map_account_error(error:AccountError)->(StatusCode,&'static str){
     match error{
@@ -367,6 +385,47 @@ mod tests {
         assert_eq!(changed["accepted"],true);
         assert_eq!(post("/v1/auth/me",Some(&admin_auth),false,
             json!({"tenantId":tenant.id})).0,StatusCode::UNAUTHORIZED);
+        drop(post);drop(api);drop(registry);
+        std::fs::remove_file(&path).unwrap();
+    }
+    #[test]
+    fn pending_invitation_http_list_and_revocation_do_not_expose_secret(){
+        let path=std::env::temp_dir().join(format!("hostify-pending-invites-{}.db",Uuid::new_v4()));
+        let mut registry=Registry::open(&path,"example.test").unwrap();
+        let a=registry.create_tenant("A").unwrap();
+        let b=registry.create_tenant("B").unwrap();
+        let api=AccountApi::new(Accounts::open(&path).unwrap());
+        let post=|path:&str,auth:Option<&str>,admin:bool,value:Value|{
+            api.dispatch(path,auth,admin,value.to_string().as_bytes())
+        };
+        assert_eq!(post("/v1/accounts/bootstrap",None,true,json!({
+            "tenantId":a.id,"email":"owner@site.test","password":"owner-valid-password"
+        })).0,StatusCode::OK);
+        let (_,owner)=post("/v1/auth/login",None,false,json!({
+            "tenantId":a.id,"email":"owner@site.test","password":"owner-valid-password"
+        }));
+        let auth=format!("Bearer {}",owner["token"].as_str().unwrap());
+        let (_,issued)=post("/v1/members/invite",Some(&auth),false,json!({
+            "tenantId":a.id,"email":"viewer@site.test","role":"viewer","ttlSeconds":600
+        }));
+        let payload=json!({"tenantId":a.id,"limit":10,"offset":0});
+        assert_eq!(post("/v1/members/invitations/list",None,false,payload.clone()).0,
+            StatusCode::UNAUTHORIZED);
+        assert_eq!(post("/v1/members/invitations/list",Some(&auth),false,
+            json!({"tenantId":b.id,"limit":10,"offset":0})).0,StatusCode::UNAUTHORIZED);
+        let (status,pending)=post("/v1/members/invitations/list",Some(&auth),false,payload.clone());
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(pending["items"][0]["id"],issued["invitationId"]);
+        assert!(pending["items"][0].get("tokenHash").is_none());
+        assert!(!pending.to_string().contains(issued["invitation"].as_str().unwrap()));
+        assert_eq!(post("/v1/members/invitations/revoke",Some(&auth),false,json!({
+            "tenantId":a.id,"invitationId":issued["invitationId"]
+        })).0,StatusCode::OK);
+        let (_,after)=post("/v1/members/invitations/list",Some(&auth),false,payload);
+        assert!(after["items"].as_array().unwrap().is_empty());
+        assert_eq!(post("/v1/members/accept",None,false,json!({
+            "invitation":issued["invitation"],"password":"viewer-valid-password"
+        })).0,StatusCode::UNAUTHORIZED);
         drop(post);drop(api);drop(registry);
         std::fs::remove_file(&path).unwrap();
     }
