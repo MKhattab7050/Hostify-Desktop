@@ -1466,10 +1466,41 @@ mod tests {
             while *text.add(n) != 0 {
                 n += 1;
             }
-            let s = String::from_utf16_lossy(std::slice::from_raw_parts(text, n));
-            assert!(s.contains(&crate::windows::sid().unwrap()));
-            assert!(s.contains(";;;SY)"));
-            assert_eq!(s.matches("(A;").count(), 2);
+            let actual = String::from_utf16_lossy(std::slice::from_raw_parts(text, n));
+            // Windows normalizes certain well-known SIDs to SDDL aliases
+            // (e.g. SY rather than S-1-5-18). Compare canonical descriptors
+            // rather than searching for a textual SID representation.
+            let expected_sddl = crate::windows::wide(&format!(
+                "D:P(A;OICI;FA;;;{})(A;OICI;FA;;;SY)",
+                crate::windows::sid().unwrap()
+            ));
+            let mut expected_sd = std::ptr::null_mut();
+            assert_ne!(
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    expected_sddl.as_ptr(), 1, &mut expected_sd, std::ptr::null_mut()
+                ),
+                0
+            );
+            let mut expected_text = std::ptr::null_mut();
+            assert_ne!(
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    expected_sd, 1, DACL_SECURITY_INFORMATION,
+                    &mut expected_text, std::ptr::null_mut()
+                ),
+                0
+            );
+            let mut expected_len = 0;
+            while *expected_text.add(expected_len) != 0 {
+                expected_len += 1;
+            }
+            let expected = String::from_utf16_lossy(
+                std::slice::from_raw_parts(expected_text, expected_len)
+            );
+            assert_eq!(actual, expected, "The MySQL directory ACL must match the explicitly restricted owner+SYSTEM DACL");
+            assert!(actual.contains(";;;SY)"));
+            assert_eq!(actual.matches("(A;").count(), 2);
+            LocalFree(expected_text.cast());
+            LocalFree(expected_sd);
             LocalFree(text.cast());
             LocalFree(sd);
         }
