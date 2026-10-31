@@ -20,4 +20,5 @@ pub mod project;
 pub mod snapshots;
 pub mod network;
 pub mod catalog;
+pub mod doctor;
 pub mod diagnostics;
