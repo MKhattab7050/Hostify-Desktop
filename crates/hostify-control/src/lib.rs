@@ -194,6 +194,32 @@ mod tests{
         let (status,_) = command(&api,"/v1/tenants",false,json!({"name":"NotAllowed"}));
         assert_eq!(status,StatusCode::UNAUTHORIZED);
     }
+    #[tokio::test]
+    async fn real_http_listener_is_loopback_only_and_has_no_public_readiness(){
+        use hyper::{service::service_fn,server::conn::http1};
+        use hyper_util::rt::TokioIo;
+        use tokio::{net::{TcpListener,TcpStream},io::{AsyncReadExt,AsyncWriteExt}};
+        let listener=TcpListener::bind(("127.0.0.1",0)).await.unwrap();
+        let port=listener.local_addr().unwrap().port();
+        let control=Arc::new(api());
+        let task=tokio::spawn(async move{
+            let (socket,_)=listener.accept().await.unwrap();
+            let service=service_fn(move |request|serve_request(request,control.clone()));
+            http1::Builder::new().serve_connection(TokioIo::new(socket),service)
+                .await.unwrap();
+        });
+        let mut client=TcpStream::connect(("127.0.0.1",port)).await.unwrap();
+        client.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await.unwrap();
+        let mut response=Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5),
+            client.read_to_end(&mut response)).await.unwrap().unwrap();
+        let text=String::from_utf8(response).unwrap();
+        assert!(text.starts_with("HTTP/1.1 200"),"{text}");
+        assert!(text.contains("\"publicReady\":false"),"{text}");
+        assert!(!text.contains("access-control-allow-origin:"));
+        task.await.unwrap();
+    }
     #[test]
     fn local_liveness_is_not_public_readiness_and_invalid_json_fails_closed(){
         let api=api();
