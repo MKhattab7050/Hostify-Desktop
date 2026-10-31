@@ -20,6 +20,7 @@ pub mod project;
 pub mod snapshots;
 pub mod network;
 pub mod network_auth;
+pub mod network_service;
 pub mod catalog;
 pub mod doctor;
 pub mod github_webhooks;
