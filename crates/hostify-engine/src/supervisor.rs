@@ -1941,9 +1941,8 @@ impl Supervisor {
         use hostify_core::app_config::{Start, inside};
         let root = self.release_root(id, release)?;
         let kind = self.store.site(id).map_err(|e| e.to_string())?.kind;
-        if config.auto_heal(&root, &kind) {
-            let _ = self.store.save_app_config(id, config);
-        }
+        // Keep user-confirmed project configuration unchanged on every start.
+        // Discovery/repair suggestions belong to import or the explicit build flow.
         config.validate_kind(&root, &kind)?;
         if kind == "php" {
             return self.start_php_release(id, config, &root).await;
