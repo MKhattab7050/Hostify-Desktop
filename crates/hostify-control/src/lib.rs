@@ -134,6 +134,19 @@ fn response(status:StatusCode,value:Value)->Response<Full<Bytes>>{
 pub async fn serve_request(req:Request<Incoming>,controller:Arc<Controller>)
     ->Result<Response<Full<Bytes>>,std::convert::Infallible>{
     let (head,mut body)=req.into_parts();
+    // Reject browser-origin requests and DNS rebinding attempts to localhost.
+    // Even signed enrollment requests must not be served through a page
+    // loaded from an unrelated origin.
+    let host=head.headers.get(header::HOST).and_then(|v|v.to_str().ok());
+    let allowed_host=host.is_some_and(|host| {
+        let host=host.to_ascii_lowercase();
+        host=="localhost" || host=="127.0.0.1" ||
+            host.strip_prefix("localhost:").is_some_and(|p|p.parse::<u16>().is_ok()) ||
+            host.strip_prefix("127.0.0.1:").is_some_and(|p|p.parse::<u16>().is_ok())
+    });
+    if !allowed_host || head.headers.contains_key(header::ORIGIN) {
+        return Ok(response(StatusCode::FORBIDDEN,json!({"error":"local_requests_only"})));
+    }
     let auth=head.headers.get(header::AUTHORIZATION)
         .and_then(|h|h.to_str().ok()).map(str::to_owned);
     let path=head.uri.path().to_owned();
@@ -219,6 +232,31 @@ mod tests{
         assert!(text.contains("\"publicReady\":false"),"{text}");
         assert!(!text.contains("access-control-allow-origin:"));
         task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn http_server_rejects_foreign_host_and_browser_origin() {
+        use hyper::{service::service_fn,server::conn::http1};
+        use hyper_util::rt::TokioIo;
+        use tokio::{net::{TcpListener,TcpStream},io::{AsyncReadExt,AsyncWriteExt}};
+        for headers in ["Host: evil.example.test\r\n",
+                        "Host: localhost\r\nOrigin: https://evil.example.test\r\n"] {
+            let listener=TcpListener::bind(("127.0.0.1",0)).await.unwrap();
+            let port=listener.local_addr().unwrap().port();
+            let control=Arc::new(api());
+            let server=tokio::spawn(async move {
+                let (stream,_)=listener.accept().await.unwrap();
+                let service=service_fn(move |request|serve_request(request,control.clone()));
+                http1::Builder::new().serve_connection(TokioIo::new(stream),service).await.unwrap();
+            });
+            let mut client=TcpStream::connect(("127.0.0.1",port)).await.unwrap();
+            let request=format!("GET /healthz HTTP/1.1\r\n{headers}Connection: close\r\n\r\n");
+            client.write_all(request.as_bytes()).await.unwrap();
+            let mut response=Vec::new();
+            tokio::time::timeout(std::time::Duration::from_secs(5),
+                client.read_to_end(&mut response)).await.unwrap().unwrap();
+            assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 403"));
+            server.await.unwrap();
+        }
     }
     #[test]
     fn local_liveness_is_not_public_readiness_and_invalid_json_fails_closed(){
