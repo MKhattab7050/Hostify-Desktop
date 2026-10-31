@@ -8,6 +8,7 @@ pub mod pipe;
 pub mod state;
 pub mod guardian;
 pub mod time_machine;
+pub mod security_center;
 pub mod supervisor;
 #[cfg(windows)]
 pub mod windows;

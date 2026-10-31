@@ -108,7 +108,7 @@ export interface GuardianStatus {
 export interface SiteSnapshot {
   id: string; siteId: string; siteKind: string; release: string | null; createdAt: string;
   fileCount: number; sourceBytes: number; archiveBytes: number; sha256: string;
-  includesDatabase: false; includesSecrets: false;
+  includesDatabase: false; includesSecrets: false; mayContainSecrets: boolean;
 }
 
 /** Local file-only backup cadence; paused at five retained copies, never deleting automatically. */
@@ -131,4 +131,15 @@ export interface DoctorIssue {
 export interface DoctorReport {
   issues: DoctorIssue[]; linesReviewed: number;
   hasActionableFindings: boolean; engine: "offline-rules-v1";
+}
+
+/** Local Security Center evidence. An unverified result is never a security pass. */
+export interface SecurityFinding {
+  siteId?: string | null; id: string; severity: "medium" | "high" | "critical";
+  status: "block" | "warn" | "unverified"; title: string;
+  detail: string; recommendedAction: string;
+}
+export interface SecurityPosture {
+  checkedAt: string; inspectedSites: number; blockingFindings: number;
+  warningFindings: number; unverifiedChecks: number; findings: SecurityFinding[];
 }

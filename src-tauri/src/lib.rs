@@ -47,9 +47,11 @@ forward! {
     list_site_snapshots(site_id: String => "siteId");
     verify_site_snapshot(site_id: String => "siteId", snapshot_id: String => "snapshotId");
     restore_site_snapshot(site_id: String => "siteId", snapshot_id: String => "snapshotId", confirm_name: String => "confirmName");
+    export_site_snapshot(site_id: String => "siteId", snapshot_id: String => "snapshotId", destination: String => "destination");
     guardian_status(site_id: String => "siteId");
     guardian_enable(site_id: String => "siteId", enabled: bool => "enabled");
     guardian_check_now(site_id: String => "siteId");
+    security_posture();
     doctor_analyze(site_id: String => "siteId");
     app_status(site_id: String => "siteId");
     app_logs(site_id: String => "siteId", stream: String => "stream", lines: u32 => "lines");
@@ -117,6 +119,19 @@ async fn pick_path(app: tauri::AppHandle, kind: String) -> Result<Option<String>
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn pick_snapshot_destination(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.dialog().file()
+            .add_filter("ZIP archive", &["zip"])
+            .blocking_save_file()
+            .map(|p| p.into_path()
+                .map(|p| p.to_string_lossy().into_owned())
+                .map_err(|e| e.to_string()))
+            .transpose()
+    }).await.map_err(|e|e.to_string())?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -204,6 +219,7 @@ pub fn run() {
             cancel_build,
             get_build_status,
             app_status,
+            security_posture,
             doctor_analyze,
             site_snapshot_schedule,
             set_site_snapshot_schedule,
@@ -211,6 +227,7 @@ pub fn run() {
             list_site_snapshots,
             verify_site_snapshot,
             restore_site_snapshot,
+            export_site_snapshot,
             guardian_status,
             guardian_enable,
             guardian_check_now,
@@ -257,7 +274,8 @@ pub fn run() {
             site_logs,
             get_settings,
             save_settings,
-            pick_path
+            pick_path,
+            pick_snapshot_destination
         ])
         .run(tauri::generate_context!());
     if let Err(error) = result {

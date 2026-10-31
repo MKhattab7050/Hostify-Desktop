@@ -1,4 +1,4 @@
-import type { PublishPreflight, PublishDiagnostic, GuardianStatus, SiteSnapshot, SiteSnapshotSchedule, AppTemplate, DoctorReport,
+import type { PublishPreflight, PublishDiagnostic, GuardianStatus, SiteSnapshot, SiteSnapshotSchedule, AppTemplate, DoctorReport, SecurityPosture,
   ActivityEntry, AppConfig, AppSettings, AppStatus, BuildStatus, CloudflareAccount, DatabaseBackup, DatabaseConnection, Deployment, DnsPlan, Domain, DomainCheck,
   EngineStatus, EnvVar, ComponentName, LogStream, ManagedDatabase, MysqlStatus, ProjectReport, RuntimeKind, RuntimeStatus, Site, SiteKind, SourceKind, SourceReport, SystemStats, TunnelHealth,
 } from "./types";
@@ -83,12 +83,18 @@ export const api = {
   createSiteSnapshot: (siteId: string) => call<SiteSnapshot>("create_site_snapshot", { siteId }),
   listSiteSnapshots: (siteId: string) => call<SiteSnapshot[]>("list_site_snapshots", { siteId }),
   verifySiteSnapshot: (siteId: string, snapshotId: string) => call<{ verified: boolean; snapshot: SiteSnapshot }>("verify_site_snapshot", { siteId, snapshotId }),
+  pickSnapshotDestination: () => call<string | null>("pick_snapshot_destination"),
+  exportSiteSnapshot: (siteId: string, snapshotId: string, destination: string) =>
+    call<{ exported: boolean; archiveBytes: number; sha256: string; mayContainSecrets: boolean }>(
+      "export_site_snapshot", { siteId, snapshotId, destination }),
+
   restoreSiteSnapshot: (siteId: string, snapshotId: string, confirmName: string) =>
     call<{ restored: boolean; requiresBuild: boolean; pendingRelease?: string; includesDatabase: false }>("restore_site_snapshot",
       { siteId, snapshotId, confirmName }),
   guardianStatus: (siteId: string) => call<GuardianStatus>("guardian_status", { siteId }),
   guardianEnable: (siteId: string, enabled: boolean) => call<GuardianStatus>("guardian_enable", { siteId, enabled }),
   guardianCheckNow: (siteId: string) => call<GuardianStatus>("guardian_check_now", { siteId }),
+  securityPosture: () => call<SecurityPosture>("security_posture"),
   doctorAnalyze: (siteId: string) => call<DoctorReport>("doctor_analyze", { siteId }),
   appStatus: (siteId: string) => call<AppStatus>("app_status", { siteId }),
   appLogs: (siteId: string, stream: LogStream, lines = 300) => call<string[]>("app_logs", { siteId, stream, lines }),

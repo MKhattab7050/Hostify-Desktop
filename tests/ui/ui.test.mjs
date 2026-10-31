@@ -295,7 +295,8 @@ await test("Guardian is opt-in, preserves stopped websites and exposes read-only
 await test("Time Machine makes explicit code-only snapshots with integrity checks", async () => {
   const page=await open();
   const card=page.locator("section").filter({hasText:"Time Machine · Website files"}).first();
-  await card.getByText(/MySQL databases, environment secrets and external storage are not included/).waitFor();
+  await card.getByText(/MySQL databases, managed credential-store secrets and external storage are/).waitFor();
+  await card.getByText(/Other project files may contain secrets/).waitFor();
   await card.getByRole("button",{name:"Create snapshot"}).first().click();
   await card.getByRole("button",{name:"Snapshots (1)"}).first().click();
   await card.getByRole("button",{name:"Verify"}).first().click();
@@ -321,6 +322,17 @@ await test("Hostify Doctor remains local and shows read-only deterministic findi
   await card.getByRole("button",{name:"Analyze logs"}).first().click();
   await card.getByText(/No known error signatures found/).first().waitFor();
   await card.getByText(/No log lines are uploaded/).waitFor();
+  await page.context().close();
+});
+
+await test("Security Center marks remote readiness unverified and never hides the need for real Windows checks", async () => {
+  const page=await open();
+  const audit=page.locator("section").filter({hasText:"Security Center"}).first();
+  await audit.getByText("Unverified",{exact:true}).waitFor();
+  await audit.getByRole("button",{name:"Evidence and next actions (1)"}).click();
+  await audit.getByText(/Credential rotation and off-device backup have not been verified/).waitFor();
+  await audit.getByRole("button",{name:"Rescan"}).click();
+  await audit.getByText(/No blockers does not mean production-ready/).waitFor();
   await page.context().close();
 });
 

@@ -123,10 +123,12 @@ export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise
       const snap = { id: "preview-" + Date.now(), siteId:site.id,siteKind:site.kind ?? "static",release:null,
         createdAt:now(),fileCount:site.fileCount,sourceBytes:site.sizeBytes,
         archiveBytes:Math.floor(site.sizeBytes * 0.7),sha256:"preview-not-a-real-sha256",
-        includesDatabase:false as const,includesSecrets:false as const };
+        includesDatabase:false as const,includesSecrets:false as const,mayContainSecrets:true };
       siteSnapshots.set(site.id,[snap,...(siteSnapshots.get(site.id) ?? [])]);return r(snap);
     }
     case "list_site_snapshots": return r(siteSnapshots.get(a.siteId) ?? []);
+    case "pick_snapshot_destination": return r(null);
+    case "export_site_snapshot": return r({exported:true,archiveBytes:0,sha256:"preview",mayContainSecrets:true});
     case "verify_site_snapshot": return r({ verified:true,
       snapshot:(siteSnapshots.get(a.siteId) ?? []).find(s => s.id===a.snapshotId) });
     case "restore_site_snapshot": {
@@ -144,6 +146,15 @@ export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise
       const status = guardian.get(a.siteId) ?? { enabled: false, consecutiveFailures: 0, recoveryAttempts: 0, lastResult: "Monitoring disabled" };
       return r({ ...status, lastResult: status.enabled ? "Healthy" : "Monitoring paused" });
     }
+    case "security_posture": return r({
+      checkedAt:now(),inspectedSites:sites.length,blockingFindings:0,warningFindings:0,
+      unverifiedChecks:1,findings:[{
+        siteId:null,id:"CREDENTIAL_AUDIT",severity:"medium",status:"unverified",
+        title:"Credential rotation and off-device backup have not been verified",
+        detail:"This browser mock cannot inspect Windows credential storage or remote backups.",
+        recommendedAction:"Verify these controls in a real isolated Windows installation.",
+      }],
+    });
     case "doctor_analyze": return r({
       issues: [],linesReviewed:0,hasActionableFindings:false,engine:"offline-rules-v1"
     });
