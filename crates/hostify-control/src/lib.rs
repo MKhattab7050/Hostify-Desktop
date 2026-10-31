@@ -64,7 +64,7 @@ impl Controller {
             matches!(path,"/v1/tenant/invitations"|"/v1/tenant/routes/reserve"|
                 "/v1/tenant/agents/revoke"|"/v1/tenant/agents/list"|
                 "/v1/tenant/routes/list"|"/v1/tenant/audit/list"|
-                "/v1/tenant/usage");
+                "/v1/tenant/usage"|"/v1/tenant/agents/rename");
         if !public_action && !tenant_action && !self.authorized(auth) {
             return (StatusCode::UNAUTHORIZED,json!({"error":"unauthorized"}));
         }
@@ -96,6 +96,8 @@ impl Controller {
         }
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
         struct RevokeInput {tenant_id:String,agent_id:String}
+        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
+        struct RenameInput {tenant_id:String,agent_id:String,display_name:String}
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
         struct InventoryInput {tenant_id:String,limit:i64,offset:i64}
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
@@ -193,6 +195,15 @@ impl Controller {
                     registry.list_tenant_audit(&p.tenant_id,p.limit,p.offset)
                         .map(|items|json!({"items":items,"limit":p.limit,"offset":p.offset}))
                         .map_err(map_network_error)
+                }),
+            "/v1/tenant/agents/rename"=>parse::<RenameInput>(body)
+                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
+                .and_then(|p|{
+                    let accounts=self.accounts.as_ref().ok_or(
+                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
+                    accounts.authorize(auth,&p.tenant_id,Capability::ManageDevices)?;
+                    registry.rename_agent(&p.tenant_id,&p.agent_id,&p.display_name)
+                        .map(|_|json!({"renamed":true})).map_err(map_network_error)
                 }),
             "/v1/tenant/agents/revoke"=>parse::<RevokeInput>(body)
                 .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
@@ -473,6 +484,18 @@ mod tests{
         assert_eq!(status,StatusCode::OK);
         assert_eq!(agents["items"].as_array().unwrap().len(),1);
         assert_eq!(agents["items"][0]["id"],agent["id"]);
+        assert_eq!(call("/v1/tenant/agents/rename",&viewer_auth,json!({
+            "tenantId":first.id,"agentId":agent["id"],"displayName":"Not allowed"
+        })).0,StatusCode::FORBIDDEN);
+        assert_eq!(call("/v1/tenant/agents/rename",&owner_auth,json!({
+            "tenantId":second.id,"agentId":agent["id"],"displayName":"Not mine"
+        })).0,StatusCode::UNAUTHORIZED);
+        assert_eq!(call("/v1/tenant/agents/rename",&owner_auth,json!({
+            "tenantId":first.id,"agentId":agent["id"],"displayName":"Office PC"
+        })).0,StatusCode::OK);
+        let (status,updated_agents)=call("/v1/tenant/agents/list",&viewer_auth,inventory.clone());
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(updated_agents["items"][0]["displayName"],"Office PC");
         let (status,routes)=call("/v1/tenant/routes/list",&viewer_auth,inventory.clone());
         assert_eq!(status,StatusCode::OK);
         assert_eq!(routes["publiclyRoutable"],false);
