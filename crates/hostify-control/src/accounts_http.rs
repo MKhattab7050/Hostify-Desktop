@@ -48,6 +48,8 @@ impl AccountApi{
         struct Disable {tenant_id:String,user_id:String}
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
         struct ListMembers {tenant_id:String,limit:i64,offset:i64}
+        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
+        struct PasswordChange {tenant_id:String,current_password:String,new_password:String}
         let response:Result<Value,(StatusCode,&'static str)>=(||{
             let mut accounts=self.accounts.lock()
                 .map_err(|_|(StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
@@ -76,6 +78,12 @@ impl AccountApi{
                 "/v1/auth/logout"=>{
                     accounts.sign_out(session_token(auth)?).map_err(map_account_error)?;
                     Ok(json!({"signedOut":true}))
+                },
+                "/v1/auth/password/change"=>{
+                    let p:PasswordChange=parse(body)?;
+                    accounts.change_password(session_token(auth)?,&p.tenant_id,
+                        &p.current_password,&p.new_password).map_err(map_account_error)?;
+                    Ok(json!({"changed":true,"sessionsRevoked":true,"requiresLogin":true}))
                 },
                 "/v1/auth/me"=>{
                     let p:Me=parse(body)?;
@@ -119,7 +127,7 @@ impl AccountApi{
 
 pub fn is_account_path(path:&str)->bool{
     matches!(path,"/v1/accounts/provision"|"/v1/accounts/bootstrap"|"/v1/auth/login"|
-        "/v1/auth/logout"|"/v1/auth/me"|"/v1/members/invite"|
+        "/v1/auth/logout"|"/v1/auth/me"|"/v1/auth/password/change"|"/v1/members/invite"|
         "/v1/members/accept"|"/v1/members/disable"|"/v1/members/list")
 }
 fn map_account_error(error:AccountError)->(StatusCode,&'static str){
@@ -226,6 +234,43 @@ mod tests {
         assert_eq!(post("/v1/members/list",Some(&bearer),false,json!({
             "tenantId":a.id,"limit":101,"offset":0
         })).0,StatusCode::BAD_REQUEST);
+        drop(post);drop(api);drop(registry);
+        std::fs::remove_file(&path).unwrap();
+    }
+    #[test]
+    fn password_change_http_requires_current_password_and_relogin(){
+        let path=std::env::temp_dir().join(format!("hostify-password-change-{}.db",Uuid::new_v4()));
+        let mut registry=Registry::open(&path,"example.test").unwrap();
+        let tenant=registry.create_tenant("A").unwrap();
+        let api=AccountApi::new(Accounts::open(&path).unwrap());
+        let post=|path:&str,auth:Option<&str>,admin:bool,value:Value|{
+            api.dispatch(path,auth,admin,value.to_string().as_bytes())
+        };
+        assert_eq!(post("/v1/accounts/bootstrap",None,true,json!({
+            "tenantId":tenant.id,"email":"owner@site.test","password":"initial-owner-password"
+        })).0,StatusCode::OK);
+        let (_,login)=post("/v1/auth/login",None,false,json!({
+            "tenantId":tenant.id,"email":"owner@site.test","password":"initial-owner-password"
+        }));
+        let auth=format!("Bearer {}",login["token"].as_str().unwrap());
+        let payload=json!({"tenantId":tenant.id,
+            "currentPassword":"initial-owner-password","newPassword":"replacement-owner-password"});
+        assert_eq!(post("/v1/auth/password/change",None,false,payload.clone()).0,
+            StatusCode::UNAUTHORIZED);
+        assert_eq!(post("/v1/auth/password/change",Some(&auth),false,json!({
+            "tenantId":tenant.id,"currentPassword":"wrong-password",
+            "newPassword":"replacement-owner-password"
+        })).0,StatusCode::UNAUTHORIZED);
+        let (status,result)=post("/v1/auth/password/change",Some(&auth),false,payload);
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(result["sessionsRevoked"],true);
+        assert_eq!(result["requiresLogin"],true);
+        assert_eq!(post("/v1/auth/me",Some(&auth),false,
+            json!({"tenantId":tenant.id})).0,StatusCode::UNAUTHORIZED);
+        assert_eq!(post("/v1/auth/login",None,false,json!({
+            "tenantId":tenant.id,"email":"owner@site.test",
+            "password":"replacement-owner-password"
+        })).0,StatusCode::OK);
         drop(post);drop(api);drop(registry);
         std::fs::remove_file(&path).unwrap();
     }
