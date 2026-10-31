@@ -2,7 +2,7 @@ name: Validate Fast and Standard Publish
 
 on:
   push:
-    branches: [feature/fast-standard-publish, feature/v3-guardian-backups, feature/v4-network-core, feature/v3-app-catalog, feature/v3-doctor-github-foundation, feature/v4-security-center]
+    branches: [feature/fast-standard-publish, feature/v3-guardian-backups, feature/v4-network-core, feature/v3-app-catalog, feature/v3-doctor-github-foundation, feature/v4-security-center, feature/v4-agent-proof]
   pull_request:
     branches: [release/v2-rc1, feature/fast-standard-publish, feature/v3-guardian-backups, feature/v4-network-core, feature/v3-app-catalog]
   workflow_dispatch:

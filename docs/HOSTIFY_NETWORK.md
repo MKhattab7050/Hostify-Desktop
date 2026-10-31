@@ -66,3 +66,28 @@ The real `niga.online` zone and customer-owned sites are out of scope for develo
 - Privacy notices, service terms, data retention and operational incident response.
 
 **Never mark a Hostify Network registration as publicly available based on a reserved hostname or stored public key alone.**
+
+## Device identity proof (Ed25519)
+
+The new `Registry::issue_route_challenge`, `challenge_message`, and
+`verify_route_signature` implement a single-use Ed25519 device-key possession check.
+
+1. A previously registered tenant agent must already own a **reserved**
+   (not publicly active) route.
+2. Authenticated control-plane code issues a 30–300-second challenge;
+   SQLite stores only its SHA-256 hash.
+3. The agent signs a canonical challenge message that binds the network's
+   base domain, tenant UUID, agent UUID, route UUID and challenge value.
+4. The registry verifies the Ed25519 signature against the registered public key
+   inside a SQLite immediate transaction, consumes the challenge and records
+   an identity proof. Expired, replayed, cross-tenant and invalid signatures fail.
+5. **The route remains reserved and non-routable.** No Cloudflare API call,
+   DNS write, tunneling change or customer workload execution occurs.
+
+An authenticated HTTP gateway with short-lived sessions, actual device identity
+generation and secure local private-key storage, independent TLS channel
+authentication, liveness verification and explicit approved public provisioning
+are still required before routes can become active.
+
+The implementation uses the existing pinned `ring` 0.17.14 cryptographic
+implementation; it does not implement Ed25519 arithmetic manually.
