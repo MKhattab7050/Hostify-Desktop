@@ -1,7 +1,7 @@
 //! Local, central-only composition of tenant authorization and the network
 //! registry. There is deliberately no HTTP listener, Cloudflare DNS mutation,
  //! or site execution API here. Operator provisioning is not publicly exposed.
-use crate::network::{Registry,NetworkError,Tenant,Invitation,Route,DeviceChallenge,Agent,AuditEntry,TenantUsage,ManagedRoute};
+use crate::network::{Registry,NetworkError,Tenant,Invitation,Route,DeviceChallenge,Agent,AuditEntry,TenantUsage,ManagedRoute,PendingDeviceInvitation};
 use crate::network_auth::{Accounts,AccountError,Principal,Session,Role,Capability,MemberInvitation,TenantMember,ActiveSession,PendingMemberInvitation};
 use std::path::Path;
 use thiserror::Error;
@@ -117,6 +117,17 @@ impl NetworkControlPlane{
         self.accounts.authorize(token,tenant,Capability::ManageDevices)?;
         Ok(self.registry.issue_invitation(tenant,ttl_seconds)?)
     }
+    /// Tenant-local enrollment invitation management. No public API.
+    pub fn list_device_invitations(&self,token:&str,tenant:&str,limit:i64,
+        offset:i64)->Result<Vec<PendingDeviceInvitation>>{
+        self.accounts.authorize(token,tenant,Capability::ManageDevices)?;
+        Ok(self.registry.list_pending_device_invitations(tenant,limit,offset)?)
+    }
+    pub fn revoke_device_invitation(&mut self,token:&str,tenant:&str,
+        invitation_id:&str)->Result<()>{
+        self.accounts.authorize(token,tenant,Capability::ManageDevices)?;
+        Ok(self.registry.revoke_device_invitation(tenant,invitation_id)?)
+    }
     /// Device enrollment is an out-of-band gateway action; the invitation
     /// alone cannot publish public traffic.
     pub fn enroll_device(&mut self,invitation_token:&str,public_key_hex:&str)->Result<Agent>{
@@ -186,6 +197,13 @@ mod tests{
         assert!(service.issue_device_enrollment(&owner.token,&other.id,300).is_err());
         let rng=SystemRandom::new();
         let key=Ed25519KeyPair::from_pkcs8(Ed25519KeyPair::generate_pkcs8(&rng).unwrap().as_ref()).unwrap();
+        let pending=service.issue_device_enrollment(&owner.token,&tenant.id,300).unwrap();
+        assert!(service.list_device_invitations(&viewer.token,&tenant.id,10,0).is_err());
+        assert!(service.revoke_device_invitation(&viewer.token,&tenant.id,&pending.id).is_err());
+        assert!(service.revoke_device_invitation(&owner.token,&other.id,&pending.id).is_err());
+        service.revoke_device_invitation(&owner.token,&tenant.id,&pending.id).unwrap();
+        assert!(service.enroll_device(&pending.token,
+            &hex::encode(key.public_key().as_ref())).is_err());
         let invitation=service.issue_device_enrollment(&owner.token,&tenant.id,300).unwrap();
         let agent=service.enroll_device(&invitation.token,&hex::encode(key.public_key().as_ref())).unwrap();
         let route=service.reserve_subdomain(&owner.token,&tenant.id,&agent.id,
