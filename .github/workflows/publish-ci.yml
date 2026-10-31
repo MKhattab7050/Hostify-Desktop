@@ -10,6 +10,12 @@ on:
 permissions:
   contents: read
 
+# Keep only the newest validation of each PR/branch; outdated runs must not
+# delay the latest security or deployment fix.
+concurrency:
+  group: hostify-publish-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows:
     name: Windows Rust, TypeScript and browser regression
