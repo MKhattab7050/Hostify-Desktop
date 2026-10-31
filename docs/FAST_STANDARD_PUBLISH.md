@@ -1,7 +1,6 @@
 # Hostify V2: Fast Publish and Standard Publish
 
-Implementation branch: `feature/fast-standard-publish`.
-Base: `release/v2-rc1`. This is an implementation candidate, not yet a certified production release.
+Originally implemented on `feature/fast-standard-publish`, now integrated into `release/v2-rc1`. This remains an implementation candidate, **not** a certified production release. Windows CI is necessary but does not replace the real-machine and external-network acceptance checks below.
 
 ## Two experiences, one deployment engine
 
