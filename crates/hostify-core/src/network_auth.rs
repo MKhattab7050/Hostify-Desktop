@@ -78,7 +78,7 @@ pub struct MemberInvitation {
     pub token:String,
     pub expires_unix:i64,
 }
-fn canonical_email(raw:&str)->Result<String>{
+pub(crate) fn canonical_email(raw:&str)->Result<String>{
     let s=raw.trim().to_ascii_lowercase();
     if s.len()<5||s.len()>254||s.matches('@').count()!=1||
         s.contains([' ','\n','\r','\t']) || !s.is_ascii(){
@@ -91,7 +91,7 @@ fn canonical_email(raw:&str)->Result<String>{
             matches!(b,b'-'|b'.')){return Err(AccountError::Invalid);}
     Ok(s)
 }
-fn validate_password(password:&str)->Result<()>{
+pub(crate) fn validate_password(password:&str)->Result<()>{
     if !(12..=256).contains(&password.len()) || password.chars().any(|c|c.is_control()){
         return Err(AccountError::Invalid);
     }

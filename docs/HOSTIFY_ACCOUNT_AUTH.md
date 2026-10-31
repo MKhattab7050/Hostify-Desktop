@@ -24,3 +24,10 @@ The `hostify_core::network_auth::Accounts` registry stores tenant-scoped account
 - This library does not activate domain routes, create tunnels, or provision Cloudflare DNS. Verified device identities are still non-routable.
 - The account table permits tenant-local email identities. Multi-tenant organization memberships and invitations need explicit migration before broad release.
 - Run live Windows, multi-device and external-network integration tests with synthetic test hosts and independent users.
+
+The `network_service::NetworkControlPlane` facade composes the account
+permissions with the tenant registry. It requires a live account session before
+issuing device invitations, reserving subdomains, issuing device-key challenges
+or revoking devices, and rejects cross-tenant misuse. It still **cannot**
+activate a public route and exposes no network listener. The operator-only
+provisioning method must not be exposed through public HTTP.

@@ -31,9 +31,8 @@ impl NetworkControlPlane{
     pub fn provision_tenant_operator(&mut self,name:&str,email:&str,password:&str)->Result<(Tenant,Principal)>{
         // Hash and validate the account before creating a customer tenant so
         // rejected input cannot leave a tenant with no owner behind.
-        if password.len()<12 || password.len()>256 {
-            return Err(AccountError::Invalid.into());
-        }
+        crate::network_auth::canonical_email(email)?;
+        crate::network_auth::validate_password(password)?;
         let tenant=self.registry.create_tenant(name)?;
         let owner=self.accounts.bootstrap_owner(&tenant.id,email,password)?;
         Ok((tenant,owner))
