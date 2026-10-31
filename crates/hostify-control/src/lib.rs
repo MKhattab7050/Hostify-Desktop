@@ -1,7 +1,10 @@
 //! Hostify Network control plane: localhost-only administration and agent
 //! enrollment gateway. No public networking, DNS changes or workload execution.
+mod accounts_http;
+use accounts_http::{AccountApi,is_account_path};
 use bytes::Bytes;
 use hostify_core::network::{NetworkError,Registry};
+use hostify_core::network_auth::{Accounts,Capability};
 use http_body_util::{Full,BodyExt};
 use hyper::{Method,Request,Response,StatusCode,body::Incoming,header};
 use ring::constant_time::verify_slices_are_equal;
@@ -14,6 +17,7 @@ const MAX_BODY:usize=32*1024;
 pub struct Controller {
     registry:Mutex<Registry>,
     admin_secret:Vec<u8>,
+    accounts:Option<AccountApi>,
 }
 impl Controller {
     pub fn new(registry:Registry,admin_secret:Vec<u8>)->Result<Self,&'static str>{
@@ -21,7 +25,13 @@ impl Controller {
             admin_secret.iter().any(|b| !b.is_ascii_graphic()) {
             return Err("Configure a random administrator secret of 32-4096 printable ASCII bytes.");
         }
-        Ok(Self{registry:Mutex::new(registry),admin_secret})
+        Ok(Self{registry:Mutex::new(registry),admin_secret,accounts:None})
+    }
+    /// Attach only an already-initialized central account database. This
+    /// changes no localhost-only transport or public readiness state.
+    pub fn with_accounts(mut self,accounts:Accounts)->Self{
+        self.accounts=Some(AccountApi::new(accounts));
+        self
     }
     fn authorized(&self,header_value:Option<&str>)->bool{
         let Some(token)=header_value.and_then(|h|h.strip_prefix("Bearer ")) else{return false;};
@@ -37,12 +47,23 @@ impl Controller {
             return (StatusCode::OK,json!({"alive":true,"publicReady":false,
                 "gateway":"loopback-only","dnsConfigured":false}));
         }
-        // Only enrollment and proof-of-possession endpoints accept a one-use
-        // token without administrator credentials. They are still loopback-
-        // only until a real HTTPS reverse proxy and abuse controls exist.
+        if is_account_path(path) {
+            if method!=Method::POST {
+                return (StatusCode::METHOD_NOT_ALLOWED,json!({"error":"method_not_allowed"}));
+            }
+            return match &self.accounts{
+                Some(accounts)=>accounts.dispatch(path,auth,self.authorized(auth),body),
+                None=>(StatusCode::SERVICE_UNAVAILABLE,json!({"error":"unavailable"})),
+            };
+        }
+        // Operator endpoints still require the process-local admin secret.
+        // Tenant endpoints instead require a scoped account session and RBAC.
         let public_action=method==Method::POST &&
             matches!(path,"/v1/agents/enroll"|"/v1/agents/proof");
-        if !public_action && !self.authorized(auth) {
+        let tenant_action=method==Method::POST &&
+            matches!(path,"/v1/tenant/invitations"|"/v1/tenant/routes/reserve"|
+                "/v1/tenant/agents/revoke");
+        if !public_action && !tenant_action && !self.authorized(auth) {
             return (StatusCode::UNAUTHORIZED,json!({"error":"unauthorized"}));
         }
         if method!=Method::POST {
@@ -71,6 +92,8 @@ impl Controller {
             tenant_id:String,agent_id:String,route_id:String,
             challenge:String,signature_hex:String
         }
+        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
+        struct RevokeInput {tenant_id:String,agent_id:String}
         let response:Result<Value,(StatusCode,&'static str)>=match path {
             "/v1/tenants"=>parse::<TenantInput>(body)
                 .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
@@ -102,6 +125,36 @@ impl Controller {
                     &p.agent_id,&p.route_id,&p.challenge,&p.signature_hex)
                     .map(|_|json!({"identityVerified":true,"publiclyRoutable":false}))
                     .map_err(map_network_error)),
+            "/v1/tenant/invitations"=>parse::<InvitationInput>(body)
+                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
+                .and_then(|p|{
+                    let accounts=self.accounts.as_ref().ok_or(
+                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
+                    accounts.authorize(auth,&p.tenant_id,Capability::ManageDevices)?;
+                    registry.issue_invitation(&p.tenant_id,p.ttl_seconds)
+                        .map(|t|json!({"invitation":t.token,"expiresUnix":t.expires_unix}))
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/routes/reserve"=>parse::<RouteInput>(body)
+                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
+                .and_then(|p|{
+                    let accounts=self.accounts.as_ref().ok_or(
+                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
+                    accounts.authorize(auth,&p.tenant_id,Capability::ManageSites)?;
+                    registry.reserve_hostname(&p.tenant_id,&p.agent_id,&p.site_id,&p.label)
+                        .map(|route|json!({"route":route,"publiclyRoutable":false}))
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/agents/revoke"=>parse::<RevokeInput>(body)
+                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
+                .and_then(|p|{
+                    let accounts=self.accounts.as_ref().ok_or(
+                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
+                    accounts.authorize(auth,&p.tenant_id,Capability::ManageDevices)?;
+                    registry.revoke_agent(&p.tenant_id,&p.agent_id)
+                        .map(|_|json!({"revoked":true}))
+                        .map_err(map_network_error)
+                }),
             _=>Err((StatusCode::NOT_FOUND,"not_found")),
         };
         match response{
