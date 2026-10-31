@@ -1,0 +1,17 @@
+[package]
+name = "hostify-control"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hostify-core = { path = "../hostify-core" }
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1"] }
+ring = "0.17.14"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
+uuid = { version = "1", features = ["v4"] }
