@@ -29,14 +29,25 @@ All endpoints are JSON, have a 32 KiB body limit, disable caches, and return no 
 | `POST /v1/routes/reserve` | Admin Bearer | Reserves globally unique, **non-routable** hostname |
 | `POST /v1/agents/challenge` | Admin Bearer | Issues 30–300 second signed device challenge |
 | `POST /v1/agents/proof` | Signed Ed25519 challenge | Stores identity proof only, **not public routing** |
+| `POST /v1/accounts/bootstrap` | Admin Bearer | Assigns first owner to an operator-created tenant, once only |
+| `POST /v1/auth/login` | Tenant ID + email + password | Creates a 12-hour hashed session; returns token only in response |
+| `POST /v1/auth/me` | Tenant session Bearer | Returns principal if session is active for the specified tenant |
+| `POST /v1/auth/logout` | Tenant session Bearer | Revokes session |
+| `POST /v1/members/invite` | Tenant owner/admin session | Issues role-scoped, single-use member invitation |
+| `POST /v1/members/accept` | Single-use member invitation | Creates invited account without exposing admin credentials |
+| `POST /v1/tenant/invitations` | Tenant ManageDevices session | Issues one-use device enrollment invitation for own tenant |
+| `POST /v1/tenant/routes/reserve` | Tenant ManageSites session | Reserves a non-routable hostname for own tenant |
+| `POST /v1/tenant/agents/revoke` | Tenant ManageDevices session | Revokes own device and disables its reserved routes |
 
-Only enroll and proof endpoints accept one-use credentials without admin authorization. The hostname returned by `routes/reserve` does **not** create public DNS, a Cloudflare tunnel, or a valid customer web route.
+Account login and single-use token redemption do not require an admin Bearer. All other account actions require either the operator secret or a tenant session with the appropriate role. A tenant session cannot reserve or revoke another tenant's resources.
+
+The hostname returned by `routes/reserve` or `tenant/routes/reserve` does **not** create public DNS, a Cloudflare tunnel, or a valid customer web route.
 
 A malicious browser page cannot call admin operations without the secret, and the process sends no Access-Control-Allow-Origin response.
 
 ## Security release blockers
 
-The local admin secret is a single process-level credential and is not tenant-level RBAC. Never expose it through a desktop webview or customer device. Production requires:
+The local administrator secret still controls operator endpoints, while the new tenant session endpoints enforce basic per-tenant RBAC. Account sessions are stored as hashes and expire, but this service has **no public TLS, MFA/passkeys, CSRF gateway, per-IP throttling or comprehensive abuse protection**. Treat both passwords and session tokens as confidential. Never expose the operator credential, a tenant session token or this listener through a desktop webview, customer device or tunnel. Production requires:
 
 1. External HTTPS ingress with strict origin controls, CSRF-safe authentication, MFA and per-tenant RBAC.
 2. Persistent scoped API tokens, revocation, audit, threat/abuse rate limits and IP controls.
