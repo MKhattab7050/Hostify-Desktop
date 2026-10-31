@@ -117,3 +117,9 @@ export interface SiteSnapshotSchedule {
   lastRunUnix: number | null; lastAttemptUnix: number | null;
   pausedForCapacity: boolean;
 }
+
+/** Built-in Hostify templates. Dynamic projects are never auto-trusted or auto-started. */
+export interface AppTemplate {
+  id: string; name: string; kind: SiteKind; framework: string;
+  description: string; requiresTrust: boolean; requiresDatabase: boolean;
+}

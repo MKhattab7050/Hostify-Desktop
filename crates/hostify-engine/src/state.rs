@@ -725,6 +725,35 @@ impl Engine {
         }
         let s = &self.store;
         match method {
+            "list_app_templates" => Ok(json!(hostify_core::catalog::list())),
+            "create_site_from_template" => {
+                let template_id=arg(&p,"templateId")?;
+                let name=arg(&p,"name")?.trim();
+                if name.is_empty() || name.len()>200 {bail!("Enter a website name of 1 to 200 characters.");}
+                let template=hostify_core::catalog::get(template_id)?;
+                // This source folder is retained for user edits and future
+                // updates; it is not the production release directory.
+                let parent=s.root.join("template-sources");
+                std::fs::create_dir_all(&parent)?;
+                let folder=parent.join(uuid::Uuid::new_v4().to_string());
+                hostify_core::catalog::materialize(template_id,&folder)?;
+                let request=json!({"name":name,"sourcePath":folder.to_string_lossy(),
+                    "kind":"directory","siteKind":template.kind});
+                // Reuse the existing importer, port allocation and release
+                // trust guards instead of building a parallel site creator.
+                let site=Box::pin(self.dispatch("add_site",request)).await;
+                match site {
+                    Ok(value)=>{
+                        s.activity("info",value["id"].as_str(),
+                            "Built-in catalog project imported. Dynamic projects require explicit trust and build.")?;
+                        Ok(value)
+                    }
+                    Err(error)=>{
+                        let _=std::fs::remove_dir_all(&folder);
+                        Err(error)
+                    }
+                }
+            }
             "inspect_project" => {
                 let path = PathBuf::from(arg(&p, "path")?);
                 let kind = kind(&p)?.to_owned();

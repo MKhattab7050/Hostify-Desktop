@@ -1,4 +1,4 @@
-import type { PublishPreflight, PublishDiagnostic, GuardianStatus, SiteSnapshot, SiteSnapshotSchedule,
+import type { PublishPreflight, PublishDiagnostic, GuardianStatus, SiteSnapshot, SiteSnapshotSchedule, AppTemplate,
   ActivityEntry, AppConfig, AppSettings, AppStatus, BuildStatus, CloudflareAccount, DatabaseBackup, DatabaseConnection, Deployment, DnsPlan, Domain, DomainCheck,
   EngineStatus, EnvVar, ComponentName, LogStream, ManagedDatabase, MysqlStatus, ProjectReport, RuntimeKind, RuntimeStatus, Site, SiteKind, SourceKind, SourceReport, SystemStats, TunnelHealth,
 } from "./types";
@@ -68,6 +68,9 @@ export const api = {
   tunnelHealth: () => call<TunnelHealth[]>("tunnel_health"),
   listActivity: (limit = 100, siteId?: string) => call<ActivityEntry[]>("list_activity", { siteId, limit }),
   siteLogs: (siteId: string, lines = 200) => call<string[]>("site_logs", { siteId, lines }),
+  listAppTemplates: () => call<AppTemplate[]>("list_app_templates"),
+  createSiteFromTemplate: (templateId: string, name: string) =>
+    call<Site>("create_site_from_template", { templateId, name }),
   inspectProject: (path: string, kind: SourceKind) => call<ProjectReport>("inspect_project", { path, kind }),
   getAppConfig: (siteId: string) => call<AppConfig>("get_app_config", { siteId }),
   setAppConfig: (siteId: string, config: AppConfig, version: { nodeVersion?: string; phpVersion?: string }) => call<{ restartRequired: boolean; rebuildRequired: boolean }>("set_app_config", { siteId, config, ...version }),

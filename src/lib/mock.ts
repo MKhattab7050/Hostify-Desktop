@@ -93,6 +93,17 @@ export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise
     case "list_sites": return r(sites.map((x) => { const e = [...started.entries()].reverse().find(([, v]) => v.siteId === x.id); return e ? { ...x, publishDeploymentId: e[0], publishHostname: e[1].hostname, publishState: previewDeployment(x.id, e[1].hostname, e[1].at, e[0]).state } : x; }));
     case "get_site": return r(sites.find((s) => s.id === a.id));
     case "validate_source": return r({ ok: true, fileCount: 24, sizeBytes: 3_200_000, hasIndex: true, warnings: [], errors: [] });
+    case "list_app_templates": return r([
+      {id:"portfolio",name:"Portfolio",kind:"static",framework:"HTML/CSS",description:"Responsive personal portfolio with no dependencies.",requiresTrust:false,requiresDatabase:false},
+      {id:"restaurant",name:"Restaurant Landing",kind:"static",framework:"HTML/CSS",description:"A responsive restaurant landing page, ready to customize.",requiresTrust:false,requiresDatabase:false},
+      {id:"node-api",name:"Node.js API",kind:"node",framework:"Node.js 24",description:"Small built-in HTTP API without dependencies.",requiresTrust:true,requiresDatabase:false},
+      {id:"php-starter",name:"PHP Starter",kind:"php",framework:"PHP 8.4",description:"Minimal PHP page without external packages.",requiresTrust:true,requiresDatabase:false},
+    ]);
+    case "create_site_from_template": {
+      const kind = a.templateId==="node-api" ? "node" : a.templateId==="php-starter" ? "php" : "static";
+      return mock<T>("add_site",{name:a.name,sourcePath:`C:\\\\Hostify\\\\template-sources\\\\${a.templateId}`,
+        kind:"directory",siteKind:kind});
+    }
     case "inspect_project": return r(inspect(String(a.path)));
     case "get_app_config": return r(configs.get(a.siteId) ?? baseConfig);
     case "set_app_config": { const v = a.nodeVersion ?? a.phpVersion; const old = configs.get(a.siteId); configs.set(a.siteId, { ...a.config, activeRelease: old?.activeRelease ?? null, builtRelease: old?.builtRelease ?? null, trustedRelease: old?.trustedRelease ?? null, pendingRelease: old?.pendingRelease ?? null }); if (v) patch(a.siteId, { runtimeVersion: v }); return r({ restartRequired: false, rebuildRequired: false }); }

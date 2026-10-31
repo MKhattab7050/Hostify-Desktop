@@ -34,6 +34,8 @@ forward! {
     delete_backup(name: String => "name", file: String => "file"); restore_database(name: String => "name", file: String => "file", confirm_name: String => "confirmName");
     link_database(name: String => "name", site_id: String => "siteId", inject_env: bool => "injectEnv", replace_env: Option<bool> => "replaceEnv"); unlink_database(name: String => "name");
     engine_status(); system_stats(); list_sites();
+    list_app_templates();
+    create_site_from_template(template_id: String => "templateId", name: String => "name");
     inspect_project(path: String => "path", kind: String => "kind");
     get_app_config(site_id: String => "siteId");
     set_app_config(site_id: String => "siteId", config: Value => "config", node_version: Option<String> => "nodeVersion", php_version: Option<String> => "phpVersion");
@@ -192,6 +194,8 @@ pub fn run() {
             restore_database,
             link_database,
             unlink_database,
+            list_app_templates,
+            create_site_from_template,
             inspect_project,
             get_app_config,
             set_app_config,
