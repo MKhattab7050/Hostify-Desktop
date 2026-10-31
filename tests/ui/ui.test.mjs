@@ -315,6 +315,15 @@ await test("offline App Catalog can import a static project using the existing s
   await page.context().close();
 });
 
+await test("Hostify Doctor remains local and shows read-only deterministic findings", async () => {
+  const page=await open();
+  const card=page.locator("section").filter({hasText:"Hostify Doctor"}).first();
+  await card.getByRole("button",{name:"Analyze logs"}).first().click();
+  await card.getByText(/No known error signatures found/).first().waitFor();
+  await card.getByText(/No log lines are uploaded/).waitFor();
+  await page.context().close();
+});
+
 await test("no uncaught errors in the browser console", async () => {
   const real = pageErrors.filter((e) => !/favicon/.test(e));
   assert.deepEqual(real, []);
