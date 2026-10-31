@@ -2,7 +2,7 @@
 //! registry. There is deliberately no HTTP listener, Cloudflare DNS mutation,
  //! or site execution API here. Operator provisioning is not publicly exposed.
 use crate::network::{Registry,NetworkError,Tenant,Invitation,Route,DeviceChallenge,Agent,AuditEntry};
-use crate::network_auth::{Accounts,AccountError,Principal,Session,Role,Capability,MemberInvitation,TenantMember};
+use crate::network_auth::{Accounts,AccountError,Principal,Session,Role,Capability,MemberInvitation,TenantMember,ActiveSession};
 use std::path::Path;
 use thiserror::Error;
 
@@ -47,6 +47,13 @@ impl NetworkControlPlane{
     }
     pub fn accept_member_invitation(&mut self,token:&str,password:&str)->Result<Principal>{
         Ok(self.accounts.accept_invitation(token,password)?)
+    }
+    /// Tenant-scoped, member-local active sessions. No tokens are exposed.
+    pub fn list_sessions(&self,token:&str,tenant:&str,limit:i64,offset:i64)->Result<Vec<ActiveSession>>{
+        Ok(self.accounts.list_sessions(token,tenant,limit,offset)?)
+    }
+    pub fn revoke_session(&mut self,token:&str,tenant:&str,session_id:&str)->Result<()>{
+        Ok(self.accounts.revoke_session(token,tenant,session_id)?)
     }
     /// A successful rotation invalidates every existing session for this user.
     pub fn change_password(&mut self,token:&str,tenant:&str,
