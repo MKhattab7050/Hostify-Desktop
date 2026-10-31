@@ -60,6 +60,11 @@ impl NetworkControlPlane{
         current_password:&str,new_password:&str)->Result<()>{
         Ok(self.accounts.change_password(token,tenant,current_password,new_password)?)
     }
+    /// Only tenant owners may change a non-owner member's role.
+    pub fn update_member_role(&mut self,token:&str,tenant:&str,user_id:&str,
+        role:Role)->Result<()>{
+        Ok(self.accounts.update_member_role(token,tenant,user_id,role)?)
+    }
     /// Management-only member roster with bounded, tenant-local pagination.
     pub fn list_members(&self,token:&str,tenant:&str,limit:i64,offset:i64)->Result<Vec<TenantMember>>{
         Ok(self.accounts.list_members(token,tenant,limit,offset)?)
