@@ -127,7 +127,8 @@ fn response(status:StatusCode,value:Value)->Response<Full<Bytes>>{
         .header(header::CONTENT_TYPE,"application/json; charset=utf-8")
         .header(header::CACHE_CONTROL,"no-store")
         .header(header::X_CONTENT_TYPE_OPTIONS,"nosniff")
-        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN,"null")
+        // No CORS grants, including Origin: null. Local browser sandboxes
+        // must not receive administrator read permission.
         .body(Full::new(bytes)).expect("static response headers")
 }
 pub async fn serve_request(req:Request<Incoming>,controller:Arc<Controller>)
