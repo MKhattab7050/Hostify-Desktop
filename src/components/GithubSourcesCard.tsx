@@ -9,10 +9,12 @@ export function GithubSourcesCard({ sites }: { sites: Site[] }) {
   const [sources,setSources]=useState<Record<string,GithubSource>>({});
   const [pending,setPending]=useState<Record<string,GithubPendingPush[]>>({});
   const [busy,setBusy]=useState<string>();
+  const [loading,setLoading]=useState(true);
   const [error,setError]=useState<string>();
   const [notice,setNotice]=useState<string>();
   useEffect(()=>{
     let active=true;
+    setLoading(true);
     void Promise.all(sites.map(async (site)=>({
       id:site.id,
       source:await api.githubSourceStatus(site.id),
@@ -21,7 +23,8 @@ export function GithubSourcesCard({ sites }: { sites: Site[] }) {
       if(!active)return;
       setSources(Object.fromEntries(results.map(x=>[x.id,x.source])));
       setPending(Object.fromEntries(results.map(x=>[x.id,x.pushes])));
-    }).catch((e)=>{if(active)setError((e as Error).message);});
+      setLoading(false);
+    }).catch((e)=>{if(active){setError((e as Error).message);setLoading(false);}});
     return ()=>{active=false;};
   },[sites.map(s=>s.id).join("|")]);
   const update=(id:string,patch:Partial<GithubSource>)=>
@@ -30,9 +33,12 @@ export function GithubSourcesCard({ sites }: { sites: Site[] }) {
     setBusy(site.id);setError(undefined);setNotice(undefined);
     try{
       const draft=sources[site.id]??defaultSource;
-      if(enabled && (!/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/i.test(draft.repository) ||
-          !/^[a-z0-9_./-]+$/i.test(draft.branch))) {
-        throw new Error("Enter a valid owner/repository and branch before enabling.");
+      if (draft.repository.length>200 || draft.branch.length>200 ||
+          !/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/i.test(draft.repository) ||
+          !/^[a-z0-9_./-]+$/i.test(draft.branch) ||
+          draft.branch.startsWith("/") || draft.branch.endsWith("/") ||
+          draft.branch.includes("..") || draft.branch.includes("//")) {
+        throw new Error("Enter a valid owner/repository and branch before saving.");
       }
       const next=await api.githubConfigureSource(site.id,draft.repository,draft.branch,enabled);
       update(site.id,next);
@@ -78,28 +84,28 @@ export function GithubSourcesCard({ sites }: { sites: Site[] }) {
             <span className="font-medium">{site.name}</span>
             <span className="flex items-center gap-1 text-[12px] text-ink2">
               <ShieldCheck size={13} aria-hidden/>
-              {source.enabled?"Review enabled":"Not connected"}
+              {loading?"Loading review settings":source.enabled?"Review enabled":"Not connected"}
             </span>
           </div>
           <div className="grid gap-2 sm:grid-cols-2">
             <Field label={`Repository for ${site.name}`} value={source.repository}
-              placeholder="owner/repository" disabled={!!busy} onChange={e=>update(site.id,{repository:e.target.value})}/>
+              placeholder="owner/repository" disabled={!!busy||loading} onChange={e=>update(site.id,{repository:e.target.value})}/>
             <Field label={`Branch for ${site.name}`} value={source.branch}
-              disabled={!!busy} onChange={e=>update(site.id,{branch:e.target.value})}/>
+              disabled={!!busy||loading} onChange={e=>update(site.id,{branch:e.target.value})}/>
           </div>
           <div className="mt-2 flex flex-wrap gap-2">
-            <Button size="sm" busy={busy===site.id} disabled={!!busy}
+            <Button size="sm" busy={busy===site.id} disabled={!!busy||loading}
               onClick={()=>void save(site,source.enabled)}>Save source</Button>
             {source.enabled?
-              <Button size="sm" variant="danger" disabled={!!busy}
+              <Button size="sm" variant="danger" disabled={!!busy||loading}
                 onClick={()=>void save(site,false)}>Disable and reject pending</Button>:
-              <Button size="sm" variant="primary" disabled={!!busy}
+              <Button size="sm" variant="primary" disabled={!!busy||loading}
                 onClick={()=>void save(site,true)}>Enable push review</Button>}
           </div>
           <Disclosure title={`Push inbox (${pushes.filter(x=>x.state==="awaiting_review").length} awaiting review)`}>
             <div className="mt-2 flex items-center justify-between gap-2">
               <p className="text-[12px] text-ink2">Verified Push requests only. Approval and deployment are not implemented.</p>
-              <Button size="sm" disabled={!!busy} onClick={()=>void reload(site)}>
+              <Button size="sm" disabled={!!busy||loading} onClick={()=>void reload(site)}>
                 <RefreshCw size={13} aria-hidden/>Refresh
               </Button>
             </div>
@@ -110,7 +116,7 @@ export function GithubSourcesCard({ sites }: { sites: Site[] }) {
                     <p className="text-[13px] font-medium">{push.commitSha.slice(0,12)}</p>
                     <p className="text-[12px] text-ink2">{push.repository} · {push.branch} · {push.state.replace(/_/g," ")}</p>
                   </div>
-                  {push.state==="awaiting_review"&&<Button size="sm" variant="danger" disabled={!!busy}
+                  {push.state==="awaiting_review"&&<Button size="sm" variant="danger" disabled={!!busy||loading}
                     onClick={()=>void reject(site,push)}><XCircle size={13} aria-hidden/>Reject push</Button>}
                 </li>)}
               </ul>}
