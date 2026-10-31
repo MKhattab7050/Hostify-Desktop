@@ -143,3 +143,12 @@ export interface SecurityPosture {
   checkedAt: string; inspectedSites: number; blockingFindings: number;
   warningFindings: number; unverifiedChecks: number; findings: SecurityFinding[];
 }
+
+/** GitHub push review. Configuring a source never enables automatic build or publish. */
+export interface GithubSource {
+  repository: string; branch: string; enabled: boolean;
+}
+export interface GithubPendingPush {
+  deliveryId: string; siteId: string; repository: string; branch: string;
+  commitSha: string; state: "awaiting_review" | "rejected" | "approved";
+}

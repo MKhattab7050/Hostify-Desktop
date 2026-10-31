@@ -41,6 +41,10 @@ forward! {
     set_app_config(site_id: String => "siteId", config: Value => "config", node_version: Option<String> => "nodeVersion", php_version: Option<String> => "phpVersion");
     build_app(site_id: String => "siteId", trust_acknowledged: bool => "trustAcknowledged");
     cancel_build(site_id: String => "siteId"); get_build_status(site_id: String => "siteId");
+    github_source_status(site_id: String => "siteId");
+    github_configure_source(site_id: String => "siteId", repository: String => "repository", branch: String => "branch", enabled: bool => "enabled");
+    github_pending_pushes(site_id: String => "siteId");
+    github_reject_push(site_id: String => "siteId", delivery_id: String => "deliveryId");
     site_snapshot_schedule(site_id: String => "siteId");
     set_site_snapshot_schedule(site_id: String => "siteId", enabled: bool => "enabled", every_hours: u32 => "everyHours");
     create_site_snapshot(site_id: String => "siteId");
@@ -221,6 +225,10 @@ pub fn run() {
             app_status,
             security_posture,
             doctor_analyze,
+            github_source_status,
+            github_configure_source,
+            github_pending_pushes,
+            github_reject_push,
             site_snapshot_schedule,
             set_site_snapshot_schedule,
             create_site_snapshot,

@@ -834,6 +834,61 @@ impl Engine {
                     json!({"restartRequired":changed && site.status!="stopped","rebuildRequired":rebuild}),
                 )
             }
+            "github_source_status" => {
+                let id=arg(&p,"siteId")?;
+                s.site(id)?;
+                let db=s.db()?;
+                let source:Option<(String,String,bool)>=db.query_row(
+                    "SELECT repository,branch,enabled FROM github_site_sources WHERE site_id=?1",
+                    [id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))
+                ).optional().or_else(|error| {
+                    // A fresh installation without the GitHub Inbox tables
+                    // has no configured source; do not mutate on read.
+                    if error.to_string().contains("no such table: github_site_sources") {
+                        Ok(None)
+                    } else {Err(error)}
+                })?;
+                Ok(match source {
+                    Some((repository,branch,enabled))=>json!({"repository":repository,
+                        "branch":branch,"enabled":enabled}),
+                    None=>json!({"repository":"","branch":"main","enabled":false})
+                })
+            }
+            "github_configure_source" => {
+                let id=arg(&p,"siteId")?;
+                s.site(id)?;
+                let policy=hostify_core::github_webhooks::SourcePolicy{
+                    site_id:id.to_owned(),
+                    repository:arg(&p,"repository")?.to_owned(),
+                    branch:arg(&p,"branch")?.to_owned(),
+                    enabled:boolean(&p,"enabled")?,
+                };
+                let mut db=s.db()?;
+                hostify_core::github_webhooks::configure_source(&mut db,&policy)?;
+                s.activity("info",Some(id),if policy.enabled {
+                    "GitHub source review enabled. Pushes require authenticated intake and explicit review; no code is automatically executed."
+                } else {
+                    "GitHub source review disabled and outstanding pushes rejected."
+                })?;
+                Ok(json!({"repository":policy.repository,"branch":policy.branch,"enabled":policy.enabled}))
+            }
+            "github_pending_pushes" => {
+                let id=arg(&p,"siteId")?;
+                s.site(id)?;
+                let db=s.db()?;
+                Ok(json!(hostify_core::github_webhooks::pending_pushes(&db,id)?))
+            }
+            "github_reject_push" => {
+                let id=arg(&p,"siteId")?;
+                s.site(id)?;
+                let delivery=arg(&p,"deliveryId")?;
+                let mut db=s.db()?;
+                let rejected=hostify_core::github_webhooks::reject_pending_push(&mut db,id,delivery)?;
+                if rejected {
+                    s.activity("info",Some(id),"A pending GitHub push was rejected without running code.")?;
+                }
+                Ok(json!({"rejected":rejected}))
+            }
             "site_snapshot_schedule" => {
                 Ok(json!(crate::time_machine::schedule(self,arg(&p,"siteId")?)?))
             }

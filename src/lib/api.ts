@@ -1,4 +1,4 @@
-import type { PublishPreflight, PublishDiagnostic, GuardianStatus, SiteSnapshot, SiteSnapshotSchedule, AppTemplate, DoctorReport, SecurityPosture,
+import type { PublishPreflight, PublishDiagnostic, GuardianStatus, SiteSnapshot, SiteSnapshotSchedule, AppTemplate, DoctorReport, SecurityPosture, GithubSource, GithubPendingPush,
   ActivityEntry, AppConfig, AppSettings, AppStatus, BuildStatus, CloudflareAccount, DatabaseBackup, DatabaseConnection, Deployment, DnsPlan, Domain, DomainCheck,
   EngineStatus, EnvVar, ComponentName, LogStream, ManagedDatabase, MysqlStatus, ProjectReport, RuntimeKind, RuntimeStatus, Site, SiteKind, SourceKind, SourceReport, SystemStats, TunnelHealth,
 } from "./types";
@@ -77,6 +77,12 @@ export const api = {
   buildApp: (siteId: string, trustAcknowledged: boolean) => call<{ buildId: string }>("build_app", { siteId, trustAcknowledged }),
   cancelBuild: (siteId: string) => call<void>("cancel_build", { siteId }),
   getBuildStatus: (siteId: string) => call<BuildStatus | null>("get_build_status", { siteId }),
+  githubSourceStatus: (siteId: string) => call<GithubSource>("github_source_status", { siteId }),
+  githubConfigureSource: (siteId: string, repository: string, branch: string, enabled: boolean) =>
+    call<GithubSource>("github_configure_source", { siteId, repository, branch, enabled }),
+  githubPendingPushes: (siteId: string) => call<GithubPendingPush[]>("github_pending_pushes", { siteId }),
+  githubRejectPush: (siteId: string, deliveryId: string) =>
+    call<{ rejected: boolean }>("github_reject_push", { siteId, deliveryId }),
   siteSnapshotSchedule: (siteId: string) => call<SiteSnapshotSchedule>("site_snapshot_schedule", { siteId }),
   setSiteSnapshotSchedule: (siteId: string, enabled: boolean, everyHours: 24 | 72 | 168) =>
     call<SiteSnapshotSchedule>("set_site_snapshot_schedule", { siteId, enabled, everyHours }),
