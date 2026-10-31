@@ -46,9 +46,19 @@ pub struct Tenant {
 }
 #[derive(Clone)]
 pub struct Invitation {
+    /// Safe metadata used to cancel this one-use enrollment token.
+    pub id:String,
     /// Display only once. Only the SHA-256 digest is stored in SQLite.
     pub token: String,
     pub expires_unix: i64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all="camelCase")]
+pub struct PendingDeviceInvitation {
+    pub id:String,
+    pub tenant_id:String,
+    pub expires_unix:i64,
+    pub created_at:String,
 }
 /// Never reveal one-use credentials in panic contexts, error reports or logs.
 impl std::fmt::Debug for Invitation {
@@ -196,6 +206,10 @@ impl Registry {
                 id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES network_tenants(id),
                 token_hash TEXT NOT NULL UNIQUE, expires_unix INTEGER NOT NULL,
                 consumed_at TEXT, created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS network_invitation_revocations(
+                invitation_id TEXT PRIMARY KEY REFERENCES network_invitations(id),
+                revoked_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS network_agents(
                 id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES network_tenants(id),
@@ -527,16 +541,67 @@ impl Registry {
         let expires_unix=Utc::now().timestamp()+ttl_seconds;
         let created_at=Utc::now().to_rfc3339();
         let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let invitation_id=Uuid::new_v4().to_string();
         tx.execute("INSERT INTO network_invitations(id,tenant_id,token_hash,expires_unix,created_at)
             VALUES(?1,?2,?3,?4,?5)",
-            params![Uuid::new_v4().to_string(),tenant,token_hash(&token),expires_unix,&created_at]
+            params![&invitation_id,tenant,token_hash(&token),expires_unix,&created_at]
         )?;
         // Audit insertion and invitation issuance succeed or roll back together.
         tx.execute("INSERT INTO network_audit(tenant_id,ts,action,subject_id)
             VALUES(?1,?2,'enrollment_invitation_issued','agent-pending')",
             params![tenant,&created_at])?;
         tx.commit()?;
-        Ok(Invitation{token,expires_unix})
+        Ok(Invitation{id:invitation_id,token,expires_unix})
+    }
+    /// Pending-only, tenant-scoped inventory. Never return enrollment bearer
+    /// tokens or their hashes through this administrative projection.
+    pub fn list_pending_device_invitations(&self,tenant:&str,limit:i64,
+        offset:i64)->Result<Vec<PendingDeviceInvitation>>{
+        self.ensure_tenant(tenant)?;
+        if !(1..=100).contains(&limit)||!(0..=1_000_000).contains(&offset){
+            return Err(NetworkError::Invalid);
+        }
+        let mut stmt=self.db.prepare(
+            "SELECT i.id,i.tenant_id,i.expires_unix,i.created_at FROM network_invitations i
+             WHERE i.tenant_id=?1 AND i.consumed_at IS NULL AND i.expires_unix>?2
+               AND NOT EXISTS(SELECT 1 FROM network_invitation_revocations v
+                              WHERE v.invitation_id=i.id)
+             ORDER BY i.created_at DESC,i.id DESC LIMIT ?3 OFFSET ?4")?;
+        let rows=stmt.query_map(params![tenant,Utc::now().timestamp(),limit,offset],
+            |r|Ok(PendingDeviceInvitation{
+                id:r.get(0)?,tenant_id:r.get(1)?,
+                expires_unix:r.get(2)?,created_at:r.get(3)?,
+            }))?.collect::<std::result::Result<Vec<_>,_>>()?;
+        Ok(rows)
+    }
+    /// Persist cancellation and the corresponding audit entry atomically.
+    /// Enrollment itself checks this revocation in an IMMEDIATE transaction.
+    pub fn revoke_device_invitation(&mut self,tenant:&str,
+        invitation_id:&str)->Result<()>{
+        require_uuid(tenant)?;require_uuid(invitation_id)?;
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let entry:Option<(Option<String>,i64)>=tx.query_row(
+            "SELECT i.consumed_at,i.expires_unix FROM network_invitations i
+             JOIN network_tenants t ON t.id=i.tenant_id AND t.state='active'
+             WHERE i.tenant_id=?1 AND i.id=?2",
+            params![tenant,invitation_id],
+            |r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let (consumed,expires)=entry.ok_or(NetworkError::Ownership)?;
+        let revoked:i64=tx.query_row(
+            "SELECT COUNT(*) FROM network_invitation_revocations
+             WHERE invitation_id=?1",[invitation_id],|r|r.get(0))?;
+        if revoked>0{return Ok(());}
+        if consumed.is_some()||expires<=Utc::now().timestamp(){
+            return Err(NetworkError::InvalidInvitation);
+        }
+        let now=Utc::now().to_rfc3339();
+        tx.execute("INSERT INTO network_invitation_revocations(invitation_id,revoked_at)
+            VALUES(?1,?2)",params![invitation_id,&now])?;
+        tx.execute("INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+            VALUES(?1,?2,'enrollment_invitation_revoked',?3)",
+            params![tenant,&now,invitation_id])?;
+        tx.commit()?;
+        Ok(())
     }
     /// The invitation proves temporary enrollment authorization only. Before
     /// enabling routing, the gateway must prove possession of the registered
@@ -550,7 +615,10 @@ impl Registry {
         let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let entry:Option<(String,String,i64,Option<String>)>=tx.query_row(
             "SELECT id,tenant_id,expires_unix,consumed_at FROM network_invitations
-                WHERE token_hash=?1",[token_hash(token)],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
+                WHERE token_hash=?1 AND NOT EXISTS (
+                SELECT 1 FROM network_invitation_revocations v
+                WHERE v.invitation_id=network_invitations.id
+            )",[token_hash(token)],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
         ).optional()?;
         let (inv_id,tenant,expires,used)=entry.ok_or(NetworkError::InvalidInvitation)?;
         if used.is_some()||expires<=now{return Err(NetworkError::InvalidInvitation);}
@@ -814,7 +882,8 @@ mod tests{
     fn key(b:u8)->String {hex::encode([b;32])}
     #[test]
     fn debug_format_never_exposes_enrollment_or_proof_credentials(){
-        let enrollment=Invitation{token:"enrollment-only-secret".into(),expires_unix:42};
+        let enrollment=Invitation{id:Uuid::new_v4().to_string(),
+            token:"enrollment-only-secret".into(),expires_unix:42};
         let challenge=DeviceChallenge{value:"proof-only-secret".into(),expires_unix:43};
         let invite_text=format!("{enrollment:?}");
         let challenge_text=format!("{challenge:?}");
@@ -1305,5 +1374,48 @@ mod tests{
         let restored=r.reassign_reserved_route(&a.id,&route.id,&d2.id,
             &Uuid::new_v4().to_string()).unwrap();
         assert_eq!(restored.agent_id,d2.id);
+    }
+
+    #[test]
+    fn pending_device_invitations_are_scoped_revocable_and_secret_free(){
+        let mut registry=Registry::memory("example.test").unwrap();
+        let a=registry.create_tenant("A").unwrap();
+        let b=registry.create_tenant("B").unwrap();
+        let invitation=registry.issue_invitation(&a.id,120).unwrap();
+        assert!(registry.list_pending_device_invitations(&a.id,101,0).is_err());
+        let rows=registry.list_pending_device_invitations(&a.id,10,0).unwrap();
+        assert_eq!(rows.len(),1);
+        assert_eq!(rows[0].id,invitation.id);
+        let serialized=serde_json::to_string(&rows).unwrap();
+        assert!(!serialized.contains(&invitation.token));
+        assert!(!serialized.contains("tokenHash"));
+        assert!(registry.list_pending_device_invitations(&b.id,10,0).unwrap().is_empty());
+        assert!(registry.revoke_device_invitation(&b.id,&invitation.id).is_err());
+        registry.revoke_device_invitation(&a.id,&invitation.id).unwrap();
+        registry.revoke_device_invitation(&a.id,&invitation.id).unwrap();
+        assert!(registry.list_pending_device_invitations(&a.id,10,0).unwrap().is_empty());
+        assert!(registry.enroll_agent(&invitation.token,&key(95)).is_err());
+        let audits:i64=registry.db.query_row(
+            "SELECT COUNT(*) FROM network_audit WHERE action='enrollment_invitation_revoked'
+             AND tenant_id=?1",[&a.id],|r|r.get(0)).unwrap();
+        assert_eq!(audits,1);
+        let second=registry.issue_invitation(&a.id,120).unwrap();
+        registry.enroll_agent(&second.token,&key(95)).unwrap();
+        assert!(registry.revoke_device_invitation(&a.id,&second.id).is_err());
+    }
+    #[test]
+    fn device_invitation_revocation_rolls_back_when_audit_insert_fails(){
+        let mut registry=Registry::memory("example.test").unwrap();
+        let a=registry.create_tenant("A").unwrap();
+        let invitation=registry.issue_invitation(&a.id,120).unwrap();
+        registry.db.execute_batch(
+            "CREATE TRIGGER reject_revoke BEFORE INSERT ON network_audit
+             WHEN NEW.action='enrollment_invitation_revoked'
+             BEGIN SELECT RAISE(FAIL,'audit failure'); END;"
+        ).unwrap();
+        assert!(registry.revoke_device_invitation(&a.id,&invitation.id).is_err());
+        assert_eq!(registry.list_pending_device_invitations(&a.id,10,0).unwrap().len(),1);
+        registry.db.execute_batch("DROP TRIGGER reject_revoke").unwrap();
+        registry.enroll_agent(&invitation.token,&key(96)).unwrap();
     }
 }

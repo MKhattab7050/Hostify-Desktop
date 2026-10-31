@@ -65,6 +65,7 @@ impl Controller {
                 "/v1/tenant/agents/revoke"|"/v1/tenant/agents/list"|
                 "/v1/tenant/routes/list"|"/v1/tenant/audit/list"|
                 "/v1/tenant/usage"|"/v1/tenant/agents/rename"|
+                "/v1/tenant/invitations/list"|"/v1/tenant/invitations/revoke"|
                 "/v1/tenant/routes/reservations/list"|
                 "/v1/tenant/routes/disable"|"/v1/tenant/routes/restore"|
                 "/v1/tenant/routes/reassign");
@@ -106,6 +107,8 @@ impl Controller {
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
         struct UsageInput {tenant_id:String}
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
+        struct DeviceInviteRevoke {tenant_id:String,invitation_id:String}
+        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
         struct ReservationAction {tenant_id:String,route_id:String}
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
         struct RouteReassign {tenant_id:String,route_id:String,agent_id:String,site_id:String}
@@ -117,7 +120,8 @@ impl Controller {
             "/v1/invitations"=>parse::<InvitationInput>(body)
                 .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
                 .and_then(|p|registry.issue_invitation(&p.tenant_id,p.ttl_seconds)
-                    .map(|t|json!({"invitation":t.token,"expiresUnix":t.expires_unix}))
+                    .map(|t|json!({"invitation":t.token,"invitationId":t.id,
+                            "expiresUnix":t.expires_unix}))
                     .map_err(map_network_error)),
             "/v1/agents/enroll"=>parse::<EnrollInput>(body)
                 .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
@@ -147,8 +151,28 @@ impl Controller {
                         (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
                     accounts.authorize(auth,&p.tenant_id,Capability::ManageDevices)?;
                     registry.issue_invitation(&p.tenant_id,p.ttl_seconds)
-                        .map(|t|json!({"invitation":t.token,"expiresUnix":t.expires_unix}))
+                        .map(|t|json!({"invitation":t.token,"invitationId":t.id,
+                            "expiresUnix":t.expires_unix}))
                         .map_err(map_network_error)
+                }),
+            "/v1/tenant/invitations/list"=>parse::<InventoryInput>(body)
+                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
+                .and_then(|p|{
+                    let accounts=self.accounts.as_ref().ok_or(
+                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
+                    accounts.authorize(auth,&p.tenant_id,Capability::ManageDevices)?;
+                    registry.list_pending_device_invitations(&p.tenant_id,p.limit,p.offset)
+                        .map(|items|json!({"items":items,"limit":p.limit,"offset":p.offset}))
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/invitations/revoke"=>parse::<DeviceInviteRevoke>(body)
+                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
+                .and_then(|p|{
+                    let accounts=self.accounts.as_ref().ok_or(
+                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
+                    accounts.authorize(auth,&p.tenant_id,Capability::ManageDevices)?;
+                    registry.revoke_device_invitation(&p.tenant_id,&p.invitation_id)
+                        .map(|_|json!({"revoked":true})).map_err(map_network_error)
                 }),
             "/v1/tenant/routes/reserve"=>parse::<RouteInput>(body)
                 .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
@@ -508,6 +532,28 @@ mod tests{
             "tenantId":first.id,"ttlSeconds":120
         }));
         assert_eq!(status,StatusCode::FORBIDDEN);
+        let (status,cancel_me)=call("/v1/tenant/invitations",&owner_auth,json!({
+            "tenantId":first.id,"ttlSeconds":120
+        }));
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(call("/v1/tenant/invitations/list",&viewer_auth,page.clone()).0,
+            StatusCode::FORBIDDEN);
+        let (status,found)=call("/v1/tenant/invitations/list",&owner_auth,page.clone());
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(found["items"][0]["id"],cancel_me["invitationId"]);
+        assert!(!found.to_string().contains(cancel_me["invitation"].as_str().unwrap()));
+        assert_eq!(call("/v1/tenant/invitations/revoke",&viewer_auth,json!({
+            "tenantId":first.id,"invitationId":cancel_me["invitationId"]
+        })).0,StatusCode::FORBIDDEN);
+        assert_eq!(call("/v1/tenant/invitations/revoke",&owner_auth,json!({
+            "tenantId":second.id,"invitationId":cancel_me["invitationId"]
+        })).0,StatusCode::UNAUTHORIZED);
+        assert_eq!(call("/v1/tenant/invitations/revoke",&owner_auth,json!({
+            "tenantId":first.id,"invitationId":cancel_me["invitationId"]
+        })).0,StatusCode::OK);
+        assert_eq!(command(&api,"/v1/agents/enroll",false,json!({
+            "invitation":cancel_me["invitation"],"publicKeyHex":"22".repeat(32)
+        })).0,StatusCode::BAD_REQUEST);
         let (status,device_invite)=call("/v1/tenant/invitations",&owner_auth,json!({
             "tenantId":first.id,"ttlSeconds":120
         }));
