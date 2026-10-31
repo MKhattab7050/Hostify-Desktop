@@ -62,7 +62,8 @@ impl Controller {
             matches!(path,"/v1/agents/enroll"|"/v1/agents/proof");
         let tenant_action=method==Method::POST &&
             matches!(path,"/v1/tenant/invitations"|"/v1/tenant/routes/reserve"|
-                "/v1/tenant/agents/revoke");
+                "/v1/tenant/agents/revoke"|"/v1/tenant/agents/list"|
+                "/v1/tenant/routes/list");
         if !public_action && !tenant_action && !self.authorized(auth) {
             return (StatusCode::UNAUTHORIZED,json!({"error":"unauthorized"}));
         }
@@ -94,6 +95,8 @@ impl Controller {
         }
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
         struct RevokeInput {tenant_id:String,agent_id:String}
+        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
+        struct ListInput {tenant_id:String,limit:i64,offset:i64}
         let response:Result<Value,(StatusCode,&'static str)>=match path {
             "/v1/tenants"=>parse::<TenantInput>(body)
                 .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
@@ -143,6 +146,26 @@ impl Controller {
                     accounts.authorize(auth,&p.tenant_id,Capability::ManageSites)?;
                     registry.reserve_hostname(&p.tenant_id,&p.agent_id,&p.site_id,&p.label)
                         .map(|route|json!({"route":route,"publiclyRoutable":false}))
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/agents/list"=>parse::<ListInput>(body)
+                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
+                .and_then(|p|{
+                    let accounts=self.accounts.as_ref().ok_or(
+                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
+                    accounts.authorize(auth,&p.tenant_id,Capability::View)?;
+                    registry.list_tenant_agents(&p.tenant_id,p.limit,p.offset)
+                        .map(|agents|json!({"agents":agents}))
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/routes/list"=>parse::<ListInput>(body)
+                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
+                .and_then(|p|{
+                    let accounts=self.accounts.as_ref().ok_or(
+                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
+                    accounts.authorize(auth,&p.tenant_id,Capability::View)?;
+                    registry.list_tenant_routes(&p.tenant_id,p.limit,p.offset)
+                        .map(|routes|json!({"routes":routes,"publiclyRoutable":false}))
                         .map_err(map_network_error)
                 }),
             "/v1/tenant/agents/revoke"=>parse::<RevokeInput>(body)
@@ -404,11 +427,32 @@ mod tests{
         assert_eq!(status,StatusCode::OK);
         assert_eq!(reserved["publiclyRoutable"],false);
         assert_eq!(reserved["route"]["hostname"],"team-home.example.test");
+        let inventory=json!({"tenantId":first.id,"limit":10,"offset":0});
+        let (status,agents)=call("/v1/tenant/agents/list",&viewer_auth,inventory.clone());
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(agents["agents"].as_array().unwrap().len(),1);
+        assert_eq!(agents["agents"][0]["id"],agent["id"]);
+        let (status,routes)=call("/v1/tenant/routes/list",&viewer_auth,inventory.clone());
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(routes["publiclyRoutable"],false);
+        assert_eq!(routes["routes"].as_array().unwrap().len(),1);
+        let (status,_) = call("/v1/tenant/agents/list",&viewer_auth,
+            json!({"tenantId":second.id,"limit":10,"offset":0}));
+        assert_eq!(status,StatusCode::UNAUTHORIZED);
+        let (status,_) = call("/v1/tenant/routes/list",&owner_auth,
+            json!({"tenantId":first.id,"limit":101,"offset":0}));
+        assert_eq!(status,StatusCode::BAD_REQUEST);
         let (status,revoke)=call("/v1/tenant/agents/revoke",&owner_auth,json!({
             "tenantId":first.id,"agentId":agent["id"]
         }));
         assert_eq!(status,StatusCode::OK);
         assert_eq!(revoke["revoked"],true);
+        let (status,agents)=call("/v1/tenant/agents/list",&viewer_auth,inventory.clone());
+        assert_eq!(status,StatusCode::OK);
+        assert!(agents["agents"].as_array().unwrap().is_empty());
+        let (status,routes)=call("/v1/tenant/routes/list",&viewer_auth,inventory);
+        assert_eq!(status,StatusCode::OK);
+        assert!(routes["routes"].as_array().unwrap().is_empty());
         let (status,_)=call("/v1/auth/logout",&owner_auth,json!({}));
         assert_eq!(status,StatusCode::OK);
         let (status,_)=call("/v1/auth/me",&owner_auth,json!({"tenantId":first.id}));
