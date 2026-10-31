@@ -121,6 +121,11 @@ impl NetworkControlPlane{
         challenge:&str,signature:&str)->Result<()>{
         Ok(self.registry.verify_route_signature(tenant,agent,route,challenge,signature)?)
     }
+    pub fn rename_device(&mut self,token:&str,tenant:&str,
+        agent:&str,display_name:&str)->Result<()>{
+        self.accounts.authorize(token,tenant,Capability::ManageDevices)?;
+        Ok(self.registry.rename_agent(tenant,agent,display_name)?)
+    }
     pub fn revoke_device(&mut self,token:&str,tenant:&str,agent:&str)->Result<()>{
         self.accounts.authorize(token,tenant,Capability::ManageDevices)?;
         Ok(self.registry.revoke_agent(tenant,agent)?)
@@ -169,6 +174,11 @@ mod tests{
         assert!(!usage.publicly_routable);
         assert!(service.tenant_usage(&owner.token,&other.id).is_err());
         assert_eq!(service.list_devices(&viewer.token,&tenant.id,10,0).unwrap().len(),1);
+        assert!(service.rename_device(&viewer.token,&tenant.id,&agent.id,"Home PC").is_err());
+        assert!(service.rename_device(&owner.token,&other.id,&agent.id,"Foreign PC").is_err());
+        service.rename_device(&owner.token,&tenant.id,&agent.id,"Home PC").unwrap();
+        assert_eq!(service.list_devices(&viewer.token,&tenant.id,10,0).unwrap()[0]
+            .display_name.as_deref(),Some("Home PC"));
         assert_eq!(service.list_routes(&viewer.token,&tenant.id,10,0).unwrap().len(),1);
         assert!(service.list_devices(&viewer.token,&other.id,10,0).is_err());
         assert!(service.list_routes(&owner.token,&other.id,10,0).is_err());

@@ -81,6 +81,9 @@ pub struct Agent {
     pub tenant_id: String,
     pub public_key_hex: String,
     pub created_at: String,
+    /// Editable user-facing label; not part of cryptographic identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -185,6 +188,12 @@ impl Registry {
             CREATE TABLE IF NOT EXISTS network_agents(
                 id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES network_tenants(id),
                 public_key_hex TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS network_agent_metadata(
+                agent_id TEXT PRIMARY KEY REFERENCES network_agents(id),
+                tenant_id TEXT NOT NULL REFERENCES network_tenants(id),
+                display_name TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS network_routes(
                 id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES network_tenants(id),
@@ -308,15 +317,59 @@ impl Registry {
             return Err(NetworkError::Invalid);
         }
         let mut stmt=self.db.prepare(
-            "SELECT id,tenant_id,public_key_hex,created_at FROM network_agents
-             WHERE tenant_id=?1 AND revoked_at IS NULL
-             ORDER BY created_at DESC,id DESC LIMIT ?2 OFFSET ?3"
+            "SELECT a.id,a.tenant_id,a.public_key_hex,a.created_at,m.display_name
+             FROM network_agents a
+             LEFT JOIN network_agent_metadata m
+               ON m.agent_id=a.id AND m.tenant_id=a.tenant_id
+             WHERE a.tenant_id=?1 AND a.revoked_at IS NULL
+             ORDER BY a.created_at DESC,a.id DESC LIMIT ?2 OFFSET ?3"
         )?;
         let items=stmt.query_map(params![tenant,limit,offset],|row|Ok(Agent{
             id:row.get(0)?,tenant_id:row.get(1)?,
-            public_key_hex:row.get(2)?,created_at:row.get(3)?
+            public_key_hex:row.get(2)?,created_at:row.get(3)?,
+            display_name:row.get(4)?,
         }))?.collect::<std::result::Result<Vec<_>,_>>()?;
         Ok(items)
+    }
+    /// Human-friendly metadata is not used for tenant authorization, keys,
+    /// signatures or routing. Keep the agent UUID stable across renames.
+    /// Caller must enforce ManageDevices before reaching this registry method.
+    pub fn rename_agent(&mut self,tenant:&str,agent:&str,name:&str)->Result<()>{
+        require_uuid(tenant)?;
+        require_uuid(agent)?;
+        let display=name.trim();
+        if display.is_empty() || display.chars().count()>48 ||
+            display.len()>160 || display.chars().any(|c|
+                c.is_control() || matches!(c,'<'|'>'|'\\')) {
+            return Err(NetworkError::Invalid);
+        }
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let owned:i64=tx.query_row(
+            "SELECT COUNT(*) FROM network_agents a
+             JOIN network_tenants t ON t.id=a.tenant_id
+             WHERE a.id=?1 AND a.tenant_id=?2
+             AND a.revoked_at IS NULL AND t.state='active'",
+            params![agent,tenant],|r|r.get(0))?;
+        if owned!=1{return Err(NetworkError::Ownership);}
+        let current:Option<String>=tx.query_row(
+            "SELECT display_name FROM network_agent_metadata
+             WHERE agent_id=?1 AND tenant_id=?2",
+            params![agent,tenant],|r|r.get(0)).optional()?;
+        if current.as_deref()==Some(display){return Ok(());}
+        let now=Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT INTO network_agent_metadata(agent_id,tenant_id,display_name,updated_at)
+             VALUES(?1,?2,?3,?4)
+             ON CONFLICT(agent_id) DO UPDATE SET
+                display_name=excluded.display_name,updated_at=excluded.updated_at
+             WHERE tenant_id=excluded.tenant_id",
+            params![agent,tenant,display,&now])?;
+        tx.execute(
+            "INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+             VALUES(?1,?2,'agent_renamed',?3)",
+            params![tenant,&now,agent])?;
+        tx.commit()?;
+        Ok(())
     }
     /// Only reserved/active routes on non-revoked devices are shown. Revoked
     /// device rows are retained for auditing but never treated as live sites.
@@ -418,7 +471,7 @@ impl Registry {
         tx.execute("INSERT INTO network_audit(tenant_id,ts,action,subject_id)
             VALUES(?1,?2,'agent_enrolled',?3)",params![&tenant,&created_at,&id])?;
         tx.commit()?;
-        Ok(Agent{id,tenant_id:tenant,public_key_hex:key,created_at})
+        Ok(Agent{id,tenant_id:tenant,public_key_hex:key,created_at,display_name:None})
     }
     /// This reserves a globally unique label in a non-routable state.
     /// Real routing requires a separate authenticated proof-of-possession
@@ -881,5 +934,50 @@ mod tests{
         registry.db.execute(
             "UPDATE network_tenants SET state='suspended' WHERE id=?1",[&a.id]).unwrap();
         assert!(registry.tenant_usage(&a.id).is_err());
+    }
+    #[test]
+    fn device_rename_is_tenant_scoped_audited_and_not_an_identity_change(){
+        let mut registry=Registry::memory("example.test").unwrap();
+        let a=registry.create_tenant("A").unwrap();
+        let b=registry.create_tenant("B").unwrap();
+        let ia=registry.issue_invitation(&a.id,300).unwrap();
+        let device=registry.enroll_agent(&ia.token,&key(65)).unwrap();
+        assert!(device.display_name.is_none());
+        assert!(registry.rename_agent(&b.id,&device.id,"Office PC").is_err());
+        assert!(registry.rename_agent(&a.id,&device.id,"").is_err());
+        assert!(registry.rename_agent(&a.id,&device.id,"<script>").is_err());
+        assert!(registry.rename_agent(&a.id,&device.id,"evil\nname").is_err());
+        registry.rename_agent(&a.id,&device.id,"  Office PC  ").unwrap();
+        let renamed=registry.list_tenant_agents(&a.id,10,0).unwrap();
+        assert_eq!(renamed[0].display_name.as_deref(),Some("Office PC"));
+        assert_eq!(renamed[0].public_key_hex,device.public_key_hex);
+        assert_eq!(renamed[0].id,device.id);
+        assert!(registry.list_tenant_agents(&b.id,10,0).unwrap().is_empty());
+        registry.rename_agent(&a.id,&device.id,"Office PC").unwrap();
+        let audits:i64=registry.db.query_row(
+            "SELECT COUNT(*) FROM network_audit WHERE tenant_id=?1 AND action='agent_renamed'",
+            [&a.id],|r|r.get(0)).unwrap();
+        assert_eq!(audits,1);
+        registry.revoke_agent(&a.id,&device.id).unwrap();
+        assert!(registry.rename_agent(&a.id,&device.id,"After revocation").is_err());
+        assert!(registry.list_tenant_agents(&a.id,10,0).unwrap().is_empty());
+    }
+    #[test]
+    fn device_rename_rolls_back_when_audit_is_unavailable(){
+        let mut registry=Registry::memory("example.test").unwrap();
+        let a=registry.create_tenant("A").unwrap();
+        let invitation=registry.issue_invitation(&a.id,300).unwrap();
+        let device=registry.enroll_agent(&invitation.token,&key(66)).unwrap();
+        registry.db.execute_batch(
+            "CREATE TRIGGER deny_rename_audit BEFORE INSERT ON network_audit
+             WHEN NEW.action='agent_renamed'
+             BEGIN SELECT RAISE(FAIL,'audit failed'); END;"
+        ).unwrap();
+        assert!(registry.rename_agent(&a.id,&device.id,"Home").is_err());
+        assert!(registry.list_tenant_agents(&a.id,10,0).unwrap()[0].display_name.is_none());
+        registry.db.execute_batch("DROP TRIGGER deny_rename_audit").unwrap();
+        registry.rename_agent(&a.id,&device.id,"Home").unwrap();
+        assert_eq!(registry.list_tenant_agents(&a.id,10,0).unwrap()[0].display_name.as_deref(),
+            Some("Home"));
     }
 }
