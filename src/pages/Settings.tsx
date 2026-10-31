@@ -115,7 +115,7 @@ export function Settings() {
         </Section>
         <Section id="about" title="About">
           <Card className="p-4"><p className="font-medium">Hostify {engine?.version}</p>
-            <p className="mt-1 text-ink2">Hosts static websites from your Windows PC. Uses Caddy and cloudflared, both under the Apache License 2.0. Their licence texts are included in the install folder.</p></Card>
+            <p className="mt-1 text-ink2">Hosts websites and applications (Static, Node.js, PHP) with MySQL databases from your Windows PC. Uses Caddy and cloudflared, both under the Apache License 2.0. Their licence texts are included in the install folder.</p></Card>
         </Section>
       </div>
     </div>

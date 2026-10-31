@@ -75,7 +75,7 @@ impl Manager {
  if !entries.is_empty(){if !fs::canonicalize(&data)?.starts_with(fs::canonicalize(root.join("mysql"))?){bail!("MySQL data points outside its managed directory.")}fs::remove_dir_all(&data)?;fs::create_dir(&data)?;restrict(&data,true)?;}
  let port=(3307..=65535).find(|p|crate::port_available(*p)).ok_or_else(||anyhow!("No free MySQL port is available."))?;
  let base=server.parent().and_then(Path::parent).ok_or_else(||anyhow!("Invalid MySQL runtime."))?;let ini=root.join("mysql/my.ini");atomic(&ini,&generate_ini(base,root,port)?)?;
- let init=restricted_temp(root,&format!("ALTER USER 'root'@'localhost' IDENTIFIED BY '{password}';\n"))?;
+ let init=restricted_temp(root,&format!("ALTER USER 'root'@'localhost' IDENTIFIED BY '{password}';\nCREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '{password}';\nGRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;\n"))?;
  let output=command(&server).arg(format!("--defaults-file={}",ini.display())).arg("--initialize").arg("--log-error-verbosity=1").arg(format!("--init-file={}",init.0.display())).output()?;
  if !output.status.success(){bail!("MySQL initialization failed ({}): {} {}",output.status,self.redact(&String::from_utf8_lossy(&output.stderr)),self.error_log())}
  if fs::read_to_string(root.join("logs/mysql-error.log")).unwrap_or_default().contains(&password){bail!("MySQL wrote a credential to its error log. Setup was not completed.")}
@@ -87,7 +87,7 @@ impl Manager {
  let c=self.required_config()?;let options=restricted_temp(&self.store.root,&format!("[client]\nuser={user}\npassword={password}\nhost=127.0.0.1\nport={}\nprotocol=TCP\n",c.port))?;
  let mut cmd=command(&self.executable(&c,tool)?);cmd.arg(format!("--defaults-extra-file={}",options.0.display()));if let Some(db)=database{cmd.arg(format!("--database={db}"));}Ok((cmd,options))
  }
- fn run_sql(&self,user:&str,password:&str,database:Option<&str>,sql:&str)->Result<String>{let(mut cmd,_guard)=self.client("mysql",user,password,database)?;cmd.args(["--batch","--skip-column-names","--raw","--connect-timeout=5"]);self.run_input(cmd,sql.as_bytes(),password)}
+ pub fn run_sql(&self,user:&str,password:&str,database:Option<&str>,sql:&str)->Result<String>{let(mut cmd,_guard)=self.client("mysql",user,password,database)?;cmd.args(["--batch","--skip-column-names","--raw","--connect-timeout=5"]);self.run_input(cmd,sql.as_bytes(),password)}
  fn run_input(&self,mut cmd:Command,input:impl Read,password:&str)->Result<String>{
  let mut child=cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
  let stdout=child.stdout.take().unwrap();let stderr=child.stderr.take().unwrap();
