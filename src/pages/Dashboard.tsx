@@ -8,6 +8,7 @@ import { Button, Card, Empty, IconButton, Meter, PageHeader, Pill, Skeleton, Sta
 import { SignalPath } from "../components/SignalPath";
 import { GuardianCard } from "../components/GuardianCard";
 import { TimeMachineCard } from "../components/TimeMachineCard";
+import { AppCatalogCard } from "../components/AppCatalogCard";
 import { useSiteActions } from "../components/siteActions";
 
 function Tile({ label, children, sub }: { label: string; children: ReactNode; sub?: string }) {
@@ -37,6 +38,7 @@ export function Dashboard() {
       </PageHeader>
 
       {engine && <ComponentsBanner />}
+      <AppCatalogCard />
 
       {sites.length > 0 && (
         <Card className="grid grid-cols-5 gap-px overflow-hidden bg-line max-[1100px]:grid-cols-3">
