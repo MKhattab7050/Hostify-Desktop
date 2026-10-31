@@ -139,8 +139,8 @@ impl Registry {
             CREATE TABLE IF NOT EXISTS network_routes(
                 id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES network_tenants(id),
                 agent_id TEXT NOT NULL REFERENCES network_agents(id), site_id TEXT NOT NULL,
-                hostname TEXT NOT NULL UNIQUE, state TEXT NOT NULL DEFAULT 'active'
-                    CHECK(state IN ('active','disabled')), created_at TEXT NOT NULL
+                hostname TEXT NOT NULL UNIQUE, state TEXT NOT NULL DEFAULT 'reserved'
+                    CHECK(state IN ('reserved','active','disabled')), created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS network_audit(
                 id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT NOT NULL,
@@ -234,8 +234,10 @@ impl Registry {
         tx.commit()?;
         Ok(Agent{id,tenant_id:tenant,public_key_hex:key,created_at})
     }
-    /// This reserves a globally unique label, but it does NOT create a DNS
-    /// record or grant the agent permission to serve traffic.
+    /// This reserves a globally unique label in a non-routable state.
+    /// Real routing requires a separate authenticated proof-of-possession
+    /// gateway and explicit provisioning approval, not implemented here.
+    /// No DNS or tunnel mutation occurs.
     pub fn reserve_hostname(&mut self,tenant:&str,agent:&str,site:&str,label:&str)->Result<Route>{
         require_uuid(tenant)?;require_uuid(agent)?;require_uuid(site)?;
         let label=normalize_label(label)?;
@@ -249,7 +251,7 @@ impl Registry {
             [agent],|r|r.get(0)).optional()?;
         if agent_owner.as_deref()!=Some(tenant){return Err(NetworkError::Ownership);}
         let count:i64=tx.query_row(
-            "SELECT COUNT(*) FROM network_routes WHERE tenant_id=?1 AND state='active'",
+            "SELECT COUNT(*) FROM network_routes WHERE tenant_id=?1 AND state IN ('reserved','active')",
             [tenant],|r|r.get(0))?;
         if count>=max_hostnames {return Err(NetworkError::Quota);}
         let id=Uuid::new_v4().to_string();
@@ -271,6 +273,8 @@ impl Registry {
         Ok(Route{id,tenant_id:tenant.into(),agent_id:agent.into(),site_id:site.into(),hostname})
     }
     /// Disabled/revoked agents must never appear as a routable destination.
+    /// Only routes explicitly activated by a future mTLS/Ed25519 gateway
+    /// may be returned here. Newly enrolled devices remain non-routable.
     pub fn lookup_active_route(&self,hostname:&str)->Result<Option<Route>>{
         let h=hostname.trim().to_ascii_lowercase();
         let route=self.db.query_row(
@@ -339,7 +343,8 @@ mod tests{
         let route=registry.reserve_hostname(&a.id,&da.id,&Uuid::new_v4().to_string(),"ALPHA-APP").unwrap();
         assert_eq!(route.hostname,"alpha-app.example.test");
         assert!(registry.reserve_hostname(&b.id,&db.id,&Uuid::new_v4().to_string(),"alpha-app").is_err());
-        assert!(registry.lookup_active_route(&route.hostname).unwrap().is_some());
+        // Enrollment alone is not key possession proof. No route is active.
+        assert!(registry.lookup_active_route(&route.hostname).unwrap().is_none());
         assert!(registry.revoke_agent(&b.id,&da.id).is_err());
         registry.revoke_agent(&a.id,&da.id).unwrap();
         assert!(registry.lookup_active_route(&route.hostname).unwrap().is_none());
@@ -365,7 +370,11 @@ mod tests{
             (t.id,d.id,route.hostname)
         };
         let mut r=Registry::open(&path,"example.test").unwrap();
-        assert_eq!(r.lookup_active_route(&hostname).unwrap().unwrap().tenant_id,tenant);
+        let reserved_count:i64=r.db.query_row(
+            "SELECT COUNT(*) FROM network_routes WHERE hostname=?1 AND state='reserved'",
+            [&hostname],|row|row.get(0)).unwrap();
+        assert_eq!(reserved_count,1);
+        assert!(r.lookup_active_route(&hostname).unwrap().is_none());
         r.revoke_agent(&tenant,&agent).unwrap();
         assert!(r.lookup_active_route(&hostname).unwrap().is_none());
     }
