@@ -10,6 +10,7 @@ import { GuardianCard } from "../components/GuardianCard";
 import { TimeMachineCard } from "../components/TimeMachineCard";
 import { AppCatalogCard } from "../components/AppCatalogCard";
 import { DoctorCard } from "../components/DoctorCard";
+import { SecurityCenterCard } from "../components/SecurityCenterCard";
 import { useSiteActions } from "../components/siteActions";
 
 function Tile({ label, children, sub }: { label: string; children: ReactNode; sub?: string }) {
@@ -89,6 +90,7 @@ export function Dashboard() {
       <GuardianCard sites={sites} />
       <TimeMachineCard sites={sites} />
       <DoctorCard sites={sites} />
+      <SecurityCenterCard />
 
       <div className="grid grid-cols-[1.1fr_1fr] gap-3 max-[1100px]:grid-cols-1">
         <Card className="p-4">
