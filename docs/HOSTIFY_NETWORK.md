@@ -41,6 +41,8 @@ The real `niga.online` zone and customer-owned sites are out of scope for develo
 
 ## Implemented registry invariants
 
+A central-only, tenant-scoped security audit feed is available through `list_security_audit`. Only an authenticated owner or administrator with `ManageUsers` permission can read it. Queries use tenant-filtered, newest-first pages (1–100 entries). Events include action names, timestamps and internal UUIDs, **never bearer tokens, passwords or member emails**. The feed is not exposed through the public Internet or the customer desktop IPC.
+
 Tenant-scoped inventory is available to the central account service through `list_devices` and `list_routes`. Both enforce a valid session with `View` permission, and SQLite queries are tenant-filtered, paginated (1–100 results), and omit revoked devices and disabled routes. These are **internal Rust APIs**, not public HTTP endpoints or evidence that a site is reachable.
 
 The central SQLite registry pins its canonical base domain on first initialization. A restart with another domain is rejected, and migration of an older database verifies all existing hostname reservations before pinning. This protects customer namespace ownership; it does **not** provide DNS or public routing.
