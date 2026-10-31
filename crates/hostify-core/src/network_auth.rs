@@ -78,6 +78,15 @@ pub struct TenantMember {
     pub status:String,
     pub created_at:String,
 }
+/// A user's own active session inventory. No bearer token or digest is returned.
+#[derive(Debug,Clone,Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct ActiveSession {
+    pub session_id:String,
+    pub created_at:String,
+    pub expires_unix:i64,
+    pub is_current:bool,
+}
 /// A token returned exactly once. Only the SHA-256 digest is persisted.
 pub struct Session {
     pub token:String,
@@ -338,6 +347,59 @@ impl Accounts{
         self.db.execute("UPDATE network_sessions SET revoked_at=?1
             WHERE token_hash=?2 AND revoked_at IS NULL",
             params![Utc::now().to_rfc3339(),digest(token)])?;
+        Ok(())
+    }
+    /// A user can inspect only their own active sessions. Session token hashes
+    /// are read solely to mark the current session and never serialized.
+    pub fn list_sessions(&self,token:&str,tenant:&str,limit:i64,offset:i64)->Result<Vec<ActiveSession>>{
+        let actor=self.authorize(token,tenant,Capability::View)?;
+        if !(1..=100).contains(&limit)||!(0..=100_000).contains(&offset){
+            return Err(AccountError::Invalid);
+        }
+        let current_hash=digest(token);
+        let mut stmt=self.db.prepare(
+            "SELECT id,created_at,expires_unix,token_hash FROM network_sessions
+             WHERE tenant_id=?1 AND user_id=?2
+             AND revoked_at IS NULL AND expires_unix>?3
+             ORDER BY created_at DESC,id DESC LIMIT ?4 OFFSET ?5")?;
+        let rows=stmt.query_map(
+            params![tenant,&actor.user_id,Utc::now().timestamp(),limit,offset],
+            |r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+                r.get::<_,i64>(2)?,r.get::<_,String>(3)?)))?;
+        let mut items=Vec::new();
+        for row in rows{
+            let (session_id,created_at,expires_unix,hash)=row?;
+            items.push(ActiveSession{
+                session_id,created_at,expires_unix,is_current:hash==current_hash,
+            });
+        }
+        Ok(items)
+    }
+    /// A member may revoke any of their own active sessions, including the
+    /// current one. Revocation and audit event must commit together.
+    pub fn revoke_session(&mut self,token:&str,tenant:&str,session_id:&str)->Result<()>{
+        let actor=self.authorize(token,tenant,Capability::View)?;
+        require_uuid(session_id)?;
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let active:i64=tx.query_row(
+            "SELECT COUNT(*) FROM network_sessions
+             WHERE user_id=?1 AND tenant_id=?2 AND token_hash=?3
+               AND revoked_at IS NULL AND expires_unix>?4",
+            params![&actor.user_id,tenant,digest(token),Utc::now().timestamp()],
+            |r|r.get(0))?;
+        if active!=1{return Err(AccountError::Authentication);}
+        let now=Utc::now().to_rfc3339();
+        let changed=tx.execute(
+            "UPDATE network_sessions SET revoked_at=?1
+             WHERE id=?2 AND user_id=?3 AND tenant_id=?4
+               AND revoked_at IS NULL AND expires_unix>?5",
+            params![&now,session_id,&actor.user_id,tenant,Utc::now().timestamp()])?;
+        if changed!=1{return Err(AccountError::Unavailable);}
+        tx.execute(
+            "INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+             VALUES(?1,?2,'session_revoked',?3)",
+            params![tenant,&now,session_id])?;
+        tx.commit()?;
         Ok(())
     }
     /// Change the current member's password only after checking the existing
@@ -832,5 +894,58 @@ mod tests {
         acc.db.execute_batch("DROP TRIGGER deny_password_audit").unwrap();
         acc.change_password(&session.token,&tenant,
             "initial-owner-password","replacement-owner-password").unwrap();
+    }
+    #[test]
+    fn active_session_inventory_and_revocation_are_self_scoped_and_secret_free(){
+        let (_tmp,tenant,other,mut acc)=init();
+        acc.bootstrap_owner(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        acc.bootstrap_owner(&other,"other@site.test","valid-other-password").unwrap();
+        let first=acc.sign_in(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        let second=acc.sign_in(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        let foreign=acc.sign_in(&other,"other@site.test","valid-other-password").unwrap();
+        let rows=acc.list_sessions(&first.token,&tenant,10,0).unwrap();
+        assert_eq!(rows.len(),2);
+        assert_eq!(rows.iter().filter(|s|s.is_current).count(),1);
+        assert!(acc.list_sessions(&first.token,&other,10,0).is_err());
+        assert!(matches!(acc.list_sessions(&first.token,&tenant,101,0),Err(AccountError::Invalid)));
+        assert_eq!(acc.list_sessions(&first.token,&tenant,1,0).unwrap().len(),1);
+        assert_eq!(acc.list_sessions(&first.token,&tenant,1,1).unwrap().len(),1);
+        let serialized=serde_json::to_string(&rows).unwrap();
+        assert!(!serialized.contains(&first.token));
+        assert!(!serialized.contains(&second.token));
+        assert!(!serialized.contains("tokenHash"));
+        let foreign_session=acc.list_sessions(&foreign.token,&other,10,0).unwrap();
+        assert!(acc.revoke_session(&first.token,&tenant,&foreign_session[0].session_id).is_err());
+        let other_id=rows.iter().find(|s|!s.is_current).unwrap().session_id.clone();
+        acc.revoke_session(&first.token,&tenant,&other_id).unwrap();
+        assert!(acc.authorize(&second.token,&tenant,Capability::View).is_err());
+        assert!(acc.authorize(&first.token,&tenant,Capability::View).is_ok());
+        assert_eq!(acc.list_sessions(&first.token,&tenant,10,0).unwrap().len(),1);
+        let current_id=acc.list_sessions(&first.token,&tenant,10,0).unwrap()[0].session_id.clone();
+        acc.revoke_session(&first.token,&tenant,&current_id).unwrap();
+        assert!(acc.authorize(&first.token,&tenant,Capability::View).is_err());
+        assert!(acc.authorize(&foreign.token,&other,Capability::View).is_ok());
+        let audits:i64=acc.db.query_row(
+            "SELECT COUNT(*) FROM network_audit
+             WHERE tenant_id=?1 AND action='session_revoked'",
+            [&tenant],|r|r.get(0)).unwrap();
+        assert_eq!(audits,2);
+    }
+    #[test]
+    fn session_revoke_audit_failure_leaves_session_valid(){
+        let (_tmp,tenant,_other,mut acc)=init();
+        acc.bootstrap_owner(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        let actor=acc.sign_in(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        let session_id=acc.list_sessions(&actor.token,&tenant,10,0).unwrap()[0].session_id.clone();
+        acc.db.execute_batch(
+            "CREATE TRIGGER deny_revoke_audit BEFORE INSERT ON network_audit
+             WHEN NEW.action='session_revoked'
+             BEGIN SELECT RAISE(FAIL,'audit failed'); END;"
+        ).unwrap();
+        assert!(acc.revoke_session(&actor.token,&tenant,&session_id).is_err());
+        assert!(acc.authorize(&actor.token,&tenant,Capability::View).is_ok());
+        acc.db.execute_batch("DROP TRIGGER deny_revoke_audit").unwrap();
+        acc.revoke_session(&actor.token,&tenant,&session_id).unwrap();
+        assert!(acc.authorize(&actor.token,&tenant,Capability::View).is_err());
     }
 }
