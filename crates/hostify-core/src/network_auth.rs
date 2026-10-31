@@ -236,7 +236,10 @@ impl Accounts{
         if status!="active"{return Err(AccountError::Authentication);}
         if locked>now{return Err(AccountError::Locked);}
         if !correct_password(password,&salt,&stored){
-            let next=failures.saturating_add(1);
+            // An expired lockout starts a fresh failure window. Otherwise a
+            // single wrong password after 15 minutes would immediately lock
+            // the account again because failed_attempts remained at five.
+            let next=if locked>0 && locked<=now {1} else {failures.saturating_add(1)};
             let until=if next>=MAX_FAILURES {now+LOCK_SECONDS}else{0};
             self.db.execute("UPDATE network_users SET failed_attempts=?1,locked_until_unix=?2
                 WHERE id=?3",params![next,until,id])?;
@@ -407,6 +410,24 @@ mod tests {
             assert!(matches!(canonical_email(email),Err(AccountError::Invalid)));
         }
         assert_eq!(canonical_email("  USER@EXAMPLE.COM ").unwrap(),"user@example.com");
+    }
+    #[test]
+    fn expired_lockout_resets_failure_counter_instead_of_instant_relock(){
+        let (_tmp,tenant,_other,mut accounts)=init();
+        accounts.bootstrap_owner(&tenant,"owner@example.com","correct-long-password").unwrap();
+        for _ in 0..5 {
+            assert!(accounts.sign_in(&tenant,"owner@example.com","wrong-password").is_err());
+        }
+        accounts.db.execute(
+            "UPDATE network_users SET locked_until_unix=?1 WHERE tenant_id=?2",
+            params![Utc::now().timestamp()-1,tenant]).unwrap();
+        assert!(matches!(accounts.sign_in(&tenant,"owner@example.com","wrong-password"),
+            Err(AccountError::Authentication)));
+        let state:(i64,i64)=accounts.db.query_row(
+            "SELECT failed_attempts,locked_until_unix FROM network_users WHERE tenant_id=?1",
+            [&tenant],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!(state,(1,0));
+        assert!(accounts.sign_in(&tenant,"owner@example.com","correct-long-password").is_ok());
     }
     #[test]
     fn lockout_fails_closed_without_disclosing_passwords(){
