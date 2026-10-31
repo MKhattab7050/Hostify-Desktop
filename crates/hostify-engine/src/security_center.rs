@@ -6,7 +6,6 @@ use anyhow::Result;
 use chrono::Utc;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::path::Path;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

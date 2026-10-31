@@ -324,6 +324,17 @@ await test("Hostify Doctor remains local and shows read-only deterministic findi
   await page.context().close();
 });
 
+await test("Security Center marks remote readiness unverified and never hides the need for real Windows checks", async () => {
+  const page=await open();
+  const audit=page.locator("section").filter({hasText:"Security Center"}).first();
+  await audit.getByText("Unverified",{exact:true}).waitFor();
+  await audit.getByRole("button",{name:"Evidence and next actions (1)"}).click();
+  await audit.getByText(/Credential rotation and off-device backup have not been verified/).waitFor();
+  await audit.getByRole("button",{name:"Rescan"}).click();
+  await audit.getByText(/No blockers does not mean production-ready/).waitFor();
+  await page.context().close();
+});
+
 await test("no uncaught errors in the browser console", async () => {
   const real = pageErrors.filter((e) => !/favicon/.test(e));
   assert.deepEqual(real, []);
