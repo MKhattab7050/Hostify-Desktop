@@ -800,6 +800,81 @@ impl Engine {
                     json!({"restartRequired":changed && site.status!="stopped","rebuildRequired":rebuild}),
                 )
             }
+            "publish_preflight" => {
+                let id = arg(&p, "siteId")?;
+                let site = s.site(id)?;
+                let mut checks = Vec::<Value>::new();
+                let mut blocked = Vec::<String>::new();
+
+                let dynamic = matches!(site.kind.as_str(), "node" | "php");
+                if dynamic {
+                    let config = s.app_config(id)?;
+                    let trusted = config.trusted_release.as_ref().is_some_and(|r|
+                        config.built_release.as_ref() == Some(r)
+                        && (config.pending_release.as_ref() == Some(r) || config.active_release.as_ref() == Some(r)));
+                    checks.push(json!({"key":"trusted-build","passed":trusted,
+                        "detail":if trusted {"Release was explicitly trusted and built."}
+                        else {"Trust and build this release before publishing."}}));
+                    if !trusted { blocked.push("Trust and build this application release first.".into()); }
+                    let runtime = site.runtime_version.as_deref().and_then(|v|
+                        s.runtimes.resolve(&site.kind, v).ok());
+                    let installed = runtime.is_some();
+                    checks.push(json!({"key":"runtime","passed":installed,
+                        "detail":if installed {"Compatible runtime is installed."} else {"Install an approved runtime before publishing."}}));
+                    if !installed { blocked.push("The selected runtime is not installed.".into()); }
+                }
+                if self.service && dynamic {
+                    blocked.push("Dynamic applications cannot run under the privileged Windows service.".into());
+                }
+                let caddy = s.detection.caddy_ready().await;
+                checks.push(json!({"key":"caddy","passed":caddy,"detail":if caddy {"Caddy ready."} else {"Install Caddy."}}));
+                if !caddy { blocked.push("Caddy is unavailable.".into()); }
+                let status = site.status.as_str();
+                let healthy = status == "running";
+                checks.push(json!({"key":"local-site","passed":healthy,
+                    "detail":if healthy {"Local service reports running."}
+                    else {"Start the website and verify the actual local HTTP response."}}));
+                if !healthy { blocked.push("The website is not running and healthy.".into()); }
+                let diagnostic = site.status_detail.as_deref().map(hostify_core::diagnostics::classify);
+                Ok(json!({"ready":blocked.is_empty(),"checks":checks,"blocked":blocked,
+                    "diagnostic":diagnostic,"mode":"shared"}))
+            }
+            "publish_record_event" => {
+                let id = arg(&p, "siteId")?;
+                s.site(id)?;
+                let step = arg(&p, "step")?;
+                let event = match step {
+                    "project" => "Project detected",
+                    "domain" => "Domain ownership preflight",
+                    "import" => "Application release imported",
+                    "runtime" => "Runtime selected or installed",
+                    "components" => "Hosting components checked",
+                    "database" => "Dedicated database setup",
+                    "build" => "Trusted application build",
+                    "start" => "Local health preflight",
+                    "dns-plan" => "DNS conflict and ownership preflight",
+                    "publish" => "Deployment submitted to shared engine",
+                    "diagnosis" => "Failure classified",
+                    _ => bail!("Unknown publish event step."),
+                };
+                let outcome = arg(&p, "outcome")?;
+                if !matches!(outcome, "running" | "done" | "failed") {
+                    bail!("Invalid publish event outcome.");
+                }
+                let severity = if outcome == "failed" { "error" } else { "info" };
+                // Persist only fixed descriptions, never project-provided text, tokens or secrets.
+                s.activity(severity, Some(id), &format!("Fast Publish: {event} ({outcome})"))?;
+                Ok(Value::Null)
+            }
+            "publish_diagnosis" => {
+                let id = arg(&p, "siteId")?;
+                let site = s.site(id)?;
+                let latest_error: Option<String> = s.db()?.query_row(
+                    "SELECT json_extract(snapshot_json,'$.error') FROM deployments WHERE site_id=?1 ORDER BY rowid DESC LIMIT 1",
+                    [id], |r| r.get(0)).ok().flatten();
+                let error = site.status_detail.or(latest_error).unwrap_or_else(|| "No error reported.".into());
+                Ok(json!(hostify_core::diagnostics::classify(&error)))
+            }
             "build_app" => crate::build::begin(self, &p).await,
             "cancel_build" => {
                 crate::build::cancel(self, arg(&p, "siteId")?).await?;
@@ -1369,6 +1444,18 @@ impl Engine {
                 let id = arg(&p, "siteId")?.to_owned();
                 let site = s.site(&id)?;
                 crate::build::refuse_busy(self, &id)?;
+                if matches!(site.kind.as_str(), "node" | "php") {
+                    if self.service {
+                        bail!("Dynamic publishing is disabled in privileged service mode.");
+                    }
+                    let config = s.app_config(&id)?;
+                    let trusted = config.trusted_release.as_ref().is_some_and(|r|
+                        config.built_release.as_ref() == Some(r)
+                        && (config.pending_release.as_ref() == Some(r) || config.active_release.as_ref() == Some(r)));
+                    if !trusted {
+                        bail!("Trust and build the release before publishing.");
+                    }
+                }
                 let h = hostname(&p)?.to_owned();
                 let consent = boolean(&p, "consentDns")?;
                 if !consent {

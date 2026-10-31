@@ -14,16 +14,19 @@ import {
   Plus,
   Server,
   Trash2,
+  Zap,
+  SlidersHorizontal,
 } from "lucide-react";
 import { useStore } from "../store";
 import { api, isTauri, onFileDrop } from "../lib/api";
 import { isActive, holdsResources } from "../lib/publish";
-import { Button, Card, Field, Modal, Pill, Select, Skeleton, cx, fmtBytes, fmtFiles } from "./ui";
+import { Button, Card, Disclosure, Field, Modal, Pill, Select, Skeleton, cx, fmtBytes, fmtFiles } from "./ui";
 import { PublishProgress } from "./PublishProgress";
 import { ConnectCloudflare } from "../pages/Domains";
 import { RuntimeInstall, RUNTIME_NAMES } from "../pages/Runtimes";
 import { AppConfigForm } from "./AppConfigForm";
 import { BuildPanel } from "./BuildPanel";
+import { FastPublish } from "./FastPublish";
 import type {
   AppConfig,
   DnsPlan,
@@ -32,6 +35,8 @@ import type {
   ManagedDatabase,
   MysqlStatus,
   ProjectReport,
+  PublishPreflight,
+  PublishDiagnostic,
   RuntimeStatus,
   Site,
   SiteKind,
@@ -69,6 +74,7 @@ export function PublishWizard() {
   const [createdSite, setCreatedSite] = useState<Site | undefined>(existing);
   const [hostname, setHostname] = useState(existing?.publishHostname ?? "");
 
+  const [mode, setMode] = useState<"fast" | "standard" | null>(null);
   const [step, setStep] = useState(existing ? 8 : 1);
 
   const [state, setState] = useState<NewSiteState>({
@@ -150,6 +156,37 @@ export function PublishWizard() {
     } else {
       setStep(6);
     }
+  }
+
+  if (mode === null) {
+    return (
+      <Modal title="How would you like to publish?" wide onClose={closeWizard}>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <button type="button" onClick={() => setMode("fast")}
+            className="press rounded-card border-2 border-kelp bg-kelpsoft p-5 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kelp">
+            <Zap size={26} className="mb-4 text-kelp" aria-hidden />
+            <div className="text-xl font-bold">Fast Publish</div>
+            <p className="mt-2 text-[13px] text-ink2">Choose your project and domain. Hostify prepares and verifies the site, and performs approved safe fixes.</p>
+            <p className="mt-4 text-[12px] font-medium text-kelp">Recommended for a quick, safe launch</p>
+          </button>
+          <button type="button" onClick={() => setMode("standard")}
+            className="press rounded-card border-2 border-line bg-panel p-5 text-left hover:border-kelp focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kelp">
+            <SlidersHorizontal size={26} className="mb-4 text-ink2" aria-hidden />
+            <div className="text-xl font-bold">Standard Publish</div>
+            <p className="mt-2 text-[13px] text-ink2">Configure the runtime, build, database, environment, health checks and domain in detail.</p>
+            <p className="mt-4 text-[12px] font-medium text-ink2">Advanced control, same secure deployment engine</p>
+          </button>
+        </div>
+        <p className="mt-4 text-[13px] text-ink3">Both modes require verified local health, explicit code trust, and permission before changing Cloudflare DNS.</p>
+      </Modal>
+    );
+  }
+  if (mode === "fast") {
+    return (
+      <Modal title="Fast Publish" wide onClose={closeWizard}>
+        <FastPublish initialSite={existing} onDone={closeWizard} onStandard={() => setMode("standard")} />
+      </Modal>
+    );
   }
 
   return (
@@ -1166,11 +1203,8 @@ function Step7LocalPreview({
           } else if (!ms.running) {
             await api.mysqlStart();
           }
-          try {
-            await api.createDatabase(state.newDbName, s.id, true, true);
-          } catch {
-            await api.linkDatabase(state.newDbName, s.id, true, true);
-          }
+          // A failed create must never silently link a database owned by another website.
+          await api.createDatabase(state.newDbName, s.id, true, false);
         } else if (state.dbChoice === "existing" && state.selectedDb) {
           const ms = await api.mysqlStatus();
           if (ms.setUp && !ms.running) {
@@ -1183,16 +1217,8 @@ function Step7LocalPreview({
           await api.startSite(s.id);
           setBuildDone(true);
         } else {
-          await api.buildApp(s.id);
-          for (let i = 0; i < 300; i++) {
-            await new Promise((r) => setTimeout(r, 200));
-            const st = await api.getBuildStatus(s.id);
-            if (!st || st.state === "done") {
-              setBuildDone(true);
-              break;
-            }
-            if (st.state === "failed" || st.state === "cancelled") break;
-          }
+          // The user must tick TrustNotice and explicitly initiate the build below.
+          setBuildDone(false);
         }
       } catch (e) {
         if (!dead) toast("error", (e as Error).message);
@@ -1266,6 +1292,7 @@ function Step7LocalPreview({
           <Button onClick={onLocalOnly}>Keep local only</Button>
           <Button
             variant={opened || buildDone ? "primary" : "secondary"}
+            disabled={!!isDynamic && !buildDone}
             onClick={onNext}
           >
             Continue to domain
@@ -1416,6 +1443,8 @@ function Step9Publish({
   const [depId, setDepId] = useState<string | undefined>(resumable);
   const [starting, setStarting] = useState<string>();
   const [err, setErr] = useState<string>();
+  const [preflight, setPreflight] = useState<PublishPreflight>();
+  const [diagnosis, setDiagnosis] = useState<PublishDiagnostic>();
   const dep = useStore((s) => (depId ? s.deployments[depId] : undefined));
 
   useEffect(() => {
@@ -1428,17 +1457,42 @@ function Step9Publish({
 
   async function go() {
     setErr(undefined);
+    setDiagnosis(undefined);
     try {
+      if (!consent) throw new Error("Cloudflare DNS consent is required.");
       if (!useStore.getState().engine?.componentsReady) {
-        setStarting("Installing components");
+        setStarting("Installing verified components");
         await useStore.getState().installComponents();
       }
-      setStarting("Starting tunnel");
+
+      setStarting("Checking local application");
+      let result = await api.publishPreflight(site.id);
+      setPreflight(result);
+      if (!result.ready) {
+        // The shared engine starts stopped sites during publish. Do that safely
+        // here as well, while preserving the trust and build guards.
+        const other = result.blocked.filter((message) => !message.includes("not running and healthy"));
+        if (other.length) throw new Error(other.join(" "));
+        setStarting("Starting verified local website");
+        await api.startSite(site.id);
+        result = await api.publishPreflight(site.id);
+        setPreflight(result);
+        if (!result.ready) throw new Error(result.blocked.join(" ") || "Local preflight failed.");
+      }
+
+      setStarting("Checking DNS ownership");
+      const currentPlan = await api.cfPlanDns(site.id, host);
+      setPlan(currentPlan);
+      if (currentPlan.action === "conflict") {
+        throw new Error(currentPlan.message || "DNS record conflict. Existing records were preserved.");
+      }
+      setStarting("Starting secure tunnel");
       const d = await api.publishSite(site.id, host, consent);
       setDeployment(d);
       setDepId(d.id);
     } catch (e) {
       setErr((e as Error).message);
+      try { setDiagnosis(await api.publishDiagnosis(site.id)); } catch { /* keep the primary failure */ }
     } finally {
       setStarting(undefined);
     }
@@ -1514,7 +1568,21 @@ function Step9Publish({
         </label>
       )}
 
-      {err && <p className="selectable text-[13px] text-buoy" role="alert">{err}</p>}
+      {preflight && <Disclosure title="Local safety and health checks">
+        <ul className="mt-2 grid gap-2 text-[13px]">
+          {preflight.checks.map((check) => <li key={check.key} className="flex items-start gap-2">
+            {check.passed ? <CheckCircle2 size={15} className="mt-0.5 shrink-0 text-kelp" /> :
+              <AlertTriangle size={15} className="mt-0.5 shrink-0 text-buoy" />}
+            <span><strong>{check.key}</strong>: {check.detail}</span>
+          </li>)}
+        </ul>
+      </Disclosure>}
+      {err && <div className="selectable rounded-ctl border border-buoy bg-buoysoft p-3 text-[13px]" role="alert">
+        <p>{err}</p>
+        {diagnosis && diagnosis.message !== "No error reported." && <p className="mt-2 text-ink2">
+          {diagnosis.class}: {diagnosis.nextAction}
+        </p>}
+      </div>}
 
       <div className="flex justify-between border-t border-line pt-4">
         <Button onClick={onBack}>Back</Button>

@@ -1030,9 +1030,10 @@ impl Manager {
             }
             "link_database" => {
                 let name = arg("name")?;
-                self.managed(name)?;
+                let current_owner = self.managed(name)?;
                 let site = arg("siteId")?;
                 self.store.site(site)?;
+                ensure_same_site_owner(current_owner.as_deref(), site)?;
                 let (user, password) = self.credentials(name)?;
                 let values = self.env_values(name, &user, &password)?;
                 if flag("injectEnv") {
@@ -1062,6 +1063,28 @@ impl Manager {
         }
     }
 }
+/// A database linked to one website cannot be silently reassigned to another.
+fn ensure_same_site_owner(owner: Option<&str>, target: &str) -> Result<()> {
+    if let Some(owner) = owner {
+        if owner != target {
+            bail!("This database belongs to another website. Unlink it explicitly before linking it elsewhere.");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod owner_guard_tests {
+    use super::ensure_same_site_owner;
+
+    #[test]
+    fn blocks_implicit_database_reassignment() {
+        assert!(ensure_same_site_owner(Some("site-a"), "site-b").is_err());
+        assert!(ensure_same_site_owner(Some("site-a"), "site-a").is_ok());
+        assert!(ensure_same_site_owner(None, "site-b").is_ok());
+    }
+}
+
 pub fn validate_backup_filename(file: &str) -> Result<()> {
     if file.is_empty()
         || !file.ends_with(".sql")
@@ -1443,10 +1466,45 @@ mod tests {
             while *text.add(n) != 0 {
                 n += 1;
             }
-            let s = String::from_utf16_lossy(std::slice::from_raw_parts(text, n));
-            assert!(s.contains(&crate::windows::sid().unwrap()));
-            assert!(s.contains(";;;SY)"));
-            assert_eq!(s.matches("(A;").count(), 2);
+            let actual = String::from_utf16_lossy(std::slice::from_raw_parts(text, n));
+            // Windows normalizes certain well-known SIDs to SDDL aliases
+            // (e.g. SY rather than S-1-5-18). Compare canonical descriptors
+            // rather than searching for a textual SID representation.
+            let expected_sddl = crate::windows::wide(&format!(
+                "D:P(A;OICI;FA;;;{})(A;OICI;FA;;;SY)",
+                crate::windows::sid().unwrap()
+            ));
+            let mut expected_sd = std::ptr::null_mut();
+            assert_ne!(
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    expected_sddl.as_ptr(), 1, &mut expected_sd, std::ptr::null_mut()
+                ),
+                0
+            );
+            let mut expected_text = std::ptr::null_mut();
+            assert_ne!(
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    expected_sd, 1, DACL_SECURITY_INFORMATION,
+                    &mut expected_text, std::ptr::null_mut()
+                ),
+                0
+            );
+            let mut expected_len = 0;
+            while *expected_text.add(expected_len) != 0 {
+                expected_len += 1;
+            }
+            let expected = String::from_utf16_lossy(
+                std::slice::from_raw_parts(expected_text, expected_len)
+            );
+            // SetNamedSecurityInfoW may annotate the installed ACL with AI
+            // (auto-inherited) even though the DACL is protected. This marker
+            // is metadata, not an additional permission grant.
+            let normalized = actual.replacen("D:PAI(", "D:P(", 1);
+            assert_eq!(normalized, expected, "The MySQL ACL must have exactly the expected owner+SYSTEM grants");
+            assert!(actual.contains(";;;SY)"));
+            assert_eq!(actual.matches("(A;").count(), 2);
+            LocalFree(expected_text.cast());
+            LocalFree(expected_sd);
             LocalFree(text.cast());
             LocalFree(sd);
         }

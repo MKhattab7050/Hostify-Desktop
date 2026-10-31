@@ -88,7 +88,9 @@ export function PublishProgress({ deployment, onRepublish, onDone }: { deploymen
   const published = d.state === "published"; const stuck = d.state === "recovery_required";
   const failed = d.state === "failed" || d.state === "rolled_back"; const verifying = isVerifying(d.state);
   const site = useStore((s) => s.sites.find((x) => x.id === d.siteId));
-  const isSiteUnhealthy = site?.status === "error" || (site && site.kind !== "static" && site.status === "stopped");
+  // "published" reflects prior public verification; it does not prove the
+  // origin remains healthy. Any non-running/missing local origin is degraded.
+  const isSiteUnhealthy = !site || site.status !== "running";
 
   return (
     <div className="grid gap-4">
@@ -106,7 +108,7 @@ export function PublishProgress({ deployment, onRepublish, onDone }: { deploymen
             Public domain published, but application is unhealthy
           </p>
           <p className="mt-1 text-[13px] text-ink2">
-            The domain <span className="font-semibold text-ink">https://{host}</span> and secure tunnel are active, but the application on this computer is {site?.status === "error" ? "reporting an error" : "stopped"}.
+            The domain <span className="font-semibold text-ink">https://{host}</span> and secure tunnel are active, but the application on this computer is {site?.status === "error" ? "reporting an error" : site ? site.status : "not yet confirmed healthy"}.
           </p>
           {site?.statusDetail && (
             <pre className="selectable mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-ctl bg-chalk p-3 font-mono text-[12px] leading-5 text-ink2">

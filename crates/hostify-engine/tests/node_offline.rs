@@ -130,3 +130,49 @@ fn interrupted_build_is_failed_when_store_reopens() {
     );
     assert!(status["exitCode"].is_null());
 }
+
+#[tokio::test]
+async fn rejected_untrusted_start_does_not_patch_files_or_allocate_database() {
+    use hostify_core::deploy::SiteRuntime;
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    std::fs::create_dir_all(source.join("config")).unwrap();
+    std::fs::write(source.join("server.js"), "console.log('untrusted')").unwrap();
+    std::fs::write(source.join("package.json"), r#"{"scripts":{"start":"node server.js"}}"#).unwrap();
+    std::fs::write(source.join(".env"), "DB_HOST=external.example\nPORT=4400\n").unwrap();
+    let legacy = "module.exports = { user: 'root', database: 'final-db' };";
+    std::fs::write(source.join("config/db.js"), legacy).unwrap();
+    std::fs::write(source.join("schema.sql"), "DROP TABLE important_table;").unwrap();
+
+    let store = Store::open(temp.path().join("data")).unwrap();
+    let supervisor = Supervisor::new(store.clone()).unwrap();
+    let engine = Engine::production(store.clone(), supervisor.clone(), false);
+    let site = engine.dispatch("add_site", json!({
+        "name":"Untrusted", "sourcePath":source, "kind":"directory", "siteKind":"node",
+    })).await.unwrap();
+    let id = site["id"].as_str().unwrap();
+    let cfg = store.app_config(id).unwrap();
+    let release = cfg.pending_release.clone().unwrap();
+    let copied = store.root.join("sites").join(id).join("app").join(release);
+    let before_env = std::fs::read(source.join(".env")).unwrap();
+    // Root .env files are deliberately excluded from imported releases.
+    assert!(!copied.join(".env").exists());
+    let before_db = std::fs::read(copied.join("config/db.js")).unwrap();
+
+    let preflight = engine.dispatch("publish_preflight", json!({"siteId":id})).await.unwrap();
+    assert_eq!(preflight["ready"], false);
+    assert!(preflight["blocked"].as_array().unwrap().iter().any(|m|
+        m.as_str().unwrap_or("").contains("Trust and build")));
+
+    assert!(supervisor.start_site(id).await.is_err());
+    let after = store.app_config(id).unwrap();
+    assert!(after.trusted_release.is_none());
+    assert!(after.built_release.is_none());
+    assert_eq!(std::fs::read(source.join(".env")).unwrap(), before_env);
+    assert!(!copied.join(".env").exists());
+    assert_eq!(std::fs::read(copied.join("config/db.js")).unwrap(), before_db);
+    assert!(store.db().unwrap().query_row(
+        "SELECT COUNT(*) FROM managed_databases", [], |r| r.get::<_, i64>(0)
+    ).unwrap() == 0);
+    engine.shutdown().await;
+}

@@ -1,0 +1,69 @@
+name: Validate Fast and Standard Publish
+
+on:
+  push:
+    branches: [feature/fast-standard-publish]
+  pull_request:
+    branches: [release/v2-rc1]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Keep only the newest validation of each PR/branch; outdated runs must not
+# delay the latest security or deployment fix.
+concurrency:
+  group: hostify-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows Rust, TypeScript and browser regression
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install pinned frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Lint frontend
+        run: pnpm lint
+      - name: Build frontend
+        run: pnpm build
+      - name: Test Rust workspace (including security regressions)
+        run: cargo test --workspace --locked
+      - name: Test real UI flows with Edge and the isolated preview backend
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList '/d /c pnpm preview --port 4173 --host 127.0.0.1' -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              try {
+                $client = [System.Net.Sockets.TcpClient]::new()
+                $client.Connect('127.0.0.1', 4173)
+                $client.Dispose()
+                $ready = $true
+                break
+              } catch {
+                Start-Sleep -Seconds 1
+              }
+            }
+            if (-not $ready) { throw 'Preview server did not become ready' }
+            pnpm test:ui
+            if ($LASTEXITCODE -ne 0) { throw 'UI test suite failed' }
+          } finally {
+            if ($proc -and -not $proc.HasExited) {
+              taskkill /T /F /PID $proc.Id | Out-Null
+            }
+          }
+
+# Live PHP, Node, Caddy, MySQL and Cloudflare tests require explicit sandbox
+# binaries/credentials and are NOT treated as passed by this workflow.

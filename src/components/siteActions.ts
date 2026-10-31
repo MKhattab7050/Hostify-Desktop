@@ -4,24 +4,9 @@ import { useStore } from "../store";
 import type { Site } from "../lib/types";
 
 async function smartStartOrRestart(site: Site, restart = false) {
-  try {
-    return await (restart ? api.restartSite(site.id) : api.startSite(site.id));
-  } catch (e) {
-    const msg = (e as Error).message || "";
-    if (/Build and (trust|acknowledge)/i.test(msg)) {
-      await api.buildApp(site.id);
-      for (let i = 0; i < 300; i++) {
-        await new Promise((r) => setTimeout(r, 200));
-        const st = await api.getBuildStatus(site.id);
-        if (!st || st.state === "done") break;
-        if (st.state === "failed" || st.state === "cancelled") {
-          throw new Error(st.detail || "Application build failed.");
-        }
-      }
-      return await (restart ? api.restartSite(site.id) : api.startSite(site.id));
-    }
-    throw e;
-  }
+  // Starting a site must never auto-run dependency scripts or grant code trust.
+  // The Build panel provides the explicit approval and verifiable build path.
+  return restart ? api.restartSite(site.id) : api.startSite(site.id);
 }
 
 /** Start/stop/restart/open with per-site busy tracking and honest error toasts. */

@@ -91,7 +91,7 @@ export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise
     case "inspect_project": return r(inspect(String(a.path)));
     case "get_app_config": return r(configs.get(a.siteId) ?? baseConfig);
     case "set_app_config": { const v = a.nodeVersion ?? a.phpVersion; const old = configs.get(a.siteId); configs.set(a.siteId, { ...a.config, activeRelease: old?.activeRelease ?? null, builtRelease: old?.builtRelease ?? null, trustedRelease: old?.trustedRelease ?? null, pendingRelease: old?.pendingRelease ?? null }); if (v) patch(a.siteId, { runtimeVersion: v }); return r({ restartRequired: false, rebuildRequired: false }); }
-    case "build_app": { const id = "b" + Date.now(); builds.set(a.siteId, { at: Date.now(), fail: /fail/i.test(sites.find((s) => s.id === a.siteId)?.sourcePath ?? ""), id }); return r({ buildId: id }); }
+    case "build_app": { if (a.trustAcknowledged !== true) throw new Error("Explicit trust is required before building an application."); const id = "b" + Date.now(); builds.set(a.siteId, { at: Date.now(), fail: /fail/i.test(sites.find((s) => s.id === a.siteId)?.sourcePath ?? ""), id }); return r({ buildId: id }); }
     case "cancel_build": builds.delete(a.siteId); return r(undefined);
     case "get_build_status": return r(buildStatus(a.siteId));
     case "app_status": { const s = sites.find((x) => x.id === a.siteId); return r(s?.status === "running" ? { health: "running", exposedAddresses: [], pid: 4242, processCount: 2, cpuPercent: 0.4, memoryBytes: 63_000_000, restarts: 0, internalPort: 19100, activeRelease: "r1" } : { health: "stopped", exposedAddresses: [] }); }
@@ -140,6 +140,17 @@ export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise
     case "cf_status": return r(cf);
     case "cf_disconnect": cf = { connected: false }; return r(undefined);
     case "cf_check_domain": return r({ zoneName: String(a.hostname).split(".").slice(-2).join("."), zoneId: "z1", canManageDns: true, problems: [] });
+    case "publish_preflight": {
+      const s = sites.find((x) => x.id === a.siteId);
+      if (!s) throw new Error("Website not found.");
+      const c = configs.get(s.id);
+      const build = !c || !!c.builtRelease && c.builtRelease === c.trustedRelease;
+      const running = s.status === "running";
+      const blocked = [...(!build ? ["Trust and build this release first."] : []), ...(!running ? ["Start the website before publishing."] : [])];
+      return r({ mode: "shared", ready: !blocked.length, blocked, checks: [{ key: "trusted-build", passed: build, detail: build ? "Release built." : "Trust required." }, { key: "local-site", passed: running, detail: running ? "Running." : "Stopped." }] });
+    }
+    case "publish_record_event": return r(undefined);
+    case "publish_diagnosis": return r({ class: "CONFIGURATION_ERROR", message: "Preview diagnostic", nextAction: "Inspect logs.", safeToRetry: false });
     case "cf_plan_dns": return r({ hostname: a.hostname, action: "create", message: `Hostify will add one CNAME record for ${a.hostname}. Nothing else changes.` });
     case "publish_site": {
       const d = previewDeployment(a.siteId, a.hostname, Date.now());

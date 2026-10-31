@@ -73,7 +73,7 @@ export function BuildPanel({ site, lifecycle, onBuilt, compact }: { site: Site; 
 
   async function build() {
     setStarting(true);
-    try { await api.buildApp(site.id); setLog([]); setAck(false); await sync(); }
+    try { await api.buildApp(site.id, ack); setLog([]); setAck(false); await sync(); }
     catch (e) { toast("error", (e as Error).message); } finally { setStarting(false); }
   }
   async function cancel() { try { await api.cancelBuild(site.id); await sync(); } catch (e) { toast("error", (e as Error).message); } }
