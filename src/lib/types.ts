@@ -78,3 +78,22 @@ export interface MysqlStatus { setUp: boolean; version?: string; running: boolea
 export interface ManagedDatabase { name: string; siteId?: string | null; siteName?: string | null; sizeBytes?: number; users: string[]; connectionOk: boolean | null; lastBackupAt?: string | null; lastBackupBytes?: number | null }
 export interface DatabaseBackup { file: string; sizeBytes: number; createdAt: string; time?: string }
 export interface DatabaseConnection { host: string; port: number; database: string; user: string }
+
+/** Shared engine diagnostics. Repairs never bypass security or approval. */
+export type PublishErrorClass =
+  | "TRANSIENT_RETRYABLE" | "AUTO_FIX_SAFE" | "USER_APPROVAL_REQUIRED"
+  | "CONFIGURATION_ERROR" | "APPLICATION_ERROR" | "SECURITY_BLOCKER"
+  | "DATA_INTEGRITY_BLOCKER" | "EXTERNAL_PROVIDER_ERROR";
+export interface PublishDiagnostic {
+  class: PublishErrorClass;
+  message: string;
+  nextAction: string;
+  safeToRetry: boolean;
+}
+export interface PublishPreflight {
+  ready: boolean;
+  mode: "shared";
+  blocked: string[];
+  checks: { key: string; passed: boolean; detail: string }[];
+  diagnostic?: PublishDiagnostic | null;
+}

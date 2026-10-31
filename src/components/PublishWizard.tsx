@@ -14,6 +14,8 @@ import {
   Plus,
   Server,
   Trash2,
+  Zap,
+  SlidersHorizontal,
 } from "lucide-react";
 import { useStore } from "../store";
 import { api, isTauri, onFileDrop } from "../lib/api";
@@ -24,6 +26,7 @@ import { ConnectCloudflare } from "../pages/Domains";
 import { RuntimeInstall, RUNTIME_NAMES } from "../pages/Runtimes";
 import { AppConfigForm } from "./AppConfigForm";
 import { BuildPanel } from "./BuildPanel";
+import { FastPublish } from "./FastPublish";
 import type {
   AppConfig,
   DnsPlan,
@@ -69,6 +72,7 @@ export function PublishWizard() {
   const [createdSite, setCreatedSite] = useState<Site | undefined>(existing);
   const [hostname, setHostname] = useState(existing?.publishHostname ?? "");
 
+  const [mode, setMode] = useState<"fast" | "standard" | null>(null);
   const [step, setStep] = useState(existing ? 8 : 1);
 
   const [state, setState] = useState<NewSiteState>({
@@ -150,6 +154,37 @@ export function PublishWizard() {
     } else {
       setStep(6);
     }
+  }
+
+  if (mode === null) {
+    return (
+      <Modal title="How would you like to publish?" wide onClose={closeWizard}>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <button type="button" onClick={() => setMode("fast")}
+            className="press rounded-card border-2 border-kelp bg-kelpsoft p-5 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kelp">
+            <Zap size={26} className="mb-4 text-kelp" aria-hidden />
+            <div className="text-xl font-bold">Fast Publish</div>
+            <p className="mt-2 text-[13px] text-ink2">Choose your project and domain. Hostify prepares and verifies the site, and performs approved safe fixes.</p>
+            <p className="mt-4 text-[12px] font-medium text-kelp">Recommended for a quick, safe launch</p>
+          </button>
+          <button type="button" onClick={() => setMode("standard")}
+            className="press rounded-card border-2 border-line bg-panel p-5 text-left hover:border-kelp focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kelp">
+            <SlidersHorizontal size={26} className="mb-4 text-ink2" aria-hidden />
+            <div className="text-xl font-bold">Standard Publish</div>
+            <p className="mt-2 text-[13px] text-ink2">Configure the runtime, build, database, environment, health checks and domain in detail.</p>
+            <p className="mt-4 text-[12px] font-medium text-ink2">Advanced control, same secure deployment engine</p>
+          </button>
+        </div>
+        <p className="mt-4 text-[13px] text-ink3">Both modes require verified local health, explicit code trust, and permission before changing Cloudflare DNS.</p>
+      </Modal>
+    );
+  }
+  if (mode === "fast") {
+    return (
+      <Modal title="Fast Publish" wide onClose={closeWizard}>
+        <FastPublish initialSite={existing} onDone={closeWizard} onStandard={() => setMode("standard")} />
+      </Modal>
+    );
   }
 
   return (
@@ -1166,11 +1201,8 @@ function Step7LocalPreview({
           } else if (!ms.running) {
             await api.mysqlStart();
           }
-          try {
-            await api.createDatabase(state.newDbName, s.id, true, true);
-          } catch {
-            await api.linkDatabase(state.newDbName, s.id, true, true);
-          }
+          // A failed create must never silently link a database owned by another website.
+          await api.createDatabase(state.newDbName, s.id, true, false);
         } else if (state.dbChoice === "existing" && state.selectedDb) {
           const ms = await api.mysqlStatus();
           if (ms.setUp && !ms.running) {
@@ -1183,16 +1215,8 @@ function Step7LocalPreview({
           await api.startSite(s.id);
           setBuildDone(true);
         } else {
-          await api.buildApp(s.id);
-          for (let i = 0; i < 300; i++) {
-            await new Promise((r) => setTimeout(r, 200));
-            const st = await api.getBuildStatus(s.id);
-            if (!st || st.state === "done") {
-              setBuildDone(true);
-              break;
-            }
-            if (st.state === "failed" || st.state === "cancelled") break;
-          }
+          // The user must tick TrustNotice and explicitly initiate the build below.
+          setBuildDone(false);
         }
       } catch (e) {
         if (!dead) toast("error", (e as Error).message);
@@ -1266,6 +1290,7 @@ function Step7LocalPreview({
           <Button onClick={onLocalOnly}>Keep local only</Button>
           <Button
             variant={opened || buildDone ? "primary" : "secondary"}
+            disabled={!!isDynamic && !buildDone}
             onClick={onNext}
           >
             Continue to domain

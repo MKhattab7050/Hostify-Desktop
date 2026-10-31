@@ -1,4 +1,4 @@
-import type {
+import type { PublishPreflight, PublishDiagnostic,
   ActivityEntry, AppConfig, AppSettings, AppStatus, BuildStatus, CloudflareAccount, DatabaseBackup, DatabaseConnection, Deployment, DnsPlan, Domain, DomainCheck,
   EngineStatus, EnvVar, ComponentName, LogStream, ManagedDatabase, MysqlStatus, ProjectReport, RuntimeKind, RuntimeStatus, Site, SiteKind, SourceKind, SourceReport, SystemStats, TunnelHealth,
 } from "./types";
@@ -54,6 +54,8 @@ export const api = {
   cfDisconnect: () => call<void>("cf_disconnect"),
   cfCheckDomain: (hostname: string) => call<DomainCheck>("cf_check_domain", { hostname }),
   cfPlanDns: (siteId: string, hostname: string) => call<DnsPlan>("cf_plan_dns", { siteId, hostname }),
+  publishPreflight: (siteId: string) => call<PublishPreflight>("publish_preflight", { siteId }),
+  publishDiagnosis: (siteId: string) => call<PublishDiagnostic>("publish_diagnosis", { siteId }),
   publishSite: (siteId: string, hostname: string, consentDns: boolean) =>
     call<Deployment>("publish_site", { siteId, hostname, consentDns }),
   getDeployment: (id: string) => call<Deployment>("get_deployment", { id }),
@@ -68,7 +70,7 @@ export const api = {
   inspectProject: (path: string, kind: SourceKind) => call<ProjectReport>("inspect_project", { path, kind }),
   getAppConfig: (siteId: string) => call<AppConfig>("get_app_config", { siteId }),
   setAppConfig: (siteId: string, config: AppConfig, version: { nodeVersion?: string; phpVersion?: string }) => call<{ restartRequired: boolean; rebuildRequired: boolean }>("set_app_config", { siteId, config, ...version }),
-  buildApp: (siteId: string) => call<{ buildId: string }>("build_app", { siteId, trustAcknowledged: true }),
+  buildApp: (siteId: string, trustAcknowledged: boolean) => call<{ buildId: string }>("build_app", { siteId, trustAcknowledged }),
   cancelBuild: (siteId: string) => call<void>("cancel_build", { siteId }),
   getBuildStatus: (siteId: string) => call<BuildStatus | null>("get_build_status", { siteId }),
   appStatus: (siteId: string) => call<AppStatus>("app_status", { siteId }),
