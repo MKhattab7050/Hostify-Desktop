@@ -31,6 +31,19 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      # Cargo fingerprints source changes, so reusing dependency/debug output
+      # across checks with the same lockfile avoids full Windows recompiles.
+      # Release binaries remain rebuilt from the tested release commit.
+      - name: Cache Rust registry and debug build outputs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+          key: hostify-windows-rust-v1-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            hostify-windows-rust-v1-${{ runner.os }}-
       - name: Install pinned frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Lint frontend
