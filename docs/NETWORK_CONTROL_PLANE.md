@@ -49,6 +49,7 @@ All endpoints are JSON, have a 32 KiB body limit, disable caches, and return no 
 | `POST /v1/tenant/routes/reservations/list` | Tenant View session | Lists own reserved and disabled hostnames on non-revoked devices, with status and paging |
 | `POST /v1/tenant/routes/disable` | Tenant ManageSites session | Disables a reserved hostname without releasing global ownership; frees local quota and invalidates proof/challenges |
 | `POST /v1/tenant/routes/restore` | Tenant ManageSites session | Rechecks active device and quota, then restores a disabled hostname to **reserved only**, never publicly active |
+| `POST /v1/tenant/routes/reassign` | Tenant ManageSites session | Reassigns a reserved hostname to a tenant-owned active device/site without changing global hostname ownership; invalidates old proofs |
 | `POST /v1/tenant/agents/revoke` | Tenant ManageDevices session | Revokes own device and disables its reserved routes |
 | `POST /v1/tenant/agents/rename` | Tenant ManageDevices session | Sets a friendly name for an active device; no key or routing change; audited atomically |
 | `POST /v1/tenant/agents/list` | Tenant View session | Bounded, paginated inventory of the tenant's non-revoked devices |
@@ -73,6 +74,8 @@ Device rename accepts `tenantId`, `agentId` and `displayName` (1–48 trimmed Un
 The `tenant/usage` request accepts only `tenantId` and returns `usage` plus `publicReady:false`. Its counts mirror the quota checks for non-revoked devices and reserved/active hostnames, including an update after a device is revoked. `publiclyRoutable:false` is explicit because this local development service cannot provision an internet route. Usage is not billable metering and does not prove the existence of a live site.
 
 The reservation lifecycle API accepts `tenantId` and `routeId` for disable/restore, and `tenantId`, `limit` (1–100), `offset` (0–1,000,000) for listing including disabled reservations. Disabling a reserved hostname removes it from active quota accounting but **retains its unique ownership** to prevent another tenant claiming it. Restoring checks the configured quota again, and an agent must still be enrolled and not revoked. Repeated disable/restore operations are idempotent. Both mutations purge old challenges and identity proofs and append audit events atomically. Neither acts on a route whose state is already `active`; public teardown/activation would require a separate secure gateway. No DNS or Cloudflare changes occur.
+
+Reassignment accepts `tenantId`, `routeId`, `agentId` (destination active agent) and `siteId` (destination site UUID). It is limited to **reserved** routes, never `active` or `disabled`. The route UUID, tenant and hostname remain unchanged; only the assigned device and site identifiers change. Old route challenges and identity proofs are removed inside the same SQLite audit transaction. Cross-tenant or revoked-device reassignment fails. It is a reservation management operation, NOT a live site migration, file copy, DNS modification or a signal of public readiness. Any later publication requires fresh device proof and a separate production gateway.
 
 The hostname returned by `routes/reserve` or `tenant/routes/reserve` does **not** create public DNS, a Cloudflare tunnel, or a valid customer web route.
 

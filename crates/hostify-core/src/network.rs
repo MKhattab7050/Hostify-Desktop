@@ -615,6 +615,58 @@ impl Registry {
         tx.commit()?;
         Ok(Route{id,tenant_id:tenant.into(),agent_id:agent.into(),site_id:site.into(),hostname})
     }
+    /// Move an existing (never active) hostname reservation to a different
+    /// enrolled device or site. Keep the hostname globally reserved and
+    /// invalidate proofs/challenges bound to the old device/site pairing.
+    /// No DNS, Cloudflare tunnel, workload or public route is modified.
+    pub fn reassign_reserved_route(&mut self,tenant:&str,route:&str,
+        destination_agent:&str,destination_site:&str)->Result<Route>{
+        for id in [tenant,route,destination_agent,destination_site]{
+            require_uuid(id)?;
+        }
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current:Option<(String,String,String,String)>=tx.query_row(
+            "SELECT r.state,r.agent_id,r.site_id,r.hostname FROM network_routes r
+             JOIN network_agents a ON a.id=r.agent_id AND a.tenant_id=r.tenant_id
+             JOIN network_tenants t ON t.id=r.tenant_id
+             WHERE r.id=?1 AND r.tenant_id=?2 AND a.revoked_at IS NULL
+               AND t.state='active'",
+            params![route,tenant],
+            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+        let (state,old_agent,old_site,hostname)=current.ok_or(NetworkError::Ownership)?;
+        if state!="reserved" {return Err(NetworkError::Unauthorized);}
+        let valid_target:i64=tx.query_row(
+            "SELECT COUNT(*) FROM network_agents
+             WHERE id=?1 AND tenant_id=?2 AND revoked_at IS NULL",
+            params![destination_agent,tenant],|r|r.get(0))?;
+        if valid_target!=1{return Err(NetworkError::Ownership);}
+        let result=Route{
+            id:route.into(),tenant_id:tenant.into(),
+            agent_id:destination_agent.into(),site_id:destination_site.into(),
+            hostname,
+        };
+        if old_agent==destination_agent && old_site==destination_site{
+            return Ok(result);
+        }
+        let now=Utc::now().to_rfc3339();
+        // Deleting credentials before changing the route prevents any
+        // reusable proof from being bound to the reassigned reservation.
+        tx.execute("DELETE FROM network_route_challenges
+            WHERE route_id=?1 AND tenant_id=?2",params![route,tenant])?;
+        tx.execute("DELETE FROM network_agent_proofs
+            WHERE route_id=?1 AND tenant_id=?2",params![route,tenant])?;
+        let changed=tx.execute(
+            "UPDATE network_routes SET agent_id=?1,site_id=?2
+             WHERE id=?3 AND tenant_id=?4 AND state='reserved'",
+            params![destination_agent,destination_site,route,tenant])?;
+        if changed!=1{return Err(NetworkError::Ownership);}
+        tx.execute(
+            "INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+             VALUES(?1,?2,'hostname_reservation_reassigned',?3)",
+            params![tenant,&now,route])?;
+        tx.commit()?;
+        Ok(result)
+    }
     /// This canonical challenge message binds the signature to a tenant,
     /// exact device, reserved route and this network's DNS namespace.
     /// No DNS or routing action follows from signing it.
@@ -1184,5 +1236,74 @@ mod tests{
         assert!(r.disable_reserved_route(&a.id,&route.id).is_err(),
             "a future live route needs gateway-controlled teardown");
         assert!(r.restore_disabled_route(&a.id,&route.id).is_err());
+    }
+
+    #[test]
+    fn route_reassignment_preserves_hostname_and_invalidates_stale_challenges(){
+        let mut r=Registry::memory("example.test").unwrap();
+        let a=r.create_tenant("A").unwrap();
+        let b=r.create_tenant("B").unwrap();
+        let invitation1=r.issue_invitation(&a.id,300).unwrap();
+        let d1=r.enroll_agent(&invitation1.token,&key(80)).unwrap();
+        let invitation2=r.issue_invitation(&a.id,300).unwrap();
+        let d2=r.enroll_agent(&invitation2.token,&key(81)).unwrap();
+        let foreign_invitation=r.issue_invitation(&b.id,300).unwrap();
+        let outsider=r.enroll_agent(&foreign_invitation.token,&key(82)).unwrap();
+        let original_site=Uuid::new_v4().to_string();
+        let new_site=Uuid::new_v4().to_string();
+        let route=r.reserve_hostname(&a.id,&d1.id,&original_site,"moving-site").unwrap();
+        let challenge=r.issue_route_challenge(&a.id,&d1.id,&route.id,120).unwrap();
+        assert!(r.reassign_reserved_route(&b.id,&route.id,&outsider.id,&new_site).is_err());
+        assert!(r.reassign_reserved_route(&a.id,&route.id,&outsider.id,&new_site).is_err());
+        let moved=r.reassign_reserved_route(&a.id,&route.id,&d2.id,&new_site).unwrap();
+        assert_eq!(moved.hostname,route.hostname);
+        assert_eq!(moved.id,route.id);
+        assert_eq!(moved.agent_id,d2.id);
+        assert_eq!(moved.site_id,new_site);
+        assert_eq!(r.list_tenant_routes(&a.id,10,0).unwrap()[0].agent_id,d2.id);
+        assert!(r.issue_route_challenge(&a.id,&d1.id,&route.id,120).is_err());
+        let pending:i64=r.db.query_row(
+            "SELECT COUNT(*) FROM network_route_challenges WHERE route_id=?1",
+            [&route.id],|row|row.get(0)).unwrap();
+        assert_eq!(pending,0);
+        assert!(r.verify_route_signature(&a.id,&d1.id,&route.id,
+            &challenge.value,&"00".repeat(64)).is_err());
+        assert!(r.lookup_active_route(&route.hostname).unwrap().is_none());
+        r.reassign_reserved_route(&a.id,&route.id,&d2.id,&new_site).unwrap();
+        let event_count:i64=r.db.query_row(
+            "SELECT COUNT(*) FROM network_audit
+             WHERE tenant_id=?1 AND action='hostname_reservation_reassigned'",
+            [&a.id],|row|row.get(0)).unwrap();
+        assert_eq!(event_count,1,"idempotent retry does not duplicate audit");
+        r.disable_reserved_route(&a.id,&route.id).unwrap();
+        assert!(r.reassign_reserved_route(&a.id,&route.id,&d1.id,&original_site).is_err());
+        r.restore_disabled_route(&a.id,&route.id).unwrap();
+        r.revoke_agent(&a.id,&d1.id).unwrap();
+        assert!(r.reassign_reserved_route(&a.id,&route.id,&d1.id,&original_site).is_err());
+    }
+    #[test]
+    fn reassignment_audit_failure_preserves_original_device_and_site(){
+        let mut r=Registry::memory("example.test").unwrap();
+        let a=r.create_tenant("A").unwrap();
+        let invitation1=r.issue_invitation(&a.id,300).unwrap();
+        let d1=r.enroll_agent(&invitation1.token,&key(83)).unwrap();
+        let invitation2=r.issue_invitation(&a.id,300).unwrap();
+        let d2=r.enroll_agent(&invitation2.token,&key(84)).unwrap();
+        let route=r.reserve_hostname(&a.id,&d1.id,&Uuid::new_v4().to_string(),"atomic-move").unwrap();
+        let old_site=route.site_id.clone();
+        r.db.execute_batch(
+            "CREATE TRIGGER deny_route_move BEFORE INSERT ON network_audit
+             WHEN NEW.action='hostname_reservation_reassigned'
+             BEGIN SELECT RAISE(FAIL,'audit failed'); END;"
+        ).unwrap();
+        assert!(r.reassign_reserved_route(&a.id,&route.id,&d2.id,
+            &Uuid::new_v4().to_string()).is_err());
+        let after=r.list_tenant_routes(&a.id,10,0).unwrap();
+        assert_eq!(after[0].agent_id,d1.id);
+        assert_eq!(after[0].site_id,old_site);
+        r.db.execute_batch("DROP TRIGGER deny_route_move").unwrap();
+        let restored=r.reassign_reserved_route(&a.id,&route.id,&d2.id,
+            &Uuid::new_v4().to_string()).unwrap();
+        assert_eq!(restored.agent_id,d2.id);
     }
 }

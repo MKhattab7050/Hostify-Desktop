@@ -126,6 +126,13 @@ impl NetworkControlPlane{
         self.accounts.authorize(token,tenant,Capability::ManageSites)?;
         Ok(self.registry.reserve_hostname(tenant,agent,site,label)?)
     }
+    /// Move only a non-public reservation. Original hostname and tenant
+    /// ownership are unchanged; fresh device proof will be required.
+    pub fn reassign_reservation(&mut self,token:&str,tenant:&str,route:&str,
+        new_agent:&str,new_site:&str)->Result<Route>{
+        self.accounts.authorize(token,tenant,Capability::ManageSites)?;
+        Ok(self.registry.reassign_reserved_route(tenant,route,new_agent,new_site)?)
+    }
     pub fn issue_device_proof(&mut self,token:&str,tenant:&str,agent:&str,route:&str)->Result<DeviceChallenge>{
         self.accounts.authorize(token,tenant,Capability::ManageDevices)?;
         Ok(self.registry.issue_route_challenge(tenant,agent,route,120)?)
@@ -202,6 +209,14 @@ mod tests{
             .state,"disabled");
         service.restore_reservation(&owner.token,&tenant.id,&route.id).unwrap();
         assert_eq!(service.list_routes(&viewer.token,&tenant.id,10,0).unwrap().len(),1);
+        assert!(service.reassign_reservation(&viewer.token,&tenant.id,&route.id,
+            &agent.id,&Uuid::new_v4().to_string()).is_err());
+        assert!(service.reassign_reservation(&owner.token,&other.id,&route.id,
+            &agent.id,&Uuid::new_v4().to_string()).is_err());
+        let moved=service.reassign_reservation(&owner.token,&tenant.id,&route.id,
+            &agent.id,&Uuid::new_v4().to_string()).unwrap();
+        assert_eq!(moved.id,route.id);
+        assert_eq!(moved.hostname,route.hostname);
         assert!(service.public_route(&route.hostname).unwrap().is_none());
         assert!(service.list_devices(&viewer.token,&other.id,10,0).is_err());
         assert!(service.list_routes(&owner.token,&other.id,10,0).is_err());
