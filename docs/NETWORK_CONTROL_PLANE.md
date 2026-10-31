@@ -14,7 +14,7 @@ $env:HOSTIFY_CONTROL_PORT = "8787"
 cargo run --locked -p hostify-control
 ```
 
-The binary binds only to `127.0.0.1` and cannot be configured to bind to `0.0.0.0`.
+The binary binds only to `127.0.0.1` and cannot be configured to bind to `0.0.0.0`. It caps active local HTTP connections at 64 and times out idle or slow connections after 30 seconds. Connections above the limit are closed without processing; this is a local resource bound, **not** a replacement for per-IP rate limiting on a future public gateway.
 
 ## Development endpoints
 
