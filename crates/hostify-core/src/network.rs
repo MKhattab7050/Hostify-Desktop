@@ -33,8 +33,8 @@ pub enum NetworkError {
 }
 
 type Result<T> = std::result::Result<T, NetworkError>;
-const DEFAULT_DEVICES: i64 = 3;
-const DEFAULT_HOSTNAMES: i64 = 10;
+pub(crate) const DEFAULT_DEVICES: i64 = 3;
+pub(crate) const DEFAULT_HOSTNAMES: i64 = 10;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
