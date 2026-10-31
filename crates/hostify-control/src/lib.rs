@@ -62,7 +62,8 @@ impl Controller {
             matches!(path,"/v1/agents/enroll"|"/v1/agents/proof");
         let tenant_action=method==Method::POST &&
             matches!(path,"/v1/tenant/invitations"|"/v1/tenant/routes/reserve"|
-                "/v1/tenant/agents/revoke");
+                "/v1/tenant/agents/revoke"|"/v1/tenant/agents/list"|
+                "/v1/tenant/routes/list");
         if !public_action && !tenant_action && !self.authorized(auth) {
             return (StatusCode::UNAUTHORIZED,json!({"error":"unauthorized"}));
         }
@@ -94,6 +95,8 @@ impl Controller {
         }
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
         struct RevokeInput {tenant_id:String,agent_id:String}
+        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
+        struct InventoryInput {tenant_id:String,limit:i64,offset:i64}
         let response:Result<Value,(StatusCode,&'static str)>=match path {
             "/v1/tenants"=>parse::<TenantInput>(body)
                 .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
@@ -153,6 +156,26 @@ impl Controller {
                     accounts.authorize(auth,&p.tenant_id,Capability::ManageDevices)?;
                     registry.revoke_agent(&p.tenant_id,&p.agent_id)
                         .map(|_|json!({"revoked":true}))
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/agents/list"=>parse::<InventoryInput>(body)
+                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
+                .and_then(|p|{
+                    let accounts=self.accounts.as_ref().ok_or(
+                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
+                    accounts.authorize(auth,&p.tenant_id,Capability::View)?;
+                    registry.list_tenant_agents(&p.tenant_id,p.limit,p.offset)
+                        .map(|items|json!({"items":items,"limit":p.limit,"offset":p.offset}))
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/routes/list"=>parse::<InventoryInput>(body)
+                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
+                .and_then(|p|{
+                    let accounts=self.accounts.as_ref().ok_or(
+                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
+                    accounts.authorize(auth,&p.tenant_id,Capability::View)?;
+                    registry.list_tenant_routes(&p.tenant_id,p.limit,p.offset)
+                        .map(|items|json!({"items":items,"limit":p.limit,"offset":p.offset}))
                         .map_err(map_network_error)
                 }),
             _=>Err((StatusCode::NOT_FOUND,"not_found")),
