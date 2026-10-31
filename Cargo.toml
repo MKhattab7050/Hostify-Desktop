@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hostify-core", "crates/hostify-engine", "src-tauri"]
+members = ["crates/hostify-core", "crates/hostify-engine", "crates/hostify-control", "src-tauri"]
 
 [profile.release]
 codegen-units = 1
