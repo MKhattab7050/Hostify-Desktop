@@ -46,6 +46,8 @@ impl AccountApi{
         struct Accept {invitation:String,password:String}
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
         struct Disable {tenant_id:String,user_id:String}
+        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
+        struct ListMembers {tenant_id:String,limit:i64,offset:i64}
         let response:Result<Value,(StatusCode,&'static str)>=(||{
             let mut accounts=self.accounts.lock()
                 .map_err(|_|(StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
@@ -87,6 +89,12 @@ impl AccountApi{
                         &p.email,p.role,p.ttl_seconds).map_err(map_account_error)?;
                     Ok(json!({"invitation":invitation.token,"expiresUnix":invitation.expires_unix}))
                 },
+                "/v1/members/list"=>{
+                    let p:ListMembers=parse(body)?;
+                    let items=accounts.list_members(session_token(auth)?,&p.tenant_id,
+                        p.limit,p.offset).map_err(map_account_error)?;
+                    Ok(json!({"items":items,"limit":p.limit,"offset":p.offset}))
+                },
                 "/v1/members/disable"=>{
                     let p:Disable=parse(body)?;
                     accounts.disable_member(session_token(auth)?,&p.tenant_id,&p.user_id)
@@ -112,7 +120,7 @@ impl AccountApi{
 pub fn is_account_path(path:&str)->bool{
     matches!(path,"/v1/accounts/provision"|"/v1/accounts/bootstrap"|"/v1/auth/login"|
         "/v1/auth/logout"|"/v1/auth/me"|"/v1/members/invite"|
-        "/v1/members/accept"|"/v1/members/disable")
+        "/v1/members/accept"|"/v1/members/disable"|"/v1/members/list")
 }
 fn map_account_error(error:AccountError)->(StatusCode,&'static str){
     match error{
@@ -185,6 +193,40 @@ mod tests {
         drop(post);
         drop(api);
         drop(registry);
+        std::fs::remove_file(&path).unwrap();
+    }
+    #[test]
+    fn member_inventory_http_requires_management_session_and_scopes_result(){
+        let path=std::env::temp_dir().join(format!("hostify-members-list-{}.db",Uuid::new_v4()));
+        let mut registry=Registry::open(&path,"example.test").unwrap();
+        let a=registry.create_tenant("A").unwrap();
+        let b=registry.create_tenant("B").unwrap();
+        let api=AccountApi::new(Accounts::open(&path).unwrap());
+        let post=|path:&str,auth:Option<&str>,admin:bool,value:Value|{
+            api.dispatch(path,auth,admin,value.to_string().as_bytes())
+        };
+        assert_eq!(post("/v1/accounts/bootstrap",None,true,json!({
+            "tenantId":a.id,"email":"owner@site.test","password":"valid-owner-password"
+        })).0,StatusCode::OK);
+        let (_,login)=post("/v1/auth/login",None,false,json!({
+            "tenantId":a.id,"email":"owner@site.test","password":"valid-owner-password"
+        }));
+        let bearer=format!("Bearer {}",login["token"].as_str().unwrap());
+        let payload=json!({"tenantId":a.id,"limit":10,"offset":0});
+        assert_eq!(post("/v1/members/list",None,false,payload.clone()).0,
+            StatusCode::UNAUTHORIZED);
+        assert_eq!(post("/v1/members/list",Some(&bearer),false,json!({
+            "tenantId":b.id,"limit":10,"offset":0
+        })).0,StatusCode::UNAUTHORIZED);
+        let (status,data)=post("/v1/members/list",Some(&bearer),false,payload);
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(data["items"].as_array().unwrap().len(),1);
+        assert_eq!(data["items"][0]["role"],"owner");
+        assert!(data["items"][0].get("passwordHash").is_none());
+        assert_eq!(post("/v1/members/list",Some(&bearer),false,json!({
+            "tenantId":a.id,"limit":101,"offset":0
+        })).0,StatusCode::BAD_REQUEST);
+        drop(post);drop(api);drop(registry);
         std::fs::remove_file(&path).unwrap();
     }
 }
