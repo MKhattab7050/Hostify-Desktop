@@ -66,6 +66,18 @@ pub struct Principal {
     pub email:String,
     pub role:Role,
 }
+/// Public member inventory intentionally excludes password hashes, session tokens
+/// and password lockout counters.
+#[derive(Debug,Clone,Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct TenantMember {
+    pub user_id:String,
+    pub tenant_id:String,
+    pub email:String,
+    pub role:Role,
+    pub status:String,
+    pub created_at:String,
+}
 /// A token returned exactly once. Only the SHA-256 digest is persisted.
 pub struct Session {
     pub token:String,
@@ -327,6 +339,31 @@ impl Accounts{
             WHERE token_hash=?2 AND revoked_at IS NULL",
             params![Utc::now().to_rfc3339(),digest(token)])?;
         Ok(())
+    }
+    /// List members of exactly one tenant. A viewer cannot enumerate accounts,
+    /// including disabled ones. Credentials and failure counters never leave
+    /// the account store through this result.
+    pub fn list_members(&self,token:&str,tenant:&str,limit:i64,offset:i64)->Result<Vec<TenantMember>>{
+        self.authorize(token,tenant,Capability::ManageUsers)?;
+        if !(1..=100).contains(&limit) || !(0..=100_000).contains(&offset){
+            return Err(AccountError::Invalid);
+        }
+        let mut stmt=self.db.prepare(
+            "SELECT id,tenant_id,email,role,status,created_at FROM network_users
+             WHERE tenant_id=?1 ORDER BY created_at DESC,id DESC LIMIT ?2 OFFSET ?3")?;
+        let rows=stmt.query_map(params![tenant,limit,offset],|r|{
+            Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+                r.get::<_,String>(2)?,r.get::<_,String>(3)?,
+                r.get::<_,String>(4)?,r.get::<_,String>(5)?))
+        })?;
+        let mut items=Vec::new();
+        for row in rows {
+            let (user_id,tenant_id,email,role,status,created_at)=row?;
+            items.push(TenantMember{
+                user_id,tenant_id,email,role:Role::parse(&role)?,status,created_at,
+            });
+        }
+        Ok(items)
     }
     /// Disable a tenant member, revoke existing sessions and record a
     /// non-secret audit event as one SQLite transaction. The final owner
@@ -664,5 +701,39 @@ mod tests {
             assert!(matches!(acc.sign_in(&a,"owner@example.com","incorrect-password"),Err(AccountError::Authentication)));
         }
         assert!(matches!(acc.sign_in(&a,"owner@example.com","correct-long-password"),Err(AccountError::Locked)));
+    }
+    #[test]
+    fn tenant_member_inventory_enforces_roles_scoping_pagination_and_minimal_fields(){
+        let (_tmp,tenant,other,mut acc)=init();
+        acc.bootstrap_owner(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        acc.bootstrap_owner(&other,"other@site.test","valid-other-password").unwrap();
+        let owner=acc.sign_in(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        let invitation=acc.invite_member(&owner.token,&tenant,
+            "viewer@site.test",Role::Viewer,600).unwrap();
+        let viewer_principal=acc.accept_invitation(&invitation.token,
+            "valid-viewer-password").unwrap();
+        let viewer=acc.sign_in(&tenant,"viewer@site.test","valid-viewer-password").unwrap();
+        let members=acc.list_members(&owner.token,&tenant,100,0).unwrap();
+        assert_eq!(members.len(),2);
+        assert!(members.iter().all(|m|m.tenant_id==tenant));
+        assert!(members.iter().any(|m|m.role==Role::Owner));
+        assert!(members.iter().any(|m|m.user_id==viewer_principal.user_id));
+        assert!(acc.list_members(&viewer.token,&tenant,10,0).is_err());
+        assert!(acc.list_members(&owner.token,&other,10,0).is_err());
+        assert!(matches!(acc.list_members(&owner.token,&tenant,101,0),Err(AccountError::Invalid)));
+        assert!(matches!(acc.list_members(&owner.token,&tenant,1,-1),Err(AccountError::Invalid)));
+        let page0=acc.list_members(&owner.token,&tenant,1,0).unwrap();
+        let page1=acc.list_members(&owner.token,&tenant,1,1).unwrap();
+        assert_ne!(page0[0].user_id,page1[0].user_id);
+        assert!(acc.list_members(&owner.token,&tenant,1,2).unwrap().is_empty());
+        acc.disable_member(&owner.token,&tenant,&viewer_principal.user_id).unwrap();
+        let disabled=acc.list_members(&owner.token,&tenant,10,0).unwrap();
+        assert_eq!(disabled.iter().find(|m|m.user_id==viewer_principal.user_id)
+            .unwrap().status,"disabled");
+        let item=serde_json::to_value(&disabled[0]).unwrap();
+        assert_eq!(item.as_object().unwrap().len(),6);
+        for key in ["passwordHash","salt","token","failedAttempts","lockedUntilUnix"] {
+            assert!(item.get(key).is_none());
+        }
     }
 }
