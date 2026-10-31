@@ -427,11 +427,39 @@ mod tests{
         assert_eq!(status,StatusCode::OK);
         assert_eq!(reserved["publiclyRoutable"],false);
         assert_eq!(reserved["route"]["hostname"],"team-home.example.test");
+        let query=json!({"tenantId":first.id,"limit":10,"offset":0});
+        let (status,devices)=call("/v1/tenant/agents/list",&viewer_auth,query.clone());
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(devices["items"].as_array().unwrap().len(),1);
+        assert_eq!(devices["items"][0]["id"],agent["id"]);
+        let (status,routes)=call("/v1/tenant/routes/list",&viewer_auth,query.clone());
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(routes["items"].as_array().unwrap().len(),1);
+        assert_eq!(routes["items"][0]["hostname"],"team-home.example.test");
+        let (status,page_two)=call("/v1/tenant/routes/list",&viewer_auth,json!({
+            "tenantId":first.id,"limit":1,"offset":1
+        }));
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(page_two["items"].as_array().unwrap().len(),0);
+        let (status,_) = call("/v1/tenant/routes/list",&viewer_auth,json!({
+            "tenantId":second.id,"limit":10,"offset":0
+        }));
+        assert_eq!(status,StatusCode::UNAUTHORIZED);
+        let (status,_) = call("/v1/tenant/agents/list",&viewer_auth,json!({
+            "tenantId":first.id,"limit":101,"offset":0
+        }));
+        assert_eq!(status,StatusCode::BAD_REQUEST);
         let (status,revoke)=call("/v1/tenant/agents/revoke",&owner_auth,json!({
             "tenantId":first.id,"agentId":agent["id"]
         }));
         assert_eq!(status,StatusCode::OK);
         assert_eq!(revoke["revoked"],true);
+        let (status,remaining)=call("/v1/tenant/routes/list",&viewer_auth,query.clone());
+        assert_eq!(status,StatusCode::OK);
+        assert!(remaining["items"].as_array().unwrap().is_empty());
+        let (status,remaining)=call("/v1/tenant/agents/list",&viewer_auth,query);
+        assert_eq!(status,StatusCode::OK);
+        assert!(remaining["items"].as_array().unwrap().is_empty());
         let (status,_)=call("/v1/auth/logout",&owner_auth,json!({}));
         assert_eq!(status,StatusCode::OK);
         let (status,_)=call("/v1/auth/me",&owner_auth,json!({"tenantId":first.id}));
