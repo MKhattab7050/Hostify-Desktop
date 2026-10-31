@@ -1243,9 +1243,12 @@ mod tests{
         let mut r=Registry::memory("example.test").unwrap();
         let a=r.create_tenant("A").unwrap();
         let b=r.create_tenant("B").unwrap();
-        let d1=r.enroll_agent(&r.issue_invitation(&a.id,300).unwrap().token,&key(80)).unwrap();
-        let d2=r.enroll_agent(&r.issue_invitation(&a.id,300).unwrap().token,&key(81)).unwrap();
-        let outsider=r.enroll_agent(&r.issue_invitation(&b.id,300).unwrap().token,&key(82)).unwrap();
+        let invitation1=r.issue_invitation(&a.id,300).unwrap();
+        let d1=r.enroll_agent(&invitation1.token,&key(80)).unwrap();
+        let invitation2=r.issue_invitation(&a.id,300).unwrap();
+        let d2=r.enroll_agent(&invitation2.token,&key(81)).unwrap();
+        let foreign_invitation=r.issue_invitation(&b.id,300).unwrap();
+        let outsider=r.enroll_agent(&foreign_invitation.token,&key(82)).unwrap();
         let original_site=Uuid::new_v4().to_string();
         let new_site=Uuid::new_v4().to_string();
         let route=r.reserve_hostname(&a.id,&d1.id,&original_site,"moving-site").unwrap();
@@ -1282,8 +1285,10 @@ mod tests{
     fn reassignment_audit_failure_preserves_original_device_and_site(){
         let mut r=Registry::memory("example.test").unwrap();
         let a=r.create_tenant("A").unwrap();
-        let d1=r.enroll_agent(&r.issue_invitation(&a.id,300).unwrap().token,&key(83)).unwrap();
-        let d2=r.enroll_agent(&r.issue_invitation(&a.id,300).unwrap().token,&key(84)).unwrap();
+        let invitation1=r.issue_invitation(&a.id,300).unwrap();
+        let d1=r.enroll_agent(&invitation1.token,&key(83)).unwrap();
+        let invitation2=r.issue_invitation(&a.id,300).unwrap();
+        let d2=r.enroll_agent(&invitation2.token,&key(84)).unwrap();
         let route=r.reserve_hostname(&a.id,&d1.id,&Uuid::new_v4().to_string(),"atomic-move").unwrap();
         let old_site=route.site_id.clone();
         r.db.execute_batch(
