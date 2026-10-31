@@ -328,4 +328,93 @@ mod tests{
             &vec![b'X';MAX_BODY+1]);
         assert_eq!(s,StatusCode::PAYLOAD_TOO_LARGE);
     }
+    #[test]
+    fn localhost_account_sessions_enforce_tenant_roles_and_revoke_tokens(){
+        let path=std::env::temp_dir().join(format!("hostify-tenant-http-{}.db",Uuid::new_v4()));
+        let mut registry=Registry::open(&path,"example.test").unwrap();
+        let first=registry.create_tenant("First").unwrap();
+        let second=registry.create_tenant("Second").unwrap();
+        let accounts=Accounts::open(&path).unwrap();
+        let api=Controller::new(registry,
+            b"0123456789abcdef0123456789abcdef".to_vec()).unwrap().with_accounts(accounts);
+        let (status,_) = command(&api,"/v1/accounts/bootstrap",false,json!({
+            "tenantId":first.id,"email":"owner@site.test","password":"valid-owner-password"
+        }));
+        assert_eq!(status,StatusCode::UNAUTHORIZED);
+        let (status,created) = command(&api,"/v1/accounts/bootstrap",true,json!({
+            "tenantId":first.id,"email":"owner@site.test","password":"valid-owner-password"
+        }));
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(created["owner"]["tenantId"],first.id);
+        let (status,_) = command(&api,"/v1/accounts/bootstrap",true,json!({
+            "tenantId":first.id,"email":"other@site.test","password":"valid-other-password"
+        }));
+        assert_eq!(status,StatusCode::FORBIDDEN);
+        let (status,logged) = command(&api,"/v1/auth/login",false,json!({
+            "tenantId":first.id,"email":"owner@site.test","password":"valid-owner-password"
+        }));
+        assert_eq!(status,StatusCode::OK);
+        let token=logged["token"].as_str().unwrap().to_owned();
+        assert_eq!(token.len(),64);
+        let owner_auth=format!("Bearer {token}");
+        let call=|path:&str,auth:&str,input:Value|{
+            api.dispatch(&Method::POST,path,Some(auth),input.to_string().as_bytes())
+        };
+        let (status,me)=call("/v1/auth/me",&owner_auth,json!({"tenantId":first.id}));
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(me["user"]["role"],"owner");
+        let (status,_) = call("/v1/auth/me",&owner_auth,json!({"tenantId":second.id}));
+        assert_eq!(status,StatusCode::UNAUTHORIZED);
+        let (status,invite)=call("/v1/members/invite",&owner_auth,json!({
+            "tenantId":first.id,"email":"viewer@site.test","role":"viewer","ttlSeconds":600
+        }));
+        assert_eq!(status,StatusCode::OK);
+        let (status,member)=command(&api,"/v1/members/accept",false,json!({
+            "invitation":invite["invitation"],"password":"valid-viewer-password"
+        }));
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(member["member"]["role"],"viewer");
+        let (status,viewer)=command(&api,"/v1/auth/login",false,json!({
+            "tenantId":first.id,"email":"viewer@site.test","password":"valid-viewer-password"
+        }));
+        assert_eq!(status,StatusCode::OK);
+        let viewer_auth=format!("Bearer {}",viewer["token"].as_str().unwrap());
+        let (status,_)=call("/v1/tenant/invitations",&viewer_auth,json!({
+            "tenantId":first.id,"ttlSeconds":120
+        }));
+        assert_eq!(status,StatusCode::FORBIDDEN);
+        let (status,device_invite)=call("/v1/tenant/invitations",&owner_auth,json!({
+            "tenantId":first.id,"ttlSeconds":120
+        }));
+        assert_eq!(status,StatusCode::OK);
+        let (status,agent)=command(&api,"/v1/agents/enroll",false,json!({
+            "invitation":device_invite["invitation"],"publicKeyHex":"11".repeat(32)
+        }));
+        assert_eq!(status,StatusCode::OK);
+        let route=json!({"tenantId":first.id,"agentId":agent["id"],
+            "siteId":Uuid::new_v4().to_string(),"label":"team-home"});
+        let (status,_) = call("/v1/tenant/routes/reserve",&viewer_auth,route.clone());
+        assert_eq!(status,StatusCode::FORBIDDEN);
+        let (status,_) = call("/v1/tenant/routes/reserve",&owner_auth,json!({
+            "tenantId":second.id,"agentId":agent["id"],
+            "siteId":Uuid::new_v4().to_string(),"label":"foreign-home"
+        }));
+        assert_eq!(status,StatusCode::UNAUTHORIZED);
+        let (status,reserved)=call("/v1/tenant/routes/reserve",&owner_auth,route);
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(reserved["publiclyRoutable"],false);
+        assert_eq!(reserved["route"]["hostname"],"team-home.example.test");
+        let (status,revoke)=call("/v1/tenant/agents/revoke",&owner_auth,json!({
+            "tenantId":first.id,"agentId":agent["id"]
+        }));
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(revoke["revoked"],true);
+        let (status,_)=call("/v1/auth/logout",&owner_auth,json!({}));
+        assert_eq!(status,StatusCode::OK);
+        let (status,_)=call("/v1/auth/me",&owner_auth,json!({"tenantId":first.id}));
+        assert_eq!(status,StatusCode::UNAUTHORIZED);
+        drop(api);
+        std::fs::remove_file(&path).unwrap();
+    }
+
 }
