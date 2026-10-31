@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Archive, CheckCircle2, RotateCcw, ShieldAlert } from "lucide-react";
+import { Archive, CheckCircle2, Download, RotateCcw, ShieldAlert } from "lucide-react";
 import { api } from "../lib/api";
 import type { Site, SiteSnapshot, SiteSnapshotSchedule } from "../lib/types";
 import { Button, Card, Disclosure, Field, fmtBytes, fmtTime } from "./ui";
@@ -53,6 +53,17 @@ export function TimeMachineCard({ sites }: { sites: Site[] }) {
       const result=await api.verifySiteSnapshot(site.id,snapshot.id);
       if (!result.verified) throw new Error("Snapshot integrity verification failed.");
       setSuccess(`SHA-256 integrity verified for ${site.name} snapshot ${snapshot.id}.`);
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(undefined); }
+  }
+  async function exportSnapshot(site: Site, snapshot: SiteSnapshot) {
+    setBusy(site.id);setError(undefined);setSuccess(undefined);
+    try {
+      const destination=await api.pickSnapshotDestination();
+      if (!destination) return;
+      const result=await api.exportSiteSnapshot(site.id,snapshot.id,destination);
+      if (!result.exported) throw new Error("The snapshot was not exported.");
+      setSuccess(`Verified ${fmtBytes(result.archiveBytes)} snapshot export completed. Store the ZIP securely; project files may contain passwords or API keys.`);
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(undefined); }
   }
@@ -116,6 +127,9 @@ export function TimeMachineCard({ sites }: { sites: Site[] }) {
                     </div>
                     <div className="flex gap-2">
                       <Button size="sm" disabled={!!busy} onClick={() => void verify(site,snapshot)}><CheckCircle2 size={13} />Verify</Button>
+                      <Button size="sm" disabled={!!busy} onClick={() => void exportSnapshot(site,snapshot)}>
+                        <Download size={13} />Export ZIP
+                      </Button>
                       <Button size="sm" variant="danger" disabled={!!busy || site.status!=="stopped"}
                         title={site.status!=="stopped" ? "Stop the site before restoring" : undefined}
                         onClick={() => setConfirm({siteId:site.id,snapshotId:snapshot.id,name:""})}>

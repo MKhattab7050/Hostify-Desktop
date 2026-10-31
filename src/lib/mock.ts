@@ -123,10 +123,12 @@ export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise
       const snap = { id: "preview-" + Date.now(), siteId:site.id,siteKind:site.kind ?? "static",release:null,
         createdAt:now(),fileCount:site.fileCount,sourceBytes:site.sizeBytes,
         archiveBytes:Math.floor(site.sizeBytes * 0.7),sha256:"preview-not-a-real-sha256",
-        includesDatabase:false as const,includesSecrets:false as const };
+        includesDatabase:false as const,includesSecrets:false as const,mayContainSecrets:true };
       siteSnapshots.set(site.id,[snap,...(siteSnapshots.get(site.id) ?? [])]);return r(snap);
     }
     case "list_site_snapshots": return r(siteSnapshots.get(a.siteId) ?? []);
+    case "pick_snapshot_destination": return r(null);
+    case "export_site_snapshot": return r({exported:true,archiveBytes:0,sha256:"preview",mayContainSecrets:true});
     case "verify_site_snapshot": return r({ verified:true,
       snapshot:(siteSnapshots.get(a.siteId) ?? []).find(s => s.id===a.snapshotId) });
     case "restore_site_snapshot": {

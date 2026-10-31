@@ -83,6 +83,11 @@ export const api = {
   createSiteSnapshot: (siteId: string) => call<SiteSnapshot>("create_site_snapshot", { siteId }),
   listSiteSnapshots: (siteId: string) => call<SiteSnapshot[]>("list_site_snapshots", { siteId }),
   verifySiteSnapshot: (siteId: string, snapshotId: string) => call<{ verified: boolean; snapshot: SiteSnapshot }>("verify_site_snapshot", { siteId, snapshotId }),
+  pickSnapshotDestination: () => call<string | null>("pick_snapshot_destination"),
+  exportSiteSnapshot: (siteId: string, snapshotId: string, destination: string) =>
+    call<{ exported: boolean; archiveBytes: number; sha256: string; mayContainSecrets: boolean }>(
+      "export_site_snapshot", { siteId, snapshotId, destination }),
+
   restoreSiteSnapshot: (siteId: string, snapshotId: string, confirmName: string) =>
     call<{ restored: boolean; requiresBuild: boolean; pendingRelease?: string; includesDatabase: false }>("restore_site_snapshot",
       { siteId, snapshotId, confirmName }),
