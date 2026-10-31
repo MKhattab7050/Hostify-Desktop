@@ -233,6 +233,45 @@ impl Registry {
         if active.as_deref()!=Some("active") {return Err(NetworkError::Unauthorized);}
         Ok(())
     }
+    /// Central-only, bounded tenant inventory. Call only after authenticating
+    /// the requesting tenant; this registry itself is not an authorization API.
+    pub fn list_tenant_agents(&self,tenant:&str,limit:i64,offset:i64)->Result<Vec<Agent>>{
+        self.ensure_tenant(tenant)?;
+        if !(1..=100).contains(&limit) || !(0..=1_000_000).contains(&offset){
+            return Err(NetworkError::Invalid);
+        }
+        let mut stmt=self.db.prepare(
+            "SELECT id,tenant_id,public_key_hex,created_at FROM network_agents
+             WHERE tenant_id=?1 AND revoked_at IS NULL
+             ORDER BY created_at DESC,id DESC LIMIT ?2 OFFSET ?3"
+        )?;
+        let items=stmt.query_map(params![tenant,limit,offset],|row|Ok(Agent{
+            id:row.get(0)?,tenant_id:row.get(1)?,
+            public_key_hex:row.get(2)?,created_at:row.get(3)?
+        }))?.collect::<std::result::Result<Vec<_>,_>>()?;
+        Ok(items)
+    }
+    /// Only reserved/active routes on non-revoked devices are shown. Revoked
+    /// device rows are retained for auditing but never treated as live sites.
+    pub fn list_tenant_routes(&self,tenant:&str,limit:i64,offset:i64)->Result<Vec<Route>>{
+        self.ensure_tenant(tenant)?;
+        if !(1..=100).contains(&limit) || !(0..=1_000_000).contains(&offset){
+            return Err(NetworkError::Invalid);
+        }
+        let mut stmt=self.db.prepare(
+            "SELECT r.id,r.tenant_id,r.agent_id,r.site_id,r.hostname
+             FROM network_routes r
+             JOIN network_agents a ON a.id=r.agent_id AND a.tenant_id=r.tenant_id
+             WHERE r.tenant_id=?1 AND r.state IN ('reserved','active')
+               AND a.revoked_at IS NULL
+             ORDER BY r.created_at DESC,r.id DESC LIMIT ?2 OFFSET ?3"
+        )?;
+        let items=stmt.query_map(params![tenant,limit,offset],|row|Ok(Route{
+            id:row.get(0)?,tenant_id:row.get(1)?,agent_id:row.get(2)?,
+            site_id:row.get(3)?,hostname:row.get(4)?
+        }))?.collect::<std::result::Result<Vec<_>,_>>()?;
+        Ok(items)
+    }
     pub fn create_tenant(&mut self,name:&str)->Result<Tenant>{
         let name=name.trim();
         if name.is_empty() || name.chars().count()>80 {return Err(NetworkError::Invalid);}
@@ -573,6 +612,33 @@ mod tests{
         registry.revoke_agent(&a.id,&da.id).unwrap();
         assert!(registry.lookup_active_route(&route.hostname).unwrap().is_none());
         assert!(registry.reserve_hostname(&b.id,&db.id,&Uuid::new_v4().to_string(),"alpha-app").is_err());
+    }
+    #[test]
+    fn tenant_inventory_is_scoped_paginated_and_revocation_safe(){
+        let mut r=Registry::memory("example.test").unwrap();
+        let a=r.create_tenant("A").unwrap();
+        let b=r.create_tenant("B").unwrap();
+        let first=r.issue_invitation(&a.id,300).unwrap();
+        let second=r.issue_invitation(&b.id,300).unwrap();
+        let agent_a=r.enroll_agent(&first.token,&key(80)).unwrap();
+        let agent_b=r.enroll_agent(&second.token,&key(81)).unwrap();
+        let route_a=r.reserve_hostname(&a.id,&agent_a.id,&Uuid::new_v4().to_string(),"home-a").unwrap();
+        let route_b=r.reserve_hostname(&b.id,&agent_b.id,&Uuid::new_v4().to_string(),"home-b").unwrap();
+        let aa=r.list_tenant_agents(&a.id,1,0).unwrap();
+        assert_eq!(aa.len(),1);
+        assert_eq!(aa[0].id,agent_a.id);
+        assert!(r.list_tenant_agents(&a.id,1,1).unwrap().is_empty());
+        let ar=r.list_tenant_routes(&a.id,100,0).unwrap();
+        assert_eq!(ar.len(),1);
+        assert_eq!(ar[0].id,route_a.id);
+        assert_ne!(ar[0].hostname,route_b.hostname);
+        assert!(r.list_tenant_agents(&a.id,101,0).is_err());
+        assert!(r.list_tenant_routes(&a.id,1,-1).is_err());
+        assert!(r.list_tenant_routes("not-a-tenant",1,0).is_err());
+        r.revoke_agent(&a.id,&agent_a.id).unwrap();
+        assert!(r.list_tenant_agents(&a.id,1,0).unwrap().is_empty());
+        assert!(r.list_tenant_routes(&a.id,1,0).unwrap().is_empty());
+        assert_eq!(r.list_tenant_agents(&b.id,1,0).unwrap()[0].id,agent_b.id);
     }
     #[test]
     fn reserved_names_and_invalid_labels_are_rejected(){
