@@ -60,6 +60,8 @@ impl AccountApi{
         struct SessionList {tenant_id:String,limit:i64,offset:i64}
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
         struct SessionRevoke {tenant_id:String,session_id:String}
+        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
+        struct BulkSessionRevoke {tenant_id:String,keep_current:bool}
         let response:Result<Value,(StatusCode,&'static str)>=(||{
             let mut accounts=self.accounts.lock()
                 .map_err(|_|(StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
@@ -100,6 +102,13 @@ impl AccountApi{
                     accounts.revoke_session(session_token(auth)?,&p.tenant_id,
                         &p.session_id).map_err(map_account_error)?;
                     Ok(json!({"revoked":true}))
+                },
+                "/v1/auth/sessions/revoke-all"=>{
+                    let p:BulkSessionRevoke=parse(body)?;
+                    let revoked=accounts.revoke_user_sessions(
+                        session_token(auth)?,&p.tenant_id,p.keep_current)
+                        .map_err(map_account_error)?;
+                    Ok(json!({"revokedCount":revoked,"currentSessionActive":p.keep_current}))
                 },
                 "/v1/auth/password/change"=>{
                     let p:PasswordChange=parse(body)?;
@@ -169,7 +178,8 @@ impl AccountApi{
 pub fn is_account_path(path:&str)->bool{
     matches!(path,"/v1/accounts/provision"|"/v1/accounts/bootstrap"|"/v1/auth/login"|
         "/v1/auth/logout"|"/v1/auth/me"|"/v1/auth/password/change"|
-        "/v1/auth/sessions/list"|"/v1/auth/sessions/revoke"|"/v1/members/invite"|
+        "/v1/auth/sessions/list"|"/v1/auth/sessions/revoke"|
+        "/v1/auth/sessions/revoke-all"|"/v1/members/invite"|
         "/v1/members/accept"|"/v1/members/disable"|"/v1/members/list"|"/v1/members/role/update"|
         "/v1/members/invitations/list"|"/v1/members/invitations/revoke")
 }
@@ -427,6 +437,46 @@ mod tests {
             "invitation":issued["invitation"],"password":"viewer-valid-password"
         })).0,StatusCode::UNAUTHORIZED);
         drop(post);drop(api);drop(registry);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn bulk_session_http_is_self_scoped_and_rejects_revoked_caller(){
+        let path=std::env::temp_dir().join(format!("hostify-session-bulk-{}.db",Uuid::new_v4()));
+        let mut registry=Registry::open(&path,"example.test").unwrap();
+        let tenant=registry.create_tenant("A").unwrap();
+        let api=AccountApi::new(Accounts::open(&path).unwrap());
+        let post=|path:&str,auth:Option<&str>,admin:bool,value:Value|{
+            api.dispatch(path,auth,admin,value.to_string().as_bytes())
+        };
+        assert_eq!(post("/v1/accounts/bootstrap",None,true,json!({
+            "tenantId":tenant.id,"email":"owner@site.test","password":"valid-owner-password"
+        })).0,StatusCode::OK);
+        let login=||post("/v1/auth/login",None,false,json!({
+            "tenantId":tenant.id,"email":"owner@site.test","password":"valid-owner-password"
+        })).1;
+        let first=login();
+        let second=login();
+        let first_auth=format!("Bearer {}",first["token"].as_str().unwrap());
+        let second_auth=format!("Bearer {}",second["token"].as_str().unwrap());
+        let payload=json!({"tenantId":tenant.id,"keepCurrent":true});
+        assert_eq!(post("/v1/auth/sessions/revoke-all",None,false,payload.clone()).0,
+            StatusCode::UNAUTHORIZED);
+        let (status,result)=post("/v1/auth/sessions/revoke-all",
+            Some(&first_auth),false,payload);
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(result["revokedCount"],1);
+        assert_eq!(result["currentSessionActive"],true);
+        assert_eq!(post("/v1/auth/me",Some(&second_auth),false,
+            json!({"tenantId":tenant.id})).0,StatusCode::UNAUTHORIZED);
+        let (status,result)=post("/v1/auth/sessions/revoke-all",
+            Some(&first_auth),false,json!({"tenantId":tenant.id,"keepCurrent":false}));
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(result["revokedCount"],1);
+        assert_eq!(result["currentSessionActive"],false);
+        assert_eq!(post("/v1/auth/me",Some(&first_auth),false,
+            json!({"tenantId":tenant.id})).0,StatusCode::UNAUTHORIZED);
+        drop(login);drop(post);drop(api);drop(registry);
         std::fs::remove_file(&path).unwrap();
     }
 }

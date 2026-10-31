@@ -419,6 +419,41 @@ impl Accounts{
         tx.commit()?;
         Ok(())
     }
+    /// Revoke the caller's active sessions either everywhere or on other
+    /// devices only. Recheck the calling session under the write lock; the
+    /// session update and audit event must commit or roll back together.
+    pub fn revoke_user_sessions(&mut self,token:&str,tenant:&str,
+        keep_current:bool)->Result<usize>{
+        let actor=self.authorize(token,tenant,Capability::View)?;
+        let current_hash=digest(token);
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let valid:i64=tx.query_row(
+            "SELECT COUNT(*) FROM network_sessions s
+             JOIN network_users u ON u.id=s.user_id AND u.tenant_id=s.tenant_id
+             JOIN network_tenants t ON t.id=s.tenant_id
+             WHERE s.tenant_id=?1 AND s.user_id=?2 AND s.token_hash=?3
+               AND s.revoked_at IS NULL AND s.expires_unix>?4
+               AND u.status='active' AND t.state='active'",
+            params![tenant,&actor.user_id,&current_hash,Utc::now().timestamp()],
+            |r|r.get(0))?;
+        if valid!=1{return Err(AccountError::Authentication);}
+        let now=Utc::now().to_rfc3339();
+        let count=tx.execute(
+            "UPDATE network_sessions SET revoked_at=?1
+             WHERE user_id=?2 AND tenant_id=?3
+               AND revoked_at IS NULL AND expires_unix>?4
+               AND (?5=0 OR token_hash<>?6)",
+            params![&now,&actor.user_id,tenant,Utc::now().timestamp(),
+                i64::from(keep_current),&current_hash])?;
+        if count>0{
+            tx.execute(
+                "INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+                 VALUES(?1,?2,'user_sessions_revoked',?3)",
+                params![tenant,&now,&actor.user_id])?;
+        }
+        tx.commit()?;
+        Ok(count)
+    }
     /// Change the current member's password only after checking the existing
     /// credential. Revoke every previous session and audit the action atomically.
     /// The caller must sign in again; no password or token enters the audit log.
@@ -1177,5 +1212,49 @@ mod tests {
         let accepted=acc.accept_invitation(&invitation.token,"viewer-valid-password").unwrap();
         assert_eq!(accepted.role,Role::Viewer);
         assert!(acc.revoke_member_invitation(&owner.token,&a,&invitation.id).is_err());
+    }
+
+    #[test]
+    fn bulk_session_revocation_can_keep_current_or_log_out_everywhere(){
+        let (_tmp,a,b,mut acc)=init();
+        acc.bootstrap_owner(&a,"owner@site.test","valid-owner-password").unwrap();
+        acc.bootstrap_owner(&b,"other@site.test","valid-other-password").unwrap();
+        let current=acc.sign_in(&a,"owner@site.test","valid-owner-password").unwrap();
+        let second=acc.sign_in(&a,"owner@site.test","valid-owner-password").unwrap();
+        let third=acc.sign_in(&a,"owner@site.test","valid-owner-password").unwrap();
+        let outsider=acc.sign_in(&b,"other@site.test","valid-other-password").unwrap();
+        assert!(acc.revoke_user_sessions(&current.token,&b,true).is_err());
+        assert_eq!(acc.revoke_user_sessions(&current.token,&a,true).unwrap(),2);
+        assert!(acc.authorize(&current.token,&a,Capability::View).is_ok());
+        assert!(acc.authorize(&second.token,&a,Capability::View).is_err());
+        assert!(acc.authorize(&third.token,&a,Capability::View).is_err());
+        assert_eq!(acc.revoke_user_sessions(&current.token,&a,true).unwrap(),0);
+        assert!(acc.authorize(&outsider.token,&b,Capability::View).is_ok());
+        let audit_count:i64=acc.db.query_row(
+            "SELECT COUNT(*) FROM network_audit WHERE tenant_id=?1
+             AND action='user_sessions_revoked'",[&a],|r|r.get(0)).unwrap();
+        assert_eq!(audit_count,1,"zero-change retry must not duplicate audit");
+        let another=acc.sign_in(&a,"owner@site.test","valid-owner-password").unwrap();
+        assert_eq!(acc.revoke_user_sessions(&current.token,&a,false).unwrap(),2);
+        assert!(acc.authorize(&current.token,&a,Capability::View).is_err());
+        assert!(acc.authorize(&another.token,&a,Capability::View).is_err());
+        assert!(acc.revoke_user_sessions(&current.token,&a,false).is_err());
+    }
+    #[test]
+    fn session_bulk_audit_failure_rolls_back_all_revocations(){
+        let (_tmp,a,_b,mut acc)=init();
+        acc.bootstrap_owner(&a,"owner@site.test","valid-owner-password").unwrap();
+        let one=acc.sign_in(&a,"owner@site.test","valid-owner-password").unwrap();
+        let two=acc.sign_in(&a,"owner@site.test","valid-owner-password").unwrap();
+        acc.db.execute_batch(
+            "CREATE TRIGGER deny_session_bulk_audit BEFORE INSERT ON network_audit
+             WHEN NEW.action='user_sessions_revoked'
+             BEGIN SELECT RAISE(FAIL,'audit failed'); END;"
+        ).unwrap();
+        assert!(acc.revoke_user_sessions(&one.token,&a,false).is_err());
+        assert!(acc.authorize(&one.token,&a,Capability::View).is_ok());
+        assert!(acc.authorize(&two.token,&a,Capability::View).is_ok());
+        acc.db.execute_batch("DROP TRIGGER deny_session_bulk_audit").unwrap();
+        assert_eq!(acc.revoke_user_sessions(&one.token,&a,false).unwrap(),2);
     }
 }
