@@ -1,7 +1,7 @@
 //! Local, central-only composition of tenant authorization and the network
 //! registry. There is deliberately no HTTP listener, Cloudflare DNS mutation,
  //! or site execution API here. Operator provisioning is not publicly exposed.
-use crate::network::{Registry,NetworkError,Tenant,Invitation,Route,DeviceChallenge,Agent};
+use crate::network::{Registry,NetworkError,Tenant,Invitation,Route,DeviceChallenge,Agent,AuditEntry};
 use crate::network_auth::{Accounts,AccountError,Principal,Session,Role,Capability,MemberInvitation};
 use std::path::Path;
 use thiserror::Error;
@@ -58,6 +58,12 @@ impl NetworkControlPlane{
         self.accounts.authorize(token,tenant,Capability::View)?;
         Ok(self.registry.list_tenant_routes(tenant,limit,offset)?)
     }
+    /// Owner and administrators may inspect tenant-local security activity.
+    /// View-only members cannot inspect the security audit stream.
+    pub fn list_security_audit(&self,token:&str,tenant:&str,limit:i64,offset:i64)->Result<Vec<AuditEntry>>{
+        self.accounts.authorize(token,tenant,Capability::ManageUsers)?;
+        Ok(self.registry.list_tenant_audit(tenant,limit,offset)?)
+    }
     pub fn issue_device_enrollment(&mut self,token:&str,tenant:&str,ttl_seconds:i64)->Result<Invitation>{
         self.accounts.authorize(token,tenant,Capability::ManageDevices)?;
         Ok(self.registry.issue_invitation(tenant,ttl_seconds)?)
@@ -109,6 +115,12 @@ mod tests{
             "viewer@site.test",Role::Viewer,600).unwrap();
         service.accept_member_invitation(&viewer_inv.token,"superlong-viewer-password").unwrap();
         let viewer=service.login(&tenant.id,"viewer@site.test","superlong-viewer-password").unwrap();
+        let audit=service.list_security_audit(&owner.token,&tenant.id,10,0).unwrap();
+        assert!(!audit.is_empty());
+        assert!(audit.iter().all(|entry|entry.tenant_id==tenant.id));
+        assert!(service.list_security_audit(&viewer.token,&tenant.id,10,0).is_err());
+        assert!(service.list_security_audit(&owner.token,&other.id,10,0).is_err());
+        assert!(service.list_security_audit(&owner.token,&tenant.id,101,0).is_err());
         assert!(service.issue_device_enrollment(&viewer.token,&tenant.id,300).is_err());
         assert!(service.issue_device_enrollment(&owner.token,&other.id,300).is_err());
         let rng=SystemRandom::new();
