@@ -10,11 +10,12 @@ on:
 permissions:
   contents: read
 
-# Keep only the newest validation of each PR/branch; outdated runs must not
-# delay the latest security or deployment fix.
+# Cancel superseded PR validations, but never interrupt an in-progress
+# release-branch Windows installer build. GitHub queues the newest release
+# commit when another release validation is already running.
 concurrency:
   group: hostify-publish-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/release/v2-rc1' }}
 
 jobs:
   windows:
