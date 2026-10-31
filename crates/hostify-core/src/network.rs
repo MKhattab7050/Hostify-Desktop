@@ -92,6 +92,16 @@ pub struct Route {
     pub hostname: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditEntry {
+    pub id: i64,
+    pub tenant_id: String,
+    pub ts: String,
+    pub action: String,
+    pub subject_id: String,
+}
+
 /// Only the central server may instantiate this registry with its own DB.
 /// Never use this registry as a substitute for authenticated API authorization.
 pub struct Registry {
@@ -232,6 +242,23 @@ impl Registry {
             "SELECT state FROM network_tenants WHERE id=?1",[id],|r|r.get(0)).optional()?;
         if active.as_deref()!=Some("active") {return Err(NetworkError::Unauthorized);}
         Ok(())
+    }
+    /// Central-only security audit feed. This method enforces the tenant
+    /// filter but NOT the calling user's role. The outer service must require
+    /// ManageUsers authorization; never expose Registry directly to a client.
+    pub fn list_tenant_audit(&self,tenant:&str,limit:i64,offset:i64)->Result<Vec<AuditEntry>>{
+        self.ensure_tenant(tenant)?;
+        if !(1..=100).contains(&limit) || !(0..=1_000_000).contains(&offset) {
+            return Err(NetworkError::Invalid);
+        }
+        let mut statement=self.db.prepare(
+            "SELECT id,tenant_id,ts,action,subject_id FROM network_audit
+             WHERE tenant_id=?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3"
+        )?;
+        Ok(statement.query_map(params![tenant,limit,offset],|row|Ok(AuditEntry{
+            id:row.get(0)?,tenant_id:row.get(1)?,ts:row.get(2)?,
+            action:row.get(3)?,subject_id:row.get(4)?,
+        }))?.collect::<std::result::Result<Vec<_>,_>>()?)
     }
     /// Central-only, bounded tenant inventory. Call only after authenticating
     /// the requesting tenant; this registry itself is not an authorization API.
@@ -612,6 +639,34 @@ mod tests{
         registry.revoke_agent(&a.id,&da.id).unwrap();
         assert!(registry.lookup_active_route(&route.hostname).unwrap().is_none());
         assert!(registry.reserve_hostname(&b.id,&db.id,&Uuid::new_v4().to_string(),"alpha-app").is_err());
+    }
+    #[test]
+    fn security_audit_feed_is_tenant_scoped_bounded_and_secret_free(){
+        let mut registry=Registry::memory("example.test").unwrap();
+        let a=registry.create_tenant("A").unwrap();
+        let b=registry.create_tenant("B").unwrap();
+        let invitation=registry.issue_invitation(&a.id,300).unwrap();
+        let full=registry.list_tenant_audit(&a.id,100,0).unwrap();
+        assert_eq!(full.len(),2);
+        assert_eq!(full[0].action,"enrollment_invitation_issued");
+        assert_eq!(full[1].action,"tenant_created");
+        assert_eq!(full[0].tenant_id,a.id);
+        assert!(!full.iter().any(|entry|
+            entry.subject_id==invitation.token||
+            entry.subject_id.contains('@')));
+        let first=registry.list_tenant_audit(&a.id,1,0).unwrap();
+        let second=registry.list_tenant_audit(&a.id,1,1).unwrap();
+        assert_ne!(first[0].id,second[0].id);
+        let foreign=registry.list_tenant_audit(&b.id,100,0).unwrap();
+        assert_eq!(foreign.len(),1);
+        assert_eq!(foreign[0].tenant_id,b.id);
+        assert!(registry.list_tenant_audit(&a.id,0,0).is_err());
+        assert!(registry.list_tenant_audit(&a.id,101,0).is_err());
+        assert!(registry.list_tenant_audit(&a.id,1,-1).is_err());
+        assert!(registry.list_tenant_audit("invalid",10,0).is_err());
+        registry.db.execute("UPDATE network_tenants SET state='suspended' WHERE id=?1",
+            [&a.id]).unwrap();
+        assert!(registry.list_tenant_audit(&a.id,10,0).is_err());
     }
     #[test]
     fn tenant_inventory_is_scoped_paginated_and_revocation_safe(){
