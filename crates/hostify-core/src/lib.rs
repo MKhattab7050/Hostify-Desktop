@@ -21,4 +21,5 @@ pub mod snapshots;
 pub mod network;
 pub mod catalog;
 pub mod doctor;
+pub mod github_webhooks;
 pub mod diagnostics;
