@@ -1996,13 +1996,11 @@ impl Supervisor {
         )?;
         let cwd = inside(&root, &config.working_dir)?;
         let key = format!("app:{id}");
-        if self
-            .workers
-            .lock()
-            .await
-            .get(&key)
-            .is_some_and(|w| !w.task.is_finished())
-        {
+        let app_running = {
+            let workers = self.workers.lock().await;
+            workers.get(&key).is_some_and(|w| !w.task.is_finished())
+        };
+        if app_running {
             // A deployment may add the public hostname after the local Node
             // process is already running. Refresh Caddy, not the application.
             let port = config.internal_port.ok_or("Running Node application has no assigned internal port.")?;
@@ -2161,13 +2159,11 @@ impl Supervisor {
         root: &Path,
     ) -> Result<bool, String> {
         let prefix = format!("php:{id}:");
-        if self
-            .workers
-            .lock()
-            .await
-            .iter()
-            .any(|(k, w)| k.starts_with(&prefix) && !w.task.is_finished())
-        {
+        let php_running = {
+            let workers = self.workers.lock().await;
+            workers.iter().any(|(k, w)| k.starts_with(&prefix) && !w.task.is_finished())
+        };
+        if php_running {
             // Keep already-running PHP workers; ensure Caddy knows the public
             // Host added by the deployment journal.
             let cwd = hostify_core::app_config::inside(root, &config.document_root)?;
