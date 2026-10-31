@@ -328,6 +328,40 @@ impl Accounts{
             params![Utc::now().to_rfc3339(),digest(token)])?;
         Ok(())
     }
+    /// Disable a tenant member, revoke existing sessions and record a
+    /// non-secret audit event as one SQLite transaction. The final owner
+    /// cannot be disabled through this API. Admins may disable viewers only.
+    pub fn disable_member(&mut self,token:&str,tenant:&str,user_id:&str)->Result<()>{
+        let actor=self.authorize(token,tenant,Capability::ManageUsers)?;
+        require_uuid(user_id)?;
+        if actor.user_id==user_id {return Err(AccountError::Forbidden);}
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let target:Option<(String,String)>=tx.query_row(
+            "SELECT role,status FROM network_users WHERE tenant_id=?1 AND id=?2",
+            params![tenant,user_id],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+        let (target_role,status)=target.ok_or(AccountError::Unavailable)?;
+        if target_role=="owner" ||
+            (actor.role==Role::Admin && target_role!="viewer") {
+            return Err(AccountError::Forbidden);
+        }
+        if status=="disabled" {return Ok(());}
+        let now=Utc::now().to_rfc3339();
+        let updated=tx.execute(
+            "UPDATE network_users SET status='disabled'
+                WHERE id=?1 AND tenant_id=?2 AND status='active'",
+            params![user_id,tenant])?;
+        if updated!=1 {return Err(AccountError::Unavailable);}
+        tx.execute(
+            "UPDATE network_sessions SET revoked_at=?1
+                WHERE user_id=?2 AND tenant_id=?3 AND revoked_at IS NULL",
+            params![&now,user_id,tenant])?;
+        tx.execute(
+            "INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+                VALUES(?1,?2,'member_disabled',?3)",
+            params![tenant,&now,user_id])?;
+        tx.commit()?;
+        Ok(())
+    }
     pub fn invite_member(&mut self,token:&str,tenant:&str,email:&str,
         role:Role,ttl_seconds:i64)->Result<MemberInvitation>{
         let inviter=self.authorize(token,tenant,Capability::ManageUsers)?;
@@ -539,6 +573,56 @@ mod tests {
             [&tenant],|row|row.get(0)).unwrap();
         assert_eq!(subject,member.user_id);
         assert!(acc.accept_invitation(&invite.token,"valid-member-password").is_err());
+    }
+    #[test]
+    fn member_disable_revokes_sessions_is_tenant_scoped_and_audit_atomic(){
+        let (_tmp,tenant,other,mut acc)=init();
+        acc.bootstrap_owner(&tenant,"owner@example.com","long-owner-password").unwrap();
+        acc.bootstrap_owner(&other,"other@example.com","long-other-password").unwrap();
+        let owner=acc.sign_in(&tenant,"owner@example.com","long-owner-password").unwrap();
+        let admin_inv=acc.invite_member(&owner.token,&tenant,
+            "admin@example.com",Role::Admin,600).unwrap();
+        let admin=acc.accept_invitation(&admin_inv.token,"long-admin-password").unwrap();
+        let admin_session=acc.sign_in(&tenant,"admin@example.com","long-admin-password").unwrap();
+        let viewer_inv=acc.invite_member(&owner.token,&tenant,
+            "viewer@example.com",Role::Viewer,600).unwrap();
+        let viewer=acc.accept_invitation(&viewer_inv.token,"long-viewer-password").unwrap();
+        let viewer_session=acc.sign_in(&tenant,"viewer@example.com","long-viewer-password").unwrap();
+        assert!(acc.disable_member(&viewer_session.token,&tenant,&admin.user_id).is_err());
+        assert!(acc.disable_member(&admin_session.token,&tenant,&admin.user_id).is_err());
+        assert!(acc.disable_member(&admin_session.token,&tenant,&owner.principal.user_id).is_err());
+        assert!(acc.disable_member(&owner.token,&tenant,&owner.principal.user_id).is_err());
+        assert!(acc.disable_member(&owner.token,&other,&viewer.user_id).is_err());
+        acc.db.execute_batch("
+            CREATE TRIGGER deny_disable_audit BEFORE INSERT ON network_audit
+            WHEN NEW.action='member_disabled'
+            BEGIN SELECT RAISE(FAIL,'audit unavailable'); END;
+        ").unwrap();
+        assert!(acc.disable_member(&admin_session.token,&tenant,&viewer.user_id).is_err());
+        assert!(acc.authorize(&viewer_session.token,&tenant,Capability::View).is_ok(),
+            "audit failure must roll back member and session state");
+        acc.db.execute_batch("DROP TRIGGER deny_disable_audit").unwrap();
+        acc.disable_member(&admin_session.token,&tenant,&viewer.user_id).unwrap();
+        assert!(acc.authorize(&viewer_session.token,&tenant,Capability::View).is_err());
+        assert!(acc.sign_in(&tenant,"viewer@example.com","long-viewer-password").is_err());
+        let revoked:Option<String>=acc.db.query_row(
+            "SELECT revoked_at FROM network_sessions
+             WHERE user_id=?1 AND tenant_id=?2",
+            params![&viewer.user_id,&tenant],|row|row.get(0)).unwrap();
+        assert!(revoked.is_some());
+        let audited:String=acc.db.query_row(
+            "SELECT subject_id FROM network_audit
+             WHERE tenant_id=?1 AND action='member_disabled'",
+            [&tenant],|row|row.get(0)).unwrap();
+        assert_eq!(audited,viewer.user_id);
+        acc.disable_member(&owner.token,&tenant,&viewer.user_id).unwrap();
+        let rows:i64=acc.db.query_row(
+            "SELECT COUNT(*) FROM network_audit
+             WHERE tenant_id=?1 AND action='member_disabled'",
+            [&tenant],|row|row.get(0)).unwrap();
+        assert_eq!(rows,1,"repeat disable must not duplicate audit events");
+        acc.disable_member(&owner.token,&tenant,&admin.user_id).unwrap();
+        assert!(acc.authorize(&admin_session.token,&tenant,Capability::View).is_err());
     }
     #[test]
     fn account_email_rejects_ascii_controls_and_whitespace(){
