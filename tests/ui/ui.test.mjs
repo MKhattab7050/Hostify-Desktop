@@ -295,7 +295,8 @@ await test("Guardian is opt-in, preserves stopped websites and exposes read-only
 await test("Time Machine makes explicit code-only snapshots with integrity checks", async () => {
   const page=await open();
   const card=page.locator("section").filter({hasText:"Time Machine · Website files"}).first();
-  await card.getByText(/MySQL databases, environment secrets and external storage are not included/).waitFor();
+  await card.getByText(/MySQL databases, managed credential-store secrets and external storage are/).waitFor();
+  await card.getByText(/Other project files may contain secrets/).waitFor();
   await card.getByRole("button",{name:"Create snapshot"}).first().click();
   await card.getByRole("button",{name:"Snapshots (1)"}).first().click();
   await card.getByRole("button",{name:"Verify"}).first().click();
