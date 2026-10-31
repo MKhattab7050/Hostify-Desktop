@@ -48,6 +48,11 @@ impl NetworkControlPlane{
     pub fn accept_member_invitation(&mut self,token:&str,password:&str)->Result<Principal>{
         Ok(self.accounts.accept_invitation(token,password)?)
     }
+    /// A successful rotation invalidates every existing session for this user.
+    pub fn change_password(&mut self,token:&str,tenant:&str,
+        current_password:&str,new_password:&str)->Result<()>{
+        Ok(self.accounts.change_password(token,tenant,current_password,new_password)?)
+    }
     /// Management-only member roster with bounded, tenant-local pagination.
     pub fn list_members(&self,token:&str,tenant:&str,limit:i64,offset:i64)->Result<Vec<TenantMember>>{
         Ok(self.accounts.list_members(token,tenant,limit,offset)?)
