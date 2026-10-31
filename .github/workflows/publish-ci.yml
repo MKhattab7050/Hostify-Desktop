@@ -36,6 +36,9 @@ jobs:
         run: pnpm lint
       - name: Build frontend
         run: pnpm build
+      - name: Verify Windows live-test script reports absent components honestly
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-verify-hosting-windows.ps1
       - name: Test Rust workspace (including security regressions)
         run: cargo test --workspace --locked
       - name: Test real UI flows with Edge and the isolated preview backend
