@@ -59,6 +59,39 @@ pub async fn verify(engine: &Arc<Engine>, id: &str, snapshot_id: &str) -> Result
     Ok(json!({"verified":true,"snapshot":record}))
 }
 
+/// A single-purpose filesystem operation for an explicit user-selected
+/// export. Does not replace an existing file or automatically upload content.
+fn copy_verified_archive(
+    base:&Path, root:&Path, site_id:&str, record_id:&str, dest:&Path,
+)->Result<Value>{
+    if !dest.is_absolute() || dest.extension().and_then(|s|s.to_str())!=Some("zip"){
+        bail!("Choose an absolute .zip destination using the native Save dialog.");
+    }
+    let record=snapshots::read(base,site_id,record_id)?;
+    let parent=dest.parent().ok_or_else(||anyhow!("Invalid export destination."))?;
+    if std::fs::canonicalize(parent)?.starts_with(std::fs::canonicalize(root)?) {
+        bail!("Export outside the Hostify managed data directory.");
+    }
+    let archive=snapshots::archive(base,site_id,record_id)?;
+    let mut from=std::fs::File::open(archive)?;
+    // create_new prevents a rename or disk backup operation from overwriting
+    // existing files, including existing symlinks, at the chosen destination.
+    let mut to=std::fs::OpenOptions::new().write(true).create_new(true).open(dest)?;
+    let written=std::io::copy(&mut from,&mut to)
+        .and_then(|_|to.sync_all());
+    // Close before cleanup on Windows: open file handles prevent deletion.
+    drop(to);
+    if let Err(error)=written {
+        let _=std::fs::remove_file(dest);
+        return Err(error.into());
+    }
+    if snapshots::checksum(dest)? != record.sha256 {
+        let _=std::fs::remove_file(dest);
+        bail!("Export integrity validation failed.");
+    }
+    Ok(json!({"exported":true,"archiveBytes":record.archive_bytes,
+        "sha256":record.sha256,"mayContainSecrets":record.may_contain_secrets}))
+}
 /// Copy a chosen snapshot outside Hostify without overwriting existing files.
 /// The destination is selected by a native Save dialog and the bytes are
 /// checked against the immutable manifest before the export is accepted.
@@ -72,34 +105,8 @@ pub async fn export(engine:&Arc<Engine>,id:&str,snapshot_id:&str,destination:&st
     let site_id=id.to_owned();
     let record_id=snapshot_id.to_owned();
     let dest=PathBuf::from(destination);
-    if !dest.is_absolute() || dest.extension().and_then(|s|s.to_str())!=Some("zip") {
-        bail!("Choose an absolute .zip destination using the native Save dialog.");
-    }
-    let result=tokio::task::spawn_blocking(move ||->Result<Value>{
-        let record=hostify_core::snapshots::read(&base,&site_id,&record_id)?;
-        let parent=dest.parent().ok_or_else(||anyhow!("Invalid export destination."))?;
-        // Keeping the extra copy inside Hostify offers no disaster recovery
-        // protection. Never accept overwrite, even with a user-supplied path.
-        if std::fs::canonicalize(parent)?.starts_with(std::fs::canonicalize(&root)?) {
-            bail!("Export outside the Hostify managed data directory.");
-        }
-        let source=hostify_core::snapshots::archive(&base,&site_id,&record_id)?;
-        let mut from=std::fs::File::open(source)?;
-        let mut to=std::fs::OpenOptions::new().write(true).create_new(true).open(&dest)?;
-        let copy_result=(||->Result<()>{
-            std::io::copy(&mut from,&mut to)?;
-            to.sync_all()?;
-            drop(to);
-            if hostify_core::snapshots::checksum(&dest)?!=record.sha256 {
-                bail!("Export integrity validation failed.");
-            }
-            Ok(())
-        })();
-        if copy_result.is_err(){let _=std::fs::remove_file(&dest);}
-        copy_result?;
-        Ok(json!({"exported":true,"archiveBytes":record.archive_bytes,
-            "sha256":record.sha256,"mayContainSecrets":record.may_contain_secrets}))
-    }).await??;
+    let result=tokio::task::spawn_blocking(move ||
+        copy_verified_archive(&base,&root,&site_id,&record_id,&dest)).await??;
     engine.store.activity("info",Some(id),
         "Time Machine: a verified website snapshot was exported to a user-selected destination.")?;
     Ok(result)
@@ -245,6 +252,28 @@ pub fn spawn(engine:&Arc<Engine>)->tokio::task::JoinHandle<()>{
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn snapshot_exports_have_verified_digest_and_never_overwrite() {
+        let dir=tempfile::tempdir().unwrap();
+        let root=dir.path().join("hostify");
+        let src=dir.path().join("source");
+        let export_dir=dir.path().join("usb-export");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&export_dir).unwrap();
+        std::fs::write(src.join("index.html"),"<h1>Hello</h1>").unwrap();
+        let id=uuid::Uuid::new_v4().to_string();
+        let base=backup_root(&root);
+        let snapshot=snapshots::create(&src,&base,&id,"static",None).unwrap();
+        let dest=export_dir.join("website.zip");
+        let outcome=copy_verified_archive(&base,&root,&id,&snapshot.id,&dest).unwrap();
+        assert_eq!(outcome["sha256"],snapshot.sha256);
+        let original=std::fs::read(&dest).unwrap();
+        assert!(copy_verified_archive(&base,&root,&id,&snapshot.id,&dest).is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(),original);
+        assert!(copy_verified_archive(&base,&root,&id,&snapshot.id,&root.join("backup.zip")).is_err());
+        assert!(!root.join("backup.zip").exists());
+    }
     #[test]
     fn scheduling_is_opt_in_bounded_and_capacity_limited() {
         let mut s=Schedule::default();
