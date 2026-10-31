@@ -7,7 +7,7 @@ The `hostify_core::network_auth::Accounts` registry stores tenant-scoped account
 
 ## Implemented
 
-- An offline, strictly one-time tenant owner bootstrap. No second owner can replace the first.
+- An offline, strictly one-time tenant owner bootstrap. No second owner can replace the first. New operator-created tenants now commit the tenant row, initial owner and audit event in **one SQLite transaction**, preventing ownerless records after a failed insertion.
 - Owner, admin and viewer roles with explicit capability checks. Only owners have billing permission. Admins may invite only viewers; owners may invite admins and viewers.
 - 16-byte cryptographically random salts and 210,000-iteration PBKDF2-HMAC-SHA256 password derivation. Raw password strings are not persisted.
 - 256-bit unpredictable login and invitation tokens with SHA-256 digests persisted in SQLite, not raw tokens.
