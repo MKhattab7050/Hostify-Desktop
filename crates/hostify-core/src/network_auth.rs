@@ -472,6 +472,42 @@ impl Accounts{
         }
         Ok(items)
     }
+    /// Only the tenant owner may promote/demote non-owner members.
+    /// Every existing session for the target is revoked before the role
+    /// change becomes visible, preventing old tokens retaining privileges.
+    pub fn update_member_role(&mut self,token:&str,tenant:&str,
+        user_id:&str,new_role:Role)->Result<()>{
+        let actor=self.authorize(token,tenant,Capability::ManageUsers)?;
+        if actor.role!=Role::Owner || new_role==Role::Owner {
+            return Err(AccountError::Forbidden);
+        }
+        require_uuid(user_id)?;
+        if actor.user_id==user_id{return Err(AccountError::Forbidden);}
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let target:Option<(String,String)>=tx.query_row(
+            "SELECT role,status FROM network_users WHERE tenant_id=?1 AND id=?2",
+            params![tenant,user_id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let (old_role,status)=target.ok_or(AccountError::Unavailable)?;
+        if old_role=="owner"{return Err(AccountError::Forbidden);}
+        if status!="active"{return Err(AccountError::Unavailable);}
+        if old_role==new_role.db(){return Ok(());}
+        let now=Utc::now().to_rfc3339();
+        let changed=tx.execute(
+            "UPDATE network_users SET role=?1
+             WHERE id=?2 AND tenant_id=?3 AND status='active' AND role!='owner'",
+            params![new_role.db(),user_id,tenant])?;
+        if changed!=1{return Err(AccountError::Unavailable);}
+        tx.execute(
+            "UPDATE network_sessions SET revoked_at=?1
+             WHERE user_id=?2 AND tenant_id=?3 AND revoked_at IS NULL",
+            params![&now,user_id,tenant])?;
+        tx.execute(
+            "INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+             VALUES(?1,?2,'member_role_changed',?3)",
+            params![tenant,&now,user_id])?;
+        tx.commit()?;
+        Ok(())
+    }
     /// Disable a tenant member, revoke existing sessions and record a
     /// non-secret audit event as one SQLite transaction. The final owner
     /// cannot be disabled through this API. Admins may disable viewers only.
@@ -947,5 +983,53 @@ mod tests {
         acc.db.execute_batch("DROP TRIGGER deny_revoke_audit").unwrap();
         acc.revoke_session(&actor.token,&tenant,&session_id).unwrap();
         assert!(acc.authorize(&actor.token,&tenant,Capability::View).is_err());
+    }
+    #[test]
+    fn role_changes_require_owner_revoke_target_sessions_and_are_audited(){
+        let (_tmp,tenant,other,mut acc)=init();
+        acc.bootstrap_owner(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        acc.bootstrap_owner(&other,"other@site.test","valid-other-password").unwrap();
+        let owner=acc.sign_in(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        let invitation=acc.invite_member(&owner.token,&tenant,
+            "member@site.test",Role::Admin,600).unwrap();
+        let member=acc.accept_invitation(&invitation.token,"valid-member-password").unwrap();
+        let admin=acc.sign_in(&tenant,"member@site.test","valid-member-password").unwrap();
+        assert!(acc.update_member_role(&admin.token,&tenant,&member.user_id,Role::Viewer).is_err());
+        assert!(acc.update_member_role(&owner.token,&other,&member.user_id,Role::Viewer).is_err());
+        assert!(acc.update_member_role(&owner.token,&tenant,&member.user_id,Role::Owner).is_err());
+        assert!(acc.update_member_role(&owner.token,&tenant,&owner.principal.user_id,Role::Viewer).is_err());
+        acc.update_member_role(&owner.token,&tenant,&member.user_id,Role::Viewer).unwrap();
+        assert!(acc.authorize(&admin.token,&tenant,Capability::View).is_err());
+        let viewer=acc.sign_in(&tenant,"member@site.test","valid-member-password").unwrap();
+        assert_eq!(viewer.principal.role,Role::Viewer);
+        assert!(acc.authorize(&viewer.token,&tenant,Capability::ManageDevices).is_err());
+        acc.update_member_role(&owner.token,&tenant,&member.user_id,Role::Viewer).unwrap();
+        assert!(acc.authorize(&viewer.token,&tenant,Capability::View).is_ok(),
+            "idempotent role request must not revoke fresh sessions");
+        let events:i64=acc.db.query_row(
+            "SELECT COUNT(*) FROM network_audit
+             WHERE tenant_id=?1 AND action='member_role_changed'",
+            [&tenant],|r|r.get(0)).unwrap();
+        assert_eq!(events,1);
+    }
+    #[test]
+    fn role_change_audit_failure_rolls_back_role_and_session(){
+        let (_tmp,tenant,_other,mut acc)=init();
+        acc.bootstrap_owner(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        let owner=acc.sign_in(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        let invitation=acc.invite_member(&owner.token,&tenant,
+            "member@site.test",Role::Admin,600).unwrap();
+        let member=acc.accept_invitation(&invitation.token,"valid-member-password").unwrap();
+        let admin=acc.sign_in(&tenant,"member@site.test","valid-member-password").unwrap();
+        acc.db.execute_batch(
+            "CREATE TRIGGER deny_role_audit BEFORE INSERT ON network_audit
+             WHEN NEW.action='member_role_changed'
+             BEGIN SELECT RAISE(FAIL,'audit failed'); END;"
+        ).unwrap();
+        assert!(acc.update_member_role(&owner.token,&tenant,&member.user_id,Role::Viewer).is_err());
+        assert!(acc.authorize(&admin.token,&tenant,Capability::ManageDevices).is_ok());
+        acc.db.execute_batch("DROP TRIGGER deny_role_audit").unwrap();
+        acc.update_member_role(&owner.token,&tenant,&member.user_id,Role::Viewer).unwrap();
+        assert!(acc.authorize(&admin.token,&tenant,Capability::View).is_err());
     }
 }
