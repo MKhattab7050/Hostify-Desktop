@@ -338,11 +338,20 @@ impl Accounts{
         let email=canonical_email(email)?;
         let pending_token=random_hex(32)?;
         let expires_unix=Utc::now().timestamp()+ttl_seconds;
-        self.db.execute("INSERT INTO network_member_invitations
+        let invitation_id=Uuid::new_v4().to_string();
+        let issued_at=Utc::now().to_rfc3339();
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("INSERT INTO network_member_invitations
             (id,tenant_id,email,role,inviter_id,token_hash,expires_unix,created_at)
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![Uuid::new_v4().to_string(),tenant,email,role.db(),
-                inviter.user_id,digest(&pending_token),expires_unix,Utc::now().to_rfc3339()])?;
+            params![&invitation_id,tenant,&email,role.db(),
+                &inviter.user_id,digest(&pending_token),expires_unix,&issued_at])?;
+        // Audit references only the invitation UUID, never its token or email.
+        // Failed audit insertion must not leave an untracked valid invite.
+        tx.execute("INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+            VALUES(?1,?2,'member_invited',?3)",
+            params![tenant,&issued_at,&invitation_id])?;
+        tx.commit()?;
         Ok(MemberInvitation{token:pending_token,expires_unix})
     }
     pub fn accept_invitation(&mut self,token:&str,password:&str)->Result<Principal>{
@@ -373,6 +382,11 @@ impl Accounts{
         tx.execute("INSERT INTO network_users(id,tenant_id,email,salt,password_hash,role,created_at)
             VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![&id,&tenant,&email,salt,hash,role,&now_s])?;
+        // Consuming an invitation, creating the user and recording the audit
+        // must succeed or roll back together. No credential values are logged.
+        tx.execute("INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+            VALUES(?1,?2,'member_joined',?3)",
+            params![&tenant,&now_s,&id])?;
         tx.commit()?;
         Ok(Principal{user_id:id,tenant_id:tenant,email,role:Role::parse(&role)?})
     }
@@ -474,6 +488,57 @@ mod tests {
         let token=acc.sign_in(&a,"viewer@example.com","viewer-secret-password").unwrap();
         assert!(acc.authorize(&token.token,&a,Capability::View).is_ok());
         assert!(acc.authorize(&token.token,&a,Capability::ManageUsers).is_err());
+    }
+    #[test]
+    fn membership_invite_and_accept_are_audited_atomically(){
+        let (_tmp,tenant,_other,mut acc)=init();
+        acc.bootstrap_owner(&tenant,"owner@example.com","valid-owner-password").unwrap();
+        let owner=acc.sign_in(&tenant,"owner@example.com","valid-owner-password").unwrap();
+        acc.db.execute_batch("
+            CREATE TRIGGER deny_member_invited BEFORE INSERT ON network_audit
+            WHEN NEW.action='member_invited'
+            BEGIN SELECT RAISE(FAIL,'audit failed'); END;
+        ").unwrap();
+        assert!(acc.invite_member(&owner.token,&tenant,
+            "member@example.com",Role::Viewer,600).is_err());
+        let count:i64=acc.db.query_row(
+            "SELECT COUNT(*) FROM network_member_invitations WHERE tenant_id=?1",
+            [&tenant],|row|row.get(0)).unwrap();
+        assert_eq!(count,0,"an unaudited invitation must not survive");
+        acc.db.execute_batch("DROP TRIGGER deny_member_invited").unwrap();
+        let invite=acc.invite_member(&owner.token,&tenant,
+            "member@example.com",Role::Viewer,600).unwrap();
+        let invitation_audit:(String,String)=acc.db.query_row(
+            "SELECT action,subject_id FROM network_audit
+             WHERE tenant_id=?1 AND action='member_invited'",
+            [&tenant],|row|Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(invitation_audit.0,"member_invited");
+        assert!(Uuid::parse_str(&invitation_audit.1).is_ok());
+        assert_ne!(invitation_audit.1,invite.token);
+        assert_ne!(invitation_audit.1,"member@example.com");
+        acc.db.execute_batch("
+            CREATE TRIGGER deny_member_joined BEFORE INSERT ON network_audit
+            WHEN NEW.action='member_joined'
+            BEGIN SELECT RAISE(FAIL,'audit failed'); END;
+        ").unwrap();
+        assert!(acc.accept_invitation(&invite.token,"valid-member-password").is_err());
+        let users:i64=acc.db.query_row(
+            "SELECT COUNT(*) FROM network_users WHERE tenant_id=?1 AND email='member@example.com'",
+            [&tenant],|row|row.get(0)).unwrap();
+        assert_eq!(users,0,"an unaudited member must not survive");
+        let consumed:Option<String>=acc.db.query_row(
+            "SELECT consumed_at FROM network_member_invitations
+             WHERE tenant_id=?1 AND email='member@example.com'",
+            [&tenant],|row|row.get(0)).unwrap();
+        assert!(consumed.is_none(),"failed audit must preserve one-use invitation");
+        acc.db.execute_batch("DROP TRIGGER deny_member_joined").unwrap();
+        let member=acc.accept_invitation(&invite.token,"valid-member-password").unwrap();
+        let subject:String=acc.db.query_row(
+            "SELECT subject_id FROM network_audit
+             WHERE tenant_id=?1 AND action='member_joined'",
+            [&tenant],|row|row.get(0)).unwrap();
+        assert_eq!(subject,member.user_id);
+        assert!(acc.accept_invitation(&invite.token,"valid-member-password").is_err());
     }
     #[test]
     fn account_email_rejects_ascii_controls_and_whitespace(){
