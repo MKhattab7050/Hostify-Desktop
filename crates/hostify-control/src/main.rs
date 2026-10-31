@@ -1,5 +1,5 @@
 use hostify_control::{Controller,serve_request};
-use hostify_core::network::Registry;
+use hostify_core::{network::Registry,network_auth::Accounts};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -24,7 +24,10 @@ async fn main()->Result<(),Box<dyn std::error::Error>>{
     // Critically, the control plane is NEVER bound to 0.0.0.0 by this binary.
     // A future public API gateway must enforce HTTPS, RBAC, MFA, and rate limits.
     let registry=Registry::open(&data,&domain)?;
-    let control=Arc::new(Controller::new(registry,token.into_bytes())?);
+    // A separate central-only SQLite connection enforces tenant sessions.
+    // This listener remains loopback-only and is NOT a public login gateway.
+    let accounts=Accounts::open(&data)?;
+    let control=Arc::new(Controller::new(registry,token.into_bytes())?.with_accounts(accounts));
     let listener=TcpListener::bind(("127.0.0.1",port)).await?;
     let gate=Arc::new(Semaphore::new(MAX_INFLIGHT_CONNECTIONS));
     eprintln!("Hostify control plane listening on 127.0.0.1:{port} (LOCAL ONLY).");
