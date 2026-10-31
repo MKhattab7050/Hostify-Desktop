@@ -397,12 +397,12 @@ mod tests {
     #[test]
     fn account_email_rejects_ascii_controls_and_whitespace(){
         for email in [
-            "user\\0@example.com",
-            "user\\x7f@example.com",
-            "user\\x0b@example.com",
-            "user\\n@example.com",
-            "user\\r@example.com",
-            "user\\t@example.com",
+            "user\0@example.com",
+            "user\x7f@example.com",
+            "user\x0b@example.com",
+            "user\n@example.com",
+            "user\r@example.com",
+            "user\t@example.com",
         ] {
             assert!(matches!(canonical_email(email),Err(AccountError::Invalid)));
         }
