@@ -1,10 +1,10 @@
-name: Validate Fast and Standard Publish
+name: Validate Hostify Desktop release and feature branches
 
 on:
   push:
-    branches: [feature/fast-standard-publish, feature/v3-guardian-backups, feature/v4-network-core, feature/v3-app-catalog, feature/v3-doctor-github-foundation, feature/v4-security-center, feature/v4-agent-proof]
+    branches: [release/v2-rc1, 'feature/**']
   pull_request:
-    branches: [release/v2-rc1, feature/fast-standard-publish, feature/v3-guardian-backups, feature/v4-network-core, feature/v3-app-catalog]
+    branches: [release/v2-rc1, 'feature/**']
   workflow_dispatch:
 
 permissions:
