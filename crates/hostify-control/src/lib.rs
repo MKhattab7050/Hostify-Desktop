@@ -63,7 +63,8 @@ impl Controller {
         let tenant_action=method==Method::POST &&
             matches!(path,"/v1/tenant/invitations"|"/v1/tenant/routes/reserve"|
                 "/v1/tenant/agents/revoke"|"/v1/tenant/agents/list"|
-                "/v1/tenant/routes/list"|"/v1/tenant/audit/list");
+                "/v1/tenant/routes/list"|"/v1/tenant/audit/list"|
+                "/v1/tenant/usage");
         if !public_action && !tenant_action && !self.authorized(auth) {
             return (StatusCode::UNAUTHORIZED,json!({"error":"unauthorized"}));
         }
@@ -97,6 +98,8 @@ impl Controller {
         struct RevokeInput {tenant_id:String,agent_id:String}
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
         struct InventoryInput {tenant_id:String,limit:i64,offset:i64}
+        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
+        struct UsageInput {tenant_id:String}
         let response:Result<Value,(StatusCode,&'static str)>=match path {
             "/v1/tenants"=>parse::<TenantInput>(body)
                 .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
@@ -167,6 +170,16 @@ impl Controller {
                     registry.list_tenant_routes(&p.tenant_id,p.limit,p.offset)
                         .map(|items|json!({"items":items,"limit":p.limit,
                             "offset":p.offset,"publiclyRoutable":false}))
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/usage"=>parse::<UsageInput>(body)
+                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
+                .and_then(|p|{
+                    let accounts=self.accounts.as_ref().ok_or(
+                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
+                    accounts.authorize(auth,&p.tenant_id,Capability::View)?;
+                    registry.tenant_usage(&p.tenant_id)
+                        .map(|usage|json!({"usage":usage,"publicReady":false}))
                         .map_err(map_network_error)
                 }),
             "/v1/tenant/audit/list"=>parse::<InventoryInput>(body)
@@ -478,6 +491,19 @@ mod tests{
             "tenantId":first.id,"limit":101,"offset":0
         }));
         assert_eq!(status,StatusCode::BAD_REQUEST);
+        let (status,usage)=call("/v1/tenant/usage",&viewer_auth,
+            json!({"tenantId":first.id}));
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(usage["usage"]["activeDevices"],1);
+        assert_eq!(usage["usage"]["reservedHostnames"],1);
+        assert_eq!(usage["usage"]["remainingDevices"],2);
+        assert_eq!(usage["usage"]["remainingHostnames"],9);
+        assert_eq!(usage["usage"]["publiclyRoutable"],false);
+        assert_eq!(usage["publicReady"],false);
+        assert_eq!(call("/v1/tenant/usage",&owner_auth,
+            json!({"tenantId":second.id})).0,StatusCode::UNAUTHORIZED);
+        assert_eq!(command(&api,"/v1/tenant/usage",false,
+            json!({"tenantId":first.id})).0,StatusCode::UNAUTHORIZED);
         let (status,revoke)=call("/v1/tenant/agents/revoke",&owner_auth,json!({
             "tenantId":first.id,"agentId":agent["id"]
         }));
@@ -486,6 +512,11 @@ mod tests{
         let (status,agents)=call("/v1/tenant/agents/list",&viewer_auth,inventory.clone());
         assert_eq!(status,StatusCode::OK);
         assert!(agents["items"].as_array().unwrap().is_empty());
+        let (status,after_usage)=call("/v1/tenant/usage",&viewer_auth,
+            json!({"tenantId":first.id}));
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(after_usage["usage"]["activeDevices"],0);
+        assert_eq!(after_usage["usage"]["reservedHostnames"],0);
         let (status,routes)=call("/v1/tenant/routes/list",&viewer_auth,inventory);
         assert_eq!(status,StatusCode::OK);
         assert!(routes["items"].as_array().unwrap().is_empty());
