@@ -59,6 +59,52 @@ pub async fn verify(engine: &Arc<Engine>, id: &str, snapshot_id: &str) -> Result
     Ok(json!({"verified":true,"snapshot":record}))
 }
 
+/// Copy a chosen snapshot outside Hostify without overwriting existing files.
+/// The destination is selected by a native Save dialog and the bytes are
+/// checked against the immutable manifest before the export is accepted.
+pub async fn export(engine:&Arc<Engine>,id:&str,snapshot_id:&str,destination:&str)->Result<Value>{
+    let _guard=engine.operations.lock().await;
+    let _publishing=engine.publishing.try_lock()
+        .map_err(|_|anyhow!("Wait for the current deployment to finish before exporting."))?;
+    engine.store.site(id)?;
+    let root=engine.store.root.clone();
+    let base=backup_root(&root);
+    let site_id=id.to_owned();
+    let record_id=snapshot_id.to_owned();
+    let dest=PathBuf::from(destination);
+    if !dest.is_absolute() || dest.extension().and_then(|s|s.to_str())!=Some("zip") {
+        bail!("Choose an absolute .zip destination using the native Save dialog.");
+    }
+    let result=tokio::task::spawn_blocking(move ||->Result<Value>{
+        let record=hostify_core::snapshots::read(&base,&site_id,&record_id)?;
+        let parent=dest.parent().ok_or_else(||anyhow!("Invalid export destination."))?;
+        // Keeping the extra copy inside Hostify offers no disaster recovery
+        // protection. Never accept overwrite, even with a user-supplied path.
+        if std::fs::canonicalize(parent)?.starts_with(std::fs::canonicalize(&root)?) {
+            bail!("Export outside the Hostify managed data directory.");
+        }
+        let source=hostify_core::snapshots::archive(&base,&site_id,&record_id)?;
+        let mut from=std::fs::File::open(source)?;
+        let mut to=std::fs::OpenOptions::new().write(true).create_new(true).open(&dest)?;
+        let copy_result=(||->Result<()>{
+            std::io::copy(&mut from,&mut to)?;
+            to.sync_all()?;
+            drop(to);
+            if hostify_core::snapshots::checksum(&dest)?!=record.sha256 {
+                bail!("Export integrity validation failed.");
+            }
+            Ok(())
+        })();
+        if copy_result.is_err(){let _=std::fs::remove_file(&dest);}
+        copy_result?;
+        Ok(json!({"exported":true,"archiveBytes":record.archive_bytes,
+            "sha256":record.sha256,"mayContainSecrets":record.may_contain_secrets}))
+    }).await??;
+    engine.store.activity("info",Some(id),
+        "Time Machine: a verified website snapshot was exported to a user-selected destination.")?;
+    Ok(result)
+}
+
 pub async fn restore(engine: &Arc<Engine>, id: &str, snapshot_id: &str, confirm_name: &str) -> Result<Value> {
     let _guard=engine.operations.lock().await;
     let _publishing=engine.publishing.try_lock()

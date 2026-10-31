@@ -95,7 +95,7 @@ fn files(source: &Path, rel: &Path, output: &mut Vec<(PathBuf,String,u64)>, byte
     }
     Ok(())
 }
-fn digest(path: &Path) -> Result<String, Error> {
+pub fn checksum(path: &Path) -> Result<String, Error> {
     let mut f = File::open(path)?;
     let mut hash = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
@@ -147,7 +147,7 @@ pub fn create(source: &Path, base: &Path, site_id: &str, site_kind: &str, releas
         }
         let f=zip.finish()?;
         f.sync_all()?;
-        let hash=digest(&temp)?;
+        let hash=checksum(&temp)?;
         let archive_bytes=fs::metadata(&temp)?.len();
         let manifest=Manifest {
             id:id.clone(),site_id:site_id.into(),site_kind:site_kind.into(),
@@ -175,7 +175,7 @@ pub fn read(base: &Path, site_id: &str, snapshot_id: &str) -> Result<Manifest, E
     if record.site_id != site_id || record.id != snapshot_id ||
         record.includes_database || record.includes_secrets { return Err(Error::Integrity); }
     let path=archive(base,site_id,snapshot_id)?;
-    if !safe_metadata(&path)?.is_file() || digest(&path)? != record.sha256 {
+    if !safe_metadata(&path)?.is_file() || checksum(&path)? != record.sha256 {
         return Err(Error::Integrity);
     }
     Ok(record)

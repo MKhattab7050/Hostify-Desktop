@@ -850,6 +850,10 @@ impl Engine {
             "verify_site_snapshot" => {
                 crate::time_machine::verify(self, arg(&p,"siteId")?,arg(&p,"snapshotId")?).await
             }
+            "export_site_snapshot" => {
+                crate::time_machine::export(self,arg(&p,"siteId")?,
+                    arg(&p,"snapshotId")?,arg(&p,"destination")?).await
+            }
             "restore_site_snapshot" => {
                 crate::time_machine::restore(self, arg(&p,"siteId")?,arg(&p,"snapshotId")?,
                     arg(&p,"confirmName")?).await
