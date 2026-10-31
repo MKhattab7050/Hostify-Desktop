@@ -126,6 +126,150 @@ pub fn claim_delivery(
     Ok(if inserted==1 {DeliveryClaim::Fresh} else {DeliveryClaim::Duplicate})
 }
 
+
+/// Explicit opt-in policy for an existing, locally-owned website. Staging a
+/// job is only a request for human review; nothing here downloads or runs code.
+#[derive(Clone,Debug,Serialize,Deserialize)]
+#[serde(rename_all="camelCase")]
+pub struct SourcePolicy {
+    pub site_id:String,
+    pub repository:String,
+    pub branch:String,
+    pub enabled:bool,
+}
+#[derive(Clone,Debug,Serialize,Deserialize)]
+#[serde(rename_all="camelCase")]
+pub struct PendingPush {
+    pub delivery_id:String,
+    pub site_id:String,
+    pub repository:String,
+    pub branch:String,
+    pub commit_sha:String,
+    pub state:String,
+}
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub enum IntakeOutcome { Queued, Duplicate, Disabled, CapacityReached }
+
+/// A real authenticated site owner must be verified by the *caller* before
+/// this function. In particular, GitHub's signed webhook is not authorization
+/// to change the user's deployment settings.
+pub fn configure_source(
+    db:&mut rusqlite::Connection,
+    policy:&SourcePolicy
+)->std::result::Result<(),rusqlite::Error>{
+    let site=Uuid::parse_str(&policy.site_id).map_err(|_|rusqlite::Error::InvalidQuery)?;
+    if !valid_branch(&policy.branch) ||
+        policy.repository.split('/').count()!=2 ||
+        policy.repository.len()>200 ||
+        !policy.repository.bytes().all(|b|
+            b.is_ascii_alphanumeric()||matches!(b,b'_'|b'-'|b'.'|b'/')) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    create_inbox_tables(db)?;
+    db.execute(
+        "INSERT INTO github_site_sources(site_id,repository,branch,enabled)
+         VALUES(?1,?2,?3,?4)
+         ON CONFLICT(site_id) DO UPDATE SET
+           repository=excluded.repository,
+           branch=excluded.branch,
+           enabled=excluded.enabled",
+        rusqlite::params![site.to_string(),policy.repository,policy.branch,policy.enabled]
+    )?;
+    Ok(())
+}
+fn create_inbox_tables(db:&rusqlite::Connection)->std::result::Result<(),rusqlite::Error>{
+    db.execute_batch("CREATE TABLE IF NOT EXISTS github_site_sources(
+        site_id TEXT PRIMARY KEY, repository TEXT NOT NULL,
+        branch TEXT NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1))
+    );
+    CREATE TABLE IF NOT EXISTS github_push_inbox(
+        delivery_id TEXT PRIMARY KEY, site_id TEXT NOT NULL,
+        repository TEXT NOT NULL, branch TEXT NOT NULL,
+        commit_sha TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'awaiting_review'
+            CHECK(state IN ('awaiting_review','rejected','approved')),
+        received_at TEXT NOT NULL,
+        FOREIGN KEY(site_id) REFERENCES github_site_sources(site_id)
+    );
+    CREATE INDEX IF NOT EXISTS github_push_pending_by_site
+        ON github_push_inbox(site_id,state);")?;
+    Ok(())
+}
+/// Must be called only AFTER HMAC and exact repo/branch validation, via
+/// verify_push(...). The pending queue survives restart and has a bounded
+/// per-site backlog. No build, DNS mutation, or trust acknowledgment follows.
+pub fn enqueue_verified_push(
+    db:&mut rusqlite::Connection,
+    site_id:&str,
+    push:&VerifiedPush
+)->std::result::Result<IntakeOutcome,rusqlite::Error>{
+    let site_id=Uuid::parse_str(site_id).map_err(|_|rusqlite::Error::InvalidQuery)?.to_string();
+    if !valid_branch(&push.branch) || !valid_commit(&push.commit_sha) ||
+        Uuid::parse_str(&push.delivery_id).is_err() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    create_inbox_tables(db)?;
+    let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let policy:Option<(String,String,bool)>={
+        use rusqlite::OptionalExtension;
+        tx.query_row(
+            "SELECT repository,branch,enabled FROM github_site_sources WHERE site_id=?1",
+            [&site_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))
+        ).optional()?
+    };
+    let Some((repository,branch,enabled))=policy else {return Ok(IntakeOutcome::Disabled)};
+    if !enabled ||
+        !push.repository.eq_ignore_ascii_case(&repository) ||
+        push.branch!=branch {return Ok(IntakeOutcome::Disabled);}
+    let duplicate:i64=tx.query_row(
+        "SELECT COUNT(*) FROM github_push_inbox WHERE delivery_id=?1",
+        [&push.delivery_id],|r|r.get(0))?;
+    if duplicate!=0 {return Ok(IntakeOutcome::Duplicate);}
+    let outstanding:i64=tx.query_row(
+        "SELECT COUNT(*) FROM github_push_inbox
+         WHERE site_id=?1 AND state='awaiting_review'",
+        [&site_id],|r|r.get(0))?;
+    if outstanding>=10 {return Ok(IntakeOutcome::CapacityReached);}
+    tx.execute(
+        "INSERT INTO github_push_inbox(delivery_id,site_id,repository,branch,commit_sha,received_at)
+            VALUES(?1,?2,?3,?4,?5,?6)",
+        rusqlite::params![push.delivery_id,site_id,push.repository,push.branch,push.commit_sha,
+            chrono::Utc::now().to_rfc3339()]
+    )?;
+    tx.commit()?;
+    Ok(IntakeOutcome::Queued)
+}
+/// Read-only history; user code and webhook secrets are never included.
+pub fn pending_pushes(
+    db:&rusqlite::Connection, site_id:&str
+)->std::result::Result<Vec<PendingPush>,rusqlite::Error>{
+    let id=Uuid::parse_str(site_id).map_err(|_|rusqlite::Error::InvalidQuery)?.to_string();
+    create_inbox_tables(db)?;
+    let mut stmt=db.prepare(
+        "SELECT delivery_id,site_id,repository,branch,commit_sha,state
+         FROM github_push_inbox WHERE site_id=?1 ORDER BY received_at DESC LIMIT 50"
+    )?;
+    stmt.query_map([id],|r|Ok(PendingPush{
+        delivery_id:r.get(0)?,site_id:r.get(1)?,repository:r.get(2)?,
+        branch:r.get(3)?,commit_sha:r.get(4)?,state:r.get(5)?,
+    }))?.collect()
+}
+/// A site owner may reject a proposed push without running the code.
+/// The worker remains intentionally disabled until isolated build+trust
+/// approval and deployment safety mechanisms exist.
+pub fn reject_pending_push(
+    db:&mut rusqlite::Connection,site_id:&str,delivery_id:&str
+)->std::result::Result<bool,rusqlite::Error>{
+    let id=Uuid::parse_str(site_id).map_err(|_|rusqlite::Error::InvalidQuery)?.to_string();
+    let delivery=Uuid::parse_str(delivery_id).map_err(|_|rusqlite::Error::InvalidQuery)?.to_string();
+    create_inbox_tables(db)?;
+    let changed=db.execute(
+        "UPDATE github_push_inbox SET state='rejected'
+         WHERE site_id=?1 AND delivery_id=?2 AND state='awaiting_review'",
+        rusqlite::params![id,delivery]
+    )?;
+    Ok(changed==1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +327,57 @@ mod tests {
         }
         let mut db=rusqlite::Connection::open(&database).unwrap();
         assert_eq!(claim_delivery(&mut db,&push).unwrap(),DeliveryClaim::Duplicate);
+    }
+    #[test]
+    fn webhook_inbox_requires_explicit_opt_in_and_preserves_review_gate() {
+        let tmp=tempfile::tempdir().unwrap();
+        let path=tmp.path().join("inbox.db");
+        let site=Uuid::new_v4().to_string();
+        let (body,sig)=fixture();
+        let push=verify(&body,&sig,"company/project","main").unwrap();
+        {
+            let mut db=rusqlite::Connection::open(&path).unwrap();
+            assert_eq!(enqueue_verified_push(&mut db,&site,&push).unwrap(),IntakeOutcome::Disabled);
+            configure_source(&mut db,&SourcePolicy{
+                site_id:site.clone(),repository:"company/project".into(),
+                branch:"main".into(),enabled:true,
+            }).unwrap();
+            assert_eq!(enqueue_verified_push(&mut db,&site,&push).unwrap(),IntakeOutcome::Queued);
+            assert_eq!(enqueue_verified_push(&mut db,&site,&push).unwrap(),IntakeOutcome::Duplicate);
+            let list=pending_pushes(&db,&site).unwrap();
+            assert_eq!(list.len(),1);
+            assert_eq!(list[0].state,"awaiting_review");
+        }
+        let mut db=rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(pending_pushes(&db,&site).unwrap().len(),1);
+        assert!(reject_pending_push(&mut db,&site,&push.delivery_id).unwrap());
+        assert!(!reject_pending_push(&mut db,&site,&push.delivery_id).unwrap());
+        assert_eq!(pending_pushes(&db,&site).unwrap()[0].state,"rejected");
+    }
+    #[test]
+    fn source_mismatch_disable_and_backlog_are_fail_closed() {
+        let mut db=rusqlite::Connection::open_in_memory().unwrap();
+        let id=Uuid::new_v4().to_string();
+        configure_source(&mut db,&SourcePolicy{site_id:id.clone(),
+            repository:"org/site".into(),branch:"main".into(),enabled:true}).unwrap();
+        let denied=VerifiedPush{delivery_id:Uuid::new_v4().to_string(),
+            repository:"other/repo".into(),branch:"main".into(),
+            commit_sha:"a".repeat(40)};
+        assert_eq!(enqueue_verified_push(&mut db,&id,&denied).unwrap(),IntakeOutcome::Disabled);
+        let mut push=denied;
+        push.repository="org/site".into();
+        for i in 0..10 {
+            push.delivery_id=Uuid::new_v4().to_string();
+            push.commit_sha=format!("{i:040x}");
+            if i==0 {push.commit_sha="b".repeat(40);}
+            assert_eq!(enqueue_verified_push(&mut db,&id,&push).unwrap(),IntakeOutcome::Queued);
+        }
+        push.delivery_id=Uuid::new_v4().to_string();
+        push.commit_sha="c".repeat(40);
+        assert_eq!(enqueue_verified_push(&mut db,&id,&push).unwrap(),IntakeOutcome::CapacityReached);
+        configure_source(&mut db,&SourcePolicy{site_id:id.clone(),
+            repository:"org/site".into(),branch:"main".into(),enabled:false}).unwrap();
+        assert_eq!(enqueue_verified_push(&mut db,&id,&push).unwrap(),IntakeOutcome::Disabled);
     }
     #[test]
     fn malformed_input_fails_closed(){
