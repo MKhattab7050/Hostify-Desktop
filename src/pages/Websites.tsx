@@ -6,6 +6,7 @@ import { holdsResources, isActive, publishPill } from "../lib/publish";
 import { Button, Card, Confirm, Disclosure, Empty, Modal, PageHeader, Pill, Skeleton, StatusPill, fmtBytes, fmtFiles, fmtTime } from "../components/ui";
 import { SignalPath } from "../components/SignalPath";
 import { PublishProgress } from "../components/PublishProgress";
+import { AppDetails } from "../components/AppDetails";
 import { useSiteActions } from "../components/siteActions";
 import type { Site, SourceKind } from "../lib/types";
 
@@ -106,16 +107,20 @@ function Detail({ site }: { site: Site }) {
         <Button variant="danger" onClick={() => setRemoving(true)} className="ml-auto"><Trash2 size={14} aria-hidden />Remove website</Button>
       </div>
 
-      <Card className="p-4">
-        <Disclosure title="Server log and details">
-          <div className="mt-2 grid gap-2">
-            <p className="selectable break-all text-[13px] text-ink2">Imported from {site.sourcePath}</p>
-            <div className="flex justify-end"><Button variant="ghost" size="sm" onClick={() => api.siteLogs(site.id, 120).then(setLogs).catch((e) => setLogErr((e as Error).message))}><RefreshCw size={13} aria-hidden />Refresh log</Button></div>
-            {logErr && <p role="alert" className="text-[13px] text-buoy">{logErr}</p>}
-            {logs ? <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-ctl bg-chalk p-3 font-mono text-[12px] leading-5 text-ink2">{logs.length ? logs.join("\n") : "No requests logged yet."}</pre> : <Skeleton className="h-24" />}
-          </div>
-        </Disclosure>
-      </Card>
+      {site.kind && site.kind !== "static" ? (
+        <AppDetails site={site} />
+      ) : (
+        <Card className="p-4">
+          <Disclosure title="Server log and details">
+            <div className="mt-2 grid gap-2">
+              <p className="selectable break-all text-[13px] text-ink2">Imported from {site.sourcePath}</p>
+              <div className="flex justify-end"><Button variant="ghost" size="sm" onClick={() => api.siteLogs(site.id, 120).then(setLogs).catch((e) => setLogErr((e as Error).message))}><RefreshCw size={13} aria-hidden />Refresh log</Button></div>
+              {logErr && <p role="alert" className="text-[13px] text-buoy">{logErr}</p>}
+              {logs ? <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-ctl bg-chalk p-3 font-mono text-[12px] leading-5 text-ink2">{logs.length ? logs.join("\n") : "No requests logged yet."}</pre> : <Skeleton className="h-24" />}
+            </div>
+          </Disclosure>
+        </Card>
+      )}
 
       {updating && <UpdateFiles site={site} onClose={() => setUpdating(false)} />}
       {unpublishing && (
