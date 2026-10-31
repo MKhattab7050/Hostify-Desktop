@@ -15,7 +15,7 @@ const SESSION_TTL:i64=12*3600;
 const MAX_FAILURES:i64=5;
 const LOCK_SECONDS:i64=15*60;
 
-#[derive(Debug,Error,PartialEq,Eq)]
+#[derive(Debug,Error)]
 pub enum AccountError {
     #[error("invalid account data")]
     Invalid,
@@ -374,10 +374,8 @@ mod tests {
         let (_tmp,a,_b,mut acc)=init();
         acc.bootstrap_owner(&a,"owner@example.com","correct-long-password").unwrap();
         for _ in 0..5 {
-            assert_eq!(acc.sign_in(&a,"owner@example.com","incorrect-password").unwrap_err(),
-                AccountError::Authentication);
+            assert!(matches!(acc.sign_in(&a,"owner@example.com","incorrect-password"),Err(AccountError::Authentication)));
         }
-        assert_eq!(acc.sign_in(&a,"owner@example.com","correct-long-password").unwrap_err(),
-            AccountError::Locked);
+        assert!(matches!(acc.sign_in(&a,"owner@example.com","correct-long-password"),Err(AccountError::Locked)));
     }
 }
