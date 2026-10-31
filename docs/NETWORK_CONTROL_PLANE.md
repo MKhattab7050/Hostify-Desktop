@@ -39,6 +39,8 @@ All endpoints are JSON, have a 32 KiB body limit, disable caches, and return no 
 | `POST /v1/tenant/invitations` | Tenant ManageDevices session | Issues one-use device enrollment invitation for own tenant |
 | `POST /v1/tenant/routes/reserve` | Tenant ManageSites session | Reserves a non-routable hostname for own tenant |
 | `POST /v1/tenant/agents/revoke` | Tenant ManageDevices session | Revokes own device and disables its reserved routes |
+| `POST /v1/tenant/agents/list` | Tenant View session | Returns only the tenant's non-revoked devices (1–100/page) |
+| `POST /v1/tenant/routes/list` | Tenant View session | Returns only reserved/active tenant routes for non-revoked devices; **not proof of public reachability** |
 
 For new operator-provisioned tenants, prefer `POST /v1/accounts/provision` with `name`, `email` and `password`. It rolls back the whole operation if owner creation or auditing fails. The old `POST /v1/tenants` plus `POST /v1/accounts/bootstrap` developer flow remains for compatibility but is not atomic across requests. **Neither is a public self-signup API.**
 
