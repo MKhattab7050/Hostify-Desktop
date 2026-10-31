@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Boxes,
@@ -159,7 +159,7 @@ export function PublishWizard() {
           ? `Publish ${existing?.name}`
           : createdSite
             ? `Publish ${createdSite.name}`
-            : "Add and publish a website"
+            : "Add a website"
       }
       wide
       onClose={closeWizard}
@@ -442,7 +442,7 @@ function Step1Import({
 
       <div className="flex justify-end">
         <Button variant="primary" disabled={!ok} onClick={onNext}>
-          Continue to detection
+          Continue
         </Button>
       </div>
     </div>
@@ -1087,9 +1087,13 @@ function Step7LocalPreview({
   const [buildDone, setBuildDone] = useState(false);
   const [created, setCreated] = useState<Site | undefined>(site);
   const [opened, setOpened] = useState(false);
+  const onSiteReadyRef = useRef(onSiteReady);
+  onSiteReadyRef.current = onSiteReady;
+  const didInit = useRef(false);
 
   useEffect(() => {
-    if (created) return;
+    if (created || didInit.current) return;
+    didInit.current = true;
     let dead = false;
 
     async function init() {
@@ -1104,7 +1108,7 @@ function Step7LocalPreview({
         );
         if (dead) return;
         setCreated(s);
-        await onSiteReady(s);
+        await onSiteReadyRef.current(s);
 
         for (const ev of state.envVars) {
           if (ev.value) {
@@ -1125,7 +1129,7 @@ function Step7LocalPreview({
       } catch (e) {
         if (!dead) toast("error", (e as Error).message);
       } finally {
-        if (!dead) setBusy(false);
+        setBusy(false);
       }
     }
 
@@ -1133,7 +1137,7 @@ function Step7LocalPreview({
     return () => {
       dead = true;
     };
-  }, [created, state, onSiteReady, toast]);
+  }, [created, state, toast]);
 
   async function openPreview() {
     if (!created) return;
@@ -1280,7 +1284,7 @@ function Step8Domain({
         Connecting domain for <span className="font-semibold text-ink">{site.name}</span>
       </div>
       <Field
-        label="Hostname / Domain"
+        label="Domain"
         value={hostname}
         onChange={(e) => {
           setHostname(e.target.value);
@@ -1291,7 +1295,7 @@ function Step8Domain({
         placeholder="app.example.com"
         autoCapitalize="off"
         spellCheck={false}
-        error={touched && hostname && !valid ? "Enter a valid hostname, e.g. app.example.com." : err}
+        error={touched && hostname && !valid ? "Enter a full domain, like www.example.com." : err}
         hint="Hostify validates DNS zone permissions with your Cloudflare token."
       />
 
@@ -1452,7 +1456,7 @@ function Step9Publish({
           disabled={!consent || !plan || plan.action === "conflict"}
           onClick={go}
         >
-          {starting ?? "Publish website over HTTPS"}
+          {starting ?? "Publish website"}
         </Button>
       </div>
     </div>

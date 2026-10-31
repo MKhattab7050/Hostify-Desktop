@@ -34,7 +34,8 @@ async function publishTo(page, host) {
   await page.getByRole("button", { name: "Add website" }).first().click();
   await page.getByRole("button", { name: "Choose folder" }).click();
   await page.getByText(/24 files/).waitFor();
-  await page.getByRole("dialog").getByRole("button", { name: "Add website" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Continue to domain" }).click();
   await page.getByRole("button", { name: "Connect Cloudflare" }).click();
   await page.getByLabel("API token").fill("x".repeat(40));
@@ -171,7 +172,8 @@ await test("invalid domain is rejected after leaving the field", async () => {
   await page.getByRole("button", { name: "Add website" }).first().click();
   await page.getByRole("button", { name: "Choose folder" }).click();
   await page.getByText(/24 files/).waitFor();
-  await page.getByRole("dialog").getByRole("button", { name: "Add website" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Continue to domain" }).click();
   await page.getByRole("button", { name: "Connect Cloudflare" }).click();
   await page.getByLabel("API token").fill("x".repeat(40));
