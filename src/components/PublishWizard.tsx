@@ -20,7 +20,7 @@ import {
 import { useStore } from "../store";
 import { api, isTauri, onFileDrop } from "../lib/api";
 import { isActive, holdsResources } from "../lib/publish";
-import { Button, Card, Field, Modal, Pill, Select, Skeleton, cx, fmtBytes, fmtFiles } from "./ui";
+import { Button, Card, Disclosure, Field, Modal, Pill, Select, Skeleton, cx, fmtBytes, fmtFiles } from "./ui";
 import { PublishProgress } from "./PublishProgress";
 import { ConnectCloudflare } from "../pages/Domains";
 import { RuntimeInstall, RUNTIME_NAMES } from "../pages/Runtimes";
@@ -35,6 +35,8 @@ import type {
   ManagedDatabase,
   MysqlStatus,
   ProjectReport,
+  PublishPreflight,
+  PublishDiagnostic,
   RuntimeStatus,
   Site,
   SiteKind,
@@ -1441,6 +1443,8 @@ function Step9Publish({
   const [depId, setDepId] = useState<string | undefined>(resumable);
   const [starting, setStarting] = useState<string>();
   const [err, setErr] = useState<string>();
+  const [preflight, setPreflight] = useState<PublishPreflight>();
+  const [diagnosis, setDiagnosis] = useState<PublishDiagnostic>();
   const dep = useStore((s) => (depId ? s.deployments[depId] : undefined));
 
   useEffect(() => {
@@ -1453,17 +1457,42 @@ function Step9Publish({
 
   async function go() {
     setErr(undefined);
+    setDiagnosis(undefined);
     try {
+      if (!consent) throw new Error("Cloudflare DNS consent is required.");
       if (!useStore.getState().engine?.componentsReady) {
-        setStarting("Installing components");
+        setStarting("Installing verified components");
         await useStore.getState().installComponents();
       }
-      setStarting("Starting tunnel");
+
+      setStarting("Checking local application");
+      let result = await api.publishPreflight(site.id);
+      setPreflight(result);
+      if (!result.ready) {
+        // The shared engine starts stopped sites during publish. Do that safely
+        // here as well, while preserving the trust and build guards.
+        const other = result.blocked.filter((message) => !message.includes("not running and healthy"));
+        if (other.length) throw new Error(other.join(" "));
+        setStarting("Starting verified local website");
+        await api.startSite(site.id);
+        result = await api.publishPreflight(site.id);
+        setPreflight(result);
+        if (!result.ready) throw new Error(result.blocked.join(" ") || "Local preflight failed.");
+      }
+
+      setStarting("Checking DNS ownership");
+      const currentPlan = await api.cfPlanDns(site.id, host);
+      setPlan(currentPlan);
+      if (currentPlan.action === "conflict") {
+        throw new Error(currentPlan.message || "DNS record conflict. Existing records were preserved.");
+      }
+      setStarting("Starting secure tunnel");
       const d = await api.publishSite(site.id, host, consent);
       setDeployment(d);
       setDepId(d.id);
     } catch (e) {
       setErr((e as Error).message);
+      try { setDiagnosis(await api.publishDiagnosis(site.id)); } catch { /* keep the primary failure */ }
     } finally {
       setStarting(undefined);
     }
@@ -1539,7 +1568,21 @@ function Step9Publish({
         </label>
       )}
 
-      {err && <p className="selectable text-[13px] text-buoy" role="alert">{err}</p>}
+      {preflight && <Disclosure title="Local safety and health checks">
+        <ul className="mt-2 grid gap-2 text-[13px]">
+          {preflight.checks.map((check) => <li key={check.key} className="flex items-start gap-2">
+            {check.passed ? <CheckCircle2 size={15} className="mt-0.5 shrink-0 text-kelp" /> :
+              <AlertTriangle size={15} className="mt-0.5 shrink-0 text-buoy" />}
+            <span><strong>{check.key}</strong>: {check.detail}</span>
+          </li>)}
+        </ul>
+      </Disclosure>}
+      {err && <div className="selectable rounded-ctl border border-buoy bg-buoysoft p-3 text-[13px]" role="alert">
+        <p>{err}</p>
+        {diagnosis && diagnosis.message !== "No error reported." && <p className="mt-2 text-ink2">
+          {diagnosis.class}: {diagnosis.nextAction}
+        </p>}
+      </div>}
 
       <div className="flex justify-between border-t border-line pt-4">
         <Button onClick={onBack}>Back</Button>
