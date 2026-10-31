@@ -1,10 +1,10 @@
-name: Validate Fast and Standard Publish
+name: Validate Hostify Desktop release and feature branches
 
 on:
   push:
-    branches: [feature/fast-standard-publish, feature/v3-guardian-backups, feature/v4-network-core, feature/v3-app-catalog, feature/v3-doctor-github-foundation, feature/v4-security-center, feature/v4-agent-proof, feature/v4-network-account-auth]
+    branches: [release/v2-rc1, 'feature/**']
   pull_request:
-    branches: [release/v2-rc1, feature/fast-standard-publish, feature/v3-guardian-backups, feature/v4-network-core, feature/v3-app-catalog]
+    branches: [release/v2-rc1, 'feature/**']
   workflow_dispatch:
 
 permissions:
@@ -36,6 +36,9 @@ jobs:
         run: pnpm lint
       - name: Build frontend
         run: pnpm build
+      - name: Verify Windows live-test script reports absent components honestly
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-verify-hosting-windows.ps1
       - name: Test Rust workspace (including security regressions)
         run: cargo test --workspace --locked
       - name: Test real UI flows with Edge and the isolated preview backend

@@ -19,9 +19,12 @@ pub mod app_config;
 pub mod project;
 pub mod snapshots;
 pub mod network;
-pub mod network_auth;
-pub mod network_service;
+pub mod device_identity;
 pub mod catalog;
 pub mod doctor;
 pub mod github_webhooks;
 pub mod diagnostics;
+
+pub mod network_auth;
+
+pub mod network_service;
