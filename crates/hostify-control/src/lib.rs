@@ -329,6 +329,43 @@ mod tests{
         assert_eq!(s,StatusCode::PAYLOAD_TOO_LARGE);
     }
     #[test]
+    fn operator_only_provision_creates_owner_and_tenant_atomically(){
+        let path=std::env::temp_dir().join(format!("hostify-atomic-http-{}.db",Uuid::new_v4()));
+        let registry=Registry::open(&path,"example.test").unwrap();
+        let accounts=Accounts::open(&path).unwrap();
+        let api=Controller::new(registry,
+            b"0123456789abcdef0123456789abcdef".to_vec()).unwrap().with_accounts(accounts);
+        let input=json!({"name":"New Tenant","email":"owner@site.test",
+            "password":"a-valid-owner-password"});
+        let (s,_) = command(&api,"/v1/accounts/provision",false,input.clone());
+        assert_eq!(s,StatusCode::UNAUTHORIZED);
+        let (s,_) = command(&api,"/v1/accounts/provision",true,json!({
+            "name":"Should Not Exist","email":"owner@site.test","password":"short"
+        }));
+        assert_eq!(s,StatusCode::BAD_REQUEST);
+        let (s,created)=command(&api,"/v1/accounts/provision",true,input);
+        assert_eq!(s,StatusCode::OK);
+        let id=created["tenant"]["id"].as_str().unwrap();
+        assert_eq!(created["owner"]["tenantId"],id);
+        assert_eq!(created["owner"]["role"],"owner");
+        let (s,logged)=command(&api,"/v1/auth/login",false,json!({
+            "tenantId":id,"email":"owner@site.test","password":"a-valid-owner-password"
+        }));
+        assert_eq!(s,StatusCode::OK);
+        assert_eq!(logged["user"]["tenantId"],id);
+        drop(api);
+        let db=rusqlite::Connection::open(&path).unwrap();
+        let tenants:i64=db.query_row("SELECT COUNT(*) FROM network_tenants",
+            [],|r|r.get(0)).unwrap();
+        let owners:i64=db.query_row("SELECT COUNT(*) FROM network_users WHERE role='owner'",
+            [],|r|r.get(0)).unwrap();
+        let audit:i64=db.query_row("SELECT COUNT(*) FROM network_audit WHERE action='tenant_created'",
+            [],|r|r.get(0)).unwrap();
+        assert_eq!((tenants,owners,audit),(1,1,1));
+        drop(db);
+        std::fs::remove_file(&path).unwrap();
+    }
+    #[test]
     fn localhost_account_sessions_enforce_tenant_roles_and_revoke_tokens(){
         let path=std::env::temp_dir().join(format!("hostify-tenant-http-{}.db",Uuid::new_v4()));
         let mut registry=Registry::open(&path,"example.test").unwrap();
