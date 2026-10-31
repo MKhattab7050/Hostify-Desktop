@@ -89,6 +89,9 @@ export const api = {
   listDatabases: () => call<ManagedDatabase[]>("list_databases"),
   createDatabase: (name: string, siteId?: string, injectEnv?: boolean, replaceEnv?: boolean) => call<{ restartRequired?: boolean }>("create_database", { name, siteId, injectEnv, replaceEnv }),
   deleteDatabase: (name: string, confirmName: string) => call<void>("delete_database", { name, confirmName }),
+  linkDatabase: (name: string, siteId: string, injectEnv?: boolean, replaceEnv?: boolean) =>
+    call<{ restartRequired?: boolean }>("link_database", { name, siteId, injectEnv: injectEnv ?? false, replaceEnv: replaceEnv ?? false }),
+  unlinkDatabase: (name: string) => call<{ restartRequired?: boolean }>("unlink_database", { name }),
   databaseConnection: (name: string) => call<DatabaseConnection>("database_connection", { name }),
   testConnection: (name: string) => call<{ ok: boolean; detail: string; elapsedMs: number }>("test_connection", { name }),
   revealDbPassword: (user: string) => call<string>("reveal_db_password", { user }),

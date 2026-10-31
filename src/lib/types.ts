@@ -76,5 +76,5 @@ export interface AppStatus {
 export type LogStream = "app" | "build" | "access";
 export interface MysqlStatus { setUp: boolean; version?: string; running: boolean; port?: number; pid?: number; memoryBytes?: number; dataBytes?: number; freeDiskBytes?: number; lastError?: string; healthy?: boolean }
 export interface ManagedDatabase { name: string; siteId?: string | null; siteName?: string | null; sizeBytes?: number; users: string[]; connectionOk: boolean | null; lastBackupAt?: string | null; lastBackupBytes?: number | null }
-export interface DatabaseBackup { file: string; sizeBytes: number; createdAt: string }
+export interface DatabaseBackup { file: string; sizeBytes: number; createdAt: string; time?: string }
 export interface DatabaseConnection { host: string; port: number; database: string; user: string }

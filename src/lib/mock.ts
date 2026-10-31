@@ -112,6 +112,14 @@ export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise
     case "list_databases": return r(databases);
     case "create_database": { if (/fail/.test(a.name)) throw new Error("Preview: MySQL refused the new database."); databases = [...databases, { name: a.name, siteId: a.siteId, siteName: sites.find((s) => s.id === a.siteId)?.name, sizeBytes: 16384, users: [`${a.name}_app`], connectionOk: true }]; return r({ restartRequired: false }); }
     case "delete_database": databases = databases.filter((d) => d.name !== a.name); return r(undefined);
+    case "link_database": {
+      databases = databases.map((d) => d.name === a.name ? { ...d, siteId: a.siteId, siteName: sites.find((s) => s.id === a.siteId)?.name } : d);
+      return r({ restartRequired: true });
+    }
+    case "unlink_database": {
+      databases = databases.map((d) => d.name === a.name ? { ...d, siteId: null, siteName: null } : d);
+      return r({ restartRequired: true });
+    }
     case "database_connection": return r({ host: "127.0.0.1", port: 3307, database: a.name, user: `${a.name}_app` });
     case "test_connection": return r({ ok: true, detail: "Connected as the website's user.", elapsedMs: 12 });
     case "reveal_db_password": return r("preview-only-not-a-real-password");

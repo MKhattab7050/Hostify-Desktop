@@ -119,7 +119,6 @@ impl EngineClient {
                             | "runtime-progress"
                             | "mysql-progress"
                             | "app-build"
-                            | "app-build"
                     ) {
                         let _ =
                             app.emit(event, value.get("payload").cloned().unwrap_or(Value::Null));

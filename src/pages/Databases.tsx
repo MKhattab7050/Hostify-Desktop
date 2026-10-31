@@ -84,8 +84,8 @@ function Details({ db, onChanged, onClose }: { db: ManagedDatabase; onChanged: (
           {!backups && !err && <Skeleton className="h-12" />}
           {backups?.length === 0 && <p className="text-[13px] text-ink2">No backups yet. Backups are readable SQL files kept in your Hostify data folder.</p>}
           {backups && backups.length > 0 && <ul className="divide-y divide-line">{backups.map((b) => (
-            <li key={b.file} className="flex flex-wrap items-center justify-between gap-2 py-2"><div><div className="font-medium">{fmtTime(b.createdAt)}</div><div className="text-[13px] text-ink2">{fmtBytes(b.sizeBytes)}</div></div>
-              <div className="flex gap-1"><Button size="sm" onClick={() => setRestoring(b.file)}>Restore</Button><IconButton label={`Delete backup from ${fmtTime(b.createdAt)}`} onClick={() => setDropping(b.file)}><Trash2 size={15} /></IconButton></div></li>))}</ul>}
+            <li key={b.file} className="flex flex-wrap items-center justify-between gap-2 py-2"><div><div className="font-medium">{fmtTime(b.createdAt || (b as any).time)}</div><div className="text-[13px] text-ink2">{fmtBytes(b.sizeBytes)}</div></div>
+              <div className="flex gap-1"><Button size="sm" onClick={() => setRestoring(b.file)}>Restore</Button><IconButton label={`Delete backup from ${fmtTime(b.createdAt || (b as any).time)}`} onClick={() => setDropping(b.file)}><Trash2 size={15} /></IconButton></div></li>))}</ul>}
         </section>
       </div>
       {restoring && <TypedConfirm title={`Restore ${db.name}?`} name={db.name} action="Restore this backup" onClose={() => setRestoring(undefined)}
