@@ -36,6 +36,7 @@ All endpoints are JSON, have a 32 KiB body limit, disable caches, and return no 
 | `POST /v1/auth/logout` | Tenant session Bearer | Revokes session |
 | `POST /v1/members/invite` | Tenant owner/admin session | Issues role-scoped, single-use member invitation |
 | `POST /v1/members/accept` | Single-use member invitation | Creates invited account without exposing admin credentials |
+| `POST /v1/members/disable` | Tenant Owner/Admin session | Disables an eligible member, invalidates all sessions and writes a security audit event; never disables an owner or caller |
 | `POST /v1/tenant/invitations` | Tenant ManageDevices session | Issues one-use device enrollment invitation for own tenant |
 | `POST /v1/tenant/routes/reserve` | Tenant ManageSites session | Reserves a non-routable hostname for own tenant |
 | `POST /v1/tenant/agents/revoke` | Tenant ManageDevices session | Revokes own device and disables its reserved routes |
