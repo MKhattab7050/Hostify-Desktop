@@ -1,6 +1,9 @@
 # Runs on a clean GitHub Windows runner; no real hosting binaries required.
 # Negative smoke test must report a failure, not a fabricated positive result.
 $ErrorActionPreference='Stop'
+# The negative smoke check intentionally exits 1; keep PowerShell from
+# converting that expected native exit into a terminating exception.
+$PSNativeCommandUseErrorActionPreference = $false
 $script=Join-Path $PSScriptRoot 'verify-hosting-windows.ps1'
 $parseErrors=$null
 $tokens=$null
