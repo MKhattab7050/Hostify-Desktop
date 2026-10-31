@@ -32,6 +32,7 @@ const noOverflow = async (page) => assert.equal(await page.evaluate(() => docume
 
 async function publishTo(page, host) {
   await page.getByRole("button", { name: "Add website" }).first().click();
+  await page.getByRole("button", { name: /Standard Publish/ }).click();
   await page.getByRole("button", { name: "Choose folder" }).click();
   await page.getByText(/24 files/).waitFor();
   await page.getByRole("button", { name: "Continue" }).click();
@@ -74,7 +75,7 @@ await test("first run: onboarding checks the computer and hands over to the wiza
   await page.getByText("Hosting engine", { exact: true }).waitFor();
   await shot(page, "onboarding-system");
   await page.getByRole("button", { name: "Add your first website" }).click();
-  await page.getByRole("dialog", { name: "Add a website" }).waitFor();
+  await page.getByRole("dialog", { name: "How would you like to publish?" }).waitFor();
   await page.reload();
   await page.getByRole("heading", { level: 1, name: /Put your first website online/ }).waitFor();
   assert.equal(await page.getByRole("heading", { name: /Host a website from this PC/ }).count(), 0, "onboarding came back after finishing");
@@ -170,6 +171,7 @@ await test("hard failure shows the real reason and offers a retry", async () => 
 await test("invalid domain is rejected after leaving the field", async () => {
   const page = await open();
   await page.getByRole("button", { name: "Add website" }).first().click();
+  await page.getByRole("button", { name: /Standard Publish/ }).click();
   await page.getByRole("button", { name: "Choose folder" }).click();
   await page.getByText(/24 files/).waitFor();
   await page.getByRole("button", { name: "Continue" }).click();
@@ -182,6 +184,53 @@ await test("invalid domain is rejected after leaving the field", async () => {
   await domain.fill("not a domain"); await domain.blur();
   await page.getByText(/Enter a full domain/).waitFor();
   assert.equal(await page.getByRole("button", { name: "Check domain" }).isDisabled(), true);
+  await page.context().close();
+});
+
+await test("publishing mode chooser separates quick and advanced experiences", async () => {
+  const page = await open();
+  await page.getByRole("button", { name: "Add website" }).first().click();
+  await page.getByRole("dialog", { name: "How would you like to publish?" }).waitFor();
+  await page.getByRole("button", { name: /Fast Publish/ }).click();
+  await page.getByText("Select your project").waitFor();
+  await page.getByRole("button", { name: "Standard Publish" }).click();
+  await page.getByRole("dialog", { name: "Add a website" }).waitFor();
+  await page.getByText("Import", { exact: true }).first().waitFor();
+  await page.context().close();
+});
+
+await test("Fast Publish uses real project detection and requires DNS consent", async () => {
+  const page = await open();
+  await page.getByRole("button", { name: "Add website" }).first().click();
+  await page.getByRole("button", { name: /Fast Publish/ }).click();
+  await page.getByRole("button", { name: "Choose folder" }).click();
+  await page.getByRole("button", { name: /Continue to domain/ }).click();
+  await page.getByRole("textbox", { name: "Public domain" }).fill("fast.example.test");
+  const publish = page.getByRole("button", { name: "Publish website" });
+  assert.equal(await publish.isDisabled(), true, "must not publish without explicit DNS consent");
+  if (await page.getByRole("button", { name: "Connect Cloudflare" }).count()) {
+    await page.getByRole("button", { name: "Connect Cloudflare" }).click();
+    await page.getByLabel("API token").fill("x".repeat(40));
+    await page.getByRole("dialog", { name: "Connect Cloudflare" }).getByRole("button", { name: "Connect Cloudflare" }).click();
+  }
+  await page.getByRole("checkbox", { name: /Authorize this domain/ }).check();
+  await publish.click();
+  await page.getByText("The engine accepted the deployment. Public HTTPS must still be verified.").waitFor({ timeout: 15000 });
+  await page.context().close();
+});
+
+await test("Fast Publish never executes dynamic code without explicit trust", async () => {
+  const page = await open();
+  await page.addInitScript(() => { window.__hostifyMockPath = "C:/hostify/node-express-project"; });
+  await page.getByRole("button", { name: "Add website" }).first().click();
+  await page.getByRole("button", { name: /Fast Publish/ }).click();
+  await page.getByRole("button", { name: "Choose folder" }).click();
+  await page.getByRole("button", { name: /Continue to domain/ }).click();
+  await page.getByRole("textbox", { name: "Public domain" }).fill("safe.example.test");
+  await page.getByRole("checkbox", { name: /Authorize this domain/ }).check();
+  assert.equal(await page.getByRole("button", { name: "Publish website" }).isDisabled(), true);
+  await page.getByRole("checkbox", { name: /I trust this application/ }).check();
+  await page.getByRole("button", { name: "Publish website" }).waitFor({ state: "visible" });
   await page.context().close();
 });
 
