@@ -336,6 +336,26 @@ await test("Security Center marks remote readiness unverified and never hides th
   await page.context().close();
 });
 
+await test("GitHub source review is opt-in, configurable and can be disabled",async()=>{
+  const page=await open();
+  const card=page.locator("section").filter({hasText:"GitHub · Source review"}).first();
+  // The initial fetch must complete before editable fields are available.
+  await card.getByText("Not connected").first().waitFor();
+  await card.getByRole("button",{name:"Save source"}).first().click();
+  await card.getByRole("alert").getByText("Enter a valid owner/repository and branch before saving.").waitFor();
+  await card.getByRole("textbox",{name:"Repository for Bakery landing page"}).fill("example/sample");
+  await card.getByRole("textbox",{name:"Branch for Bakery landing page"}).fill("main");
+  await card.getByRole("button",{name:"Enable push review"}).first().click();
+  await card.getByText(/GitHub push review enabled for Bakery landing page/).waitFor();
+  await card.getByText("Review enabled").first().waitFor();
+  await card.getByRole("button",{name:/Push inbox \(0 awaiting review\)/}).first().click();
+  await card.getByText("No GitHub pushes recorded.").first().waitFor();
+  await card.getByRole("button",{name:"Disable and reject pending"}).first().click();
+  await card.getByText(/GitHub push review disabled for Bakery landing page/).waitFor();
+  await card.getByText("Not connected").first().waitFor();
+  await page.context().close();
+});
+
 await test("no uncaught errors in the browser console", async () => {
   const real = pageErrors.filter((e) => !/favicon/.test(e));
   assert.deepEqual(real, []);

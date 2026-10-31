@@ -61,6 +61,8 @@ const runtimes: RuntimeStatus[] = [
 let mysql = { setUp: false, running: false } as { setUp: boolean; running: boolean; version?: string; port?: number; healthy?: boolean; dataBytes?: number; memoryBytes?: number; freeDiskBytes?: number };
 let databases: ManagedDatabase[] = [];
 const backups = new Map<string, { file: string; sizeBytes: number; createdAt: string }[]>();
+const githubSources = new Map<string, {repository:string;branch:string;enabled:boolean}>();
+const githubPending = new Map<string, {deliveryId:string;siteId:string;repository:string;branch:string;commitSha:string;state:string}[]>();
 const guardian = new Map<string, { enabled: boolean; consecutiveFailures: number; recoveryAttempts: number; lastResult: string }>();
 const snapshotSchedules = new Map<string, {enabled:boolean;everyHours:24|72|168;lastRunUnix:null;lastAttemptUnix:null;pausedForCapacity:boolean}>();
 const siteSnapshots = new Map<string, { id: string; siteId: string; siteKind: string; release: null; createdAt: string;
@@ -110,6 +112,29 @@ export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise
     case "build_app": { if (a.trustAcknowledged !== true) throw new Error("Explicit trust is required before building an application."); const id = "b" + Date.now(); builds.set(a.siteId, { at: Date.now(), fail: /fail/i.test(sites.find((s) => s.id === a.siteId)?.sourcePath ?? ""), id }); return r({ buildId: id }); }
     case "cancel_build": builds.delete(a.siteId); return r(undefined);
     case "get_build_status": return r(buildStatus(a.siteId));
+    case "github_source_status": return r(githubSources.get(a.siteId) ?? {repository:"",branch:"main",enabled:false});
+    case "github_configure_source": {
+      const source={repository:String(a.repository),branch:String(a.branch),enabled:!!a.enabled};
+      const old=githubSources.get(a.siteId);
+      if (!source.enabled || old && (old.repository!==source.repository || old.branch!==source.branch)) {
+        githubPending.set(a.siteId,(githubPending.get(a.siteId)??[]).map(push=>({
+          ...push,state:push.state==="awaiting_review"?"rejected":push.state
+        })));
+      }
+      githubSources.set(a.siteId,source);
+      return r(source);
+    }
+    case "github_pending_pushes": return r(githubPending.get(a.siteId) ?? []);
+    case "github_reject_push": {
+      let rejected=false;
+      githubPending.set(a.siteId,(githubPending.get(a.siteId)??[]).map(push=>{
+        if(push.deliveryId===a.deliveryId&&push.state==="awaiting_review"){
+          rejected=true;return {...push,state:"rejected"};
+        }
+        return push;
+      }));
+      return r({rejected});
+    }
     case "site_snapshot_schedule": return r(snapshotSchedules.get(a.siteId) ?? {
       enabled:false,everyHours:24,lastRunUnix:null,lastAttemptUnix:null,pausedForCapacity:false
     });
