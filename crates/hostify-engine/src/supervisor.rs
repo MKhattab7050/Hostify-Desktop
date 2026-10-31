@@ -1278,7 +1278,22 @@ impl SiteRuntime for Supervisor {
         }])
         .map_err(|e| e.to_string())?;
         let path = self.store.root.join("run").join(format!("{id}.Caddyfile"));
-        std::fs::write(&path, config).map_err(|e| e.to_string())?;
+        let previous_config = std::fs::read_to_string(&path).ok();
+        let changed = previous_config.as_deref() != Some(config.as_str());
+        let key = format!("site:{id}");
+        let was_running = self.workers.lock().await.get(&key)
+            .is_some_and(|w| !w.task.is_finished());
+        // Static sites must also reload when their hostname changes while
+        // Caddy is already active. Never restart another website's server.
+        if changed && was_running {
+            self.stop(&key).await?;
+        }
+        if let Err(e) = std::fs::write(&path, config) {
+            if let Some(previous) = previous_config {
+                let _ = std::fs::write(&path, previous);
+            }
+            return Err(e.to_string());
+        }
         let result = self
             .launch(Spec {
                 key: format!("site:{id}"),
@@ -2342,7 +2357,8 @@ impl Supervisor {
         if let Err(e) = std::fs::rename(&temp, &path) {
             let _ = std::fs::remove_file(&temp);
             if changed && was_running {
-                // Restore the previous config if activation could not be staged.
+                // Don't claim that the previous server was restarted: report the
+                // failure and leave its last configuration available for recovery.
                 if let Some(previous) = previous_config {
                     let _ = std::fs::write(&path, previous);
                 }
