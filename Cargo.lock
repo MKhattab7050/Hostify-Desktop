@@ -1651,7 +1651,7 @@ dependencies = [
 
 [[package]]
 name = "hostify-desktop"
-version = "0.2.0"
+version = "2.0.0-rc.1"
 dependencies = [
  "serde",
  "serde_json",

@@ -54,7 +54,8 @@ PRAGMA user_version=4;",
     }
     if version < 5 {
         let tx = connection.transaction()?;
-        tx.execute_batch("CREATE TABLE managed_databases (
+        tx.execute_batch(
+            "CREATE TABLE managed_databases (
  name TEXT PRIMARY KEY, site_id TEXT, created_at TEXT NOT NULL,
  last_backup_at TEXT, last_backup_path TEXT, last_backup_bytes INTEGER
 );
@@ -63,7 +64,8 @@ CREATE TABLE managed_db_users (
  database_name TEXT NOT NULL REFERENCES managed_databases(name) ON DELETE CASCADE,
  sealed_password BLOB NOT NULL, created_at TEXT NOT NULL
 );
-PRAGMA user_version=5;")?;
+PRAGMA user_version=5;",
+        )?;
         tx.commit()?;
     }
     connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -260,5 +262,36 @@ mod runtime_migration_tests {
 }
 #[cfg(test)]
 mod mysql_migration_tests {
- #[test]fn v4_data_survives_v5(){let mut db=rusqlite::Connection::open_in_memory().unwrap();super::migrate(&mut db).unwrap();db.execute_batch("DROP TABLE managed_db_users;DROP TABLE managed_databases;PRAGMA user_version=4;INSERT INTO websites(id,name,source_path,local_port,created_at,updated_at) VALUES('s','legacy','x',9000,'then','then');INSERT INTO env_vars VALUES('s','GREETING',0,'hello',NULL,'then');INSERT INTO deployments(id,site_id,state,snapshot_json,started_at) VALUES('d','s','published','{}','then');").unwrap();super::migrate(&mut db).unwrap();assert_eq!(db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),5);assert_eq!(db.query_row("SELECT plain_value FROM env_vars",[],|r|r.get::<_,String>(0)).unwrap(),"hello");assert_eq!(db.query_row("SELECT state FROM deployments",[],|r|r.get::<_,String>(0)).unwrap(),"published");db.execute_batch("INSERT INTO managed_databases(name,created_at) VALUES('app','now');INSERT INTO managed_db_users VALUES('app_app','app',x'1234','now');DELETE FROM managed_databases;").unwrap();assert_eq!(db.query_row("SELECT count(*) FROM managed_db_users",[],|r|r.get::<_,u64>(0)).unwrap(),0);super::migrate(&mut db).unwrap();}
+    #[test]
+    fn v4_data_survives_v5() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        super::migrate(&mut db).unwrap();
+        db.execute_batch("DROP TABLE managed_db_users;DROP TABLE managed_databases;PRAGMA user_version=4;INSERT INTO websites(id,name,source_path,local_port,created_at,updated_at) VALUES('s','legacy','x',9000,'then','then');INSERT INTO env_vars VALUES('s','GREETING',0,'hello',NULL,'then');INSERT INTO deployments(id,site_id,state,snapshot_json,started_at) VALUES('d','s','published','{}','then');").unwrap();
+        super::migrate(&mut db).unwrap();
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            5
+        );
+        assert_eq!(
+            db.query_row("SELECT plain_value FROM env_vars", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            db.query_row("SELECT state FROM deployments", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "published"
+        );
+        db.execute_batch("INSERT INTO managed_databases(name,created_at) VALUES('app','now');INSERT INTO managed_db_users VALUES('app_app','app',x'1234','now');DELETE FROM managed_databases;").unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM managed_db_users", [], |r| r
+                .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+        super::migrate(&mut db).unwrap();
+    }
 }

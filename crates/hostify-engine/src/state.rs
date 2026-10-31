@@ -466,9 +466,11 @@ impl Engine {
         Ok(())
     }
     pub async fn startup(self: &Arc<Self>) -> Result<()> {
-        if let Some(supervisor)=&self.supervisor {
+        if let Some(supervisor) = &self.supervisor {
             if supervisor.mysql.should_start()? {
-                if let Err(error)=supervisor.mysql_start().await { self.store.activity("error",None,&error)?; }
+                if let Err(error) = supervisor.mysql_start().await {
+                    self.store.activity("error", None, &error)?;
+                }
             }
         }
         let _operations = self.operations.lock().await;
@@ -713,7 +715,9 @@ impl Engine {
         Ok(usage)
     }
     pub async fn dispatch(self: &Arc<Self>, method: &str, p: Value) -> Result<Value> {
-        if crate::mysql::is_command(method) { return crate::mysql::dispatch(self,method,p).await; }
+        if crate::mysql::is_command(method) {
+            return crate::mysql::dispatch(self, method, p).await;
+        }
         let s = &self.store;
         match method {
             "inspect_project" => {
@@ -1207,7 +1211,10 @@ impl Engine {
                     let tx = db.transaction()?;
                     tx.execute("UPDATE domains SET site_id=NULL WHERE site_id=?1", [id])?;
                     tx.execute("DELETE FROM deployments WHERE site_id=?1", [id])?;
-                    tx.execute("UPDATE managed_databases SET site_id=NULL WHERE site_id=?1",[id])?;
+                    tx.execute(
+                        "UPDATE managed_databases SET site_id=NULL WHERE site_id=?1",
+                        [id],
+                    )?;
                     tx.execute("DELETE FROM application_settings WHERE key LIKE 'mysql-env:%' AND json_extract(value,'$.site')=?1",[id])?;
                     tx.execute("DELETE FROM env_vars WHERE site_id=?1", [id])?;
                     tx.execute("DELETE FROM websites WHERE id=?1", [id])?;
@@ -1765,10 +1772,11 @@ mod publishing_tests {
                 .unwrap();
         }
         observed(&evidence, before + 1).await;
-        let tasks = engine.verifiers.lock().unwrap();
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks["dep-s"].task.id(), task_id);
-        drop(tasks);
+        {
+            let tasks = engine.verifiers.lock().unwrap();
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(tasks["dep-s"].task.id(), task_id);
+        }
         let site = store.site("s").unwrap();
         assert_eq!(site.publish_state.as_deref(), Some("waiting_dns"));
         assert_eq!(site.publish_deployment_id.as_deref(), Some("dep-s"));

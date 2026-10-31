@@ -1,7 +1,7 @@
 [package]
 name = "hostify-desktop"
-version = "0.2.0"
-description = "Hostify Desktop - host static websites from your PC"
+version = "2.0.0-rc.1"
+description = "Hostify Desktop - host websites and backend applications from your PC"
 authors = ["Hostify"]
 edition = "2024"
 

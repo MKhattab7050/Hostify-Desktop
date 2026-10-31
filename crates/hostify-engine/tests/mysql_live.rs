@@ -4,7 +4,7 @@ use hostify_engine::{
     state::{Engine, Store},
     supervisor::Supervisor,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     process::Command,
