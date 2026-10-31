@@ -198,6 +198,45 @@ impl Accounts{
         if state.as_deref()!=Some("active"){return Err(AccountError::Unavailable);}
         Ok(())
     }
+    /// Trusted operator provisioning only. New tenant, first owner and audit
+    /// event commit in one SQLite transaction or none of them are persisted.
+    /// This is not a self-signup API and must never be exposed publicly.
+    pub fn provision_owner_tenant(
+        &mut self,name:&str,email:&str,password:&str,
+    )->Result<(crate::network::Tenant,Principal)>{
+        use crate::network::{Tenant,DEFAULT_DEVICES,DEFAULT_HOSTNAMES};
+        let name=name.trim();
+        if name.is_empty() || name.chars().count()>80 {
+            return Err(AccountError::Invalid);
+        }
+        let email=canonical_email(email)?;
+        let (salt,password_hash)=hash_password(password)?;
+        let tenant=Tenant{
+            id:Uuid::new_v4().to_string(),name:name.to_owned(),
+            max_devices:DEFAULT_DEVICES,max_hostnames:DEFAULT_HOSTNAMES,
+        };
+        let user_id=Uuid::new_v4().to_string();
+        let created_at=Utc::now().to_rfc3339();
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO network_tenants(id,name,max_devices,max_hostnames,created_at)
+                VALUES(?1,?2,?3,?4,?5)",
+            params![&tenant.id,&tenant.name,tenant.max_devices,tenant.max_hostnames,&created_at]
+        )?;
+        tx.execute(
+            "INSERT INTO network_users(id,tenant_id,email,salt,password_hash,role,created_at)
+                VALUES(?1,?2,?3,?4,?5,'owner',?6)",
+            params![&user_id,&tenant.id,&email,salt,password_hash,&created_at]
+        )?;
+        tx.execute(
+            "INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+                VALUES(?1,?2,'tenant_created',?3)",
+            params![&tenant.id,&created_at,&tenant.id]
+        )?;
+        tx.commit()?;
+        let owner=Principal{user_id,tenant_id:tenant.id.clone(),email,role:Role::Owner};
+        Ok((tenant,owner))
+    }
     /// OFFLINE operator/bootstrap only. Do not expose over a public API.
     /// Rejects a second owner rather than allowing account takeover.
     pub fn bootstrap_owner(&mut self,tenant:&str,email:&str,password:&str)->Result<Principal>{
@@ -351,6 +390,45 @@ mod tests {
         let two=registry.create_tenant("B").unwrap();
         let accounts=Accounts::open(&path).unwrap();
         (tmp,one.id,two.id,accounts)
+    }
+    #[test]
+    fn atomic_owner_provision_rolls_back_tenant_when_owner_insert_fails(){
+        let (dir,_a,_b,mut accounts)=init();
+        accounts.db.execute_batch("
+            CREATE TRIGGER refuse_owner_insert BEFORE INSERT ON network_users
+            WHEN NEW.role='owner'
+            BEGIN SELECT RAISE(FAIL,'test owner insert failure'); END;
+        ").unwrap();
+        let result=accounts.provision_owner_tenant("Orphan Must Not Persist",
+            "owner@site.test","long-valid-owner-password");
+        assert!(result.is_err());
+        let db=Connection::open(dir.path().join("control-plane.db")).unwrap();
+        let count:i64=db.query_row(
+            "SELECT COUNT(*) FROM network_tenants WHERE name='Orphan Must Not Persist'",
+            [],|row|row.get(0)).unwrap();
+        assert_eq!(count,0);
+        let audit:i64=db.query_row(
+            "SELECT COUNT(*) FROM network_audit WHERE action='tenant_created'",
+            [],|row|row.get(0)).unwrap();
+        // The two pre-existing fixture tenants still have their own audit rows.
+        assert_eq!(audit,2);
+        accounts.db.execute_batch("DROP TRIGGER refuse_owner_insert").unwrap();
+        let (tenant,owner)=accounts.provision_owner_tenant(
+            "Valid Tenant","owner@site.test","long-valid-owner-password").unwrap();
+        assert_eq!(tenant.id,owner.tenant_id);
+        assert_eq!(owner.role,Role::Owner);
+        assert!(accounts.sign_in(&tenant.id,"owner@site.test","long-valid-owner-password").is_ok());
+    }
+    #[test]
+    fn invalid_operator_provision_does_not_persist_tenant(){
+        let (_dir,_a,_b,mut accounts)=init();
+        assert!(matches!(accounts.provision_owner_tenant(
+            "Invalid Password","owner@site.test","short"),Err(AccountError::Invalid)));
+        assert!(matches!(accounts.provision_owner_tenant(
+            "Invalid Email","bad-email","long-valid-owner-password"),Err(AccountError::Invalid)));
+        let count:i64=accounts.db.query_row(
+            "SELECT COUNT(*) FROM network_tenants",[],|row|row.get(0)).unwrap();
+        assert_eq!(count,2);
     }
     #[test]
     fn tenant_owner_login_is_hashed_and_revocable(){
