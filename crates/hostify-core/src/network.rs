@@ -95,6 +95,18 @@ pub struct Route {
     pub hostname: String,
 }
 
+/// Read-only reservation inventory including disabled entries. These are NOT
+/// DNS records or proof that a site can be reached from the internet.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedRoute {
+    pub id:String,
+    pub tenant_id:String,
+    pub agent_id:String,
+    pub site_id:String,
+    pub hostname:String,
+    pub state:String,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditEntry {
@@ -391,6 +403,98 @@ impl Registry {
             site_id:row.get(3)?,hostname:row.get(4)?
         }))?.collect::<std::result::Result<Vec<_>,_>>()?;
         Ok(items)
+    }
+    /// Inventory of reserved or disabled hostnames on non-revoked devices.
+    /// Including disabled entries enables safe, explicit restoration.
+    pub fn list_tenant_reservations(&self,tenant:&str,limit:i64,
+        offset:i64)->Result<Vec<ManagedRoute>>{
+        self.ensure_tenant(tenant)?;
+        if !(1..=100).contains(&limit)||!(0..=1_000_000).contains(&offset){
+            return Err(NetworkError::Invalid);
+        }
+        let mut stmt=self.db.prepare(
+            "SELECT r.id,r.tenant_id,r.agent_id,r.site_id,r.hostname,r.state
+             FROM network_routes r
+             JOIN network_agents a ON a.id=r.agent_id AND a.tenant_id=r.tenant_id
+             WHERE r.tenant_id=?1 AND r.state IN ('reserved','disabled')
+               AND a.revoked_at IS NULL
+             ORDER BY r.created_at DESC,r.id DESC LIMIT ?2 OFFSET ?3")?;
+        let rows=stmt.query_map(params![tenant,limit,offset],|r|Ok(ManagedRoute{
+            id:r.get(0)?,tenant_id:r.get(1)?,agent_id:r.get(2)?,
+            site_id:r.get(3)?,hostname:r.get(4)?,state:r.get(5)?,
+        }))?.collect::<std::result::Result<Vec<_>,_>>()?;
+        Ok(rows)
+    }
+    /// Disable a *reservation*, never an activated public route. Keep the
+    /// globally unique hostname owned by its tenant, but release quota.
+    /// Stale identity proof and outstanding challenges are invalidated.
+    pub fn disable_reserved_route(&mut self,tenant:&str,route:&str)->Result<()>{
+        require_uuid(tenant)?;require_uuid(route)?;
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let state:Option<String>=tx.query_row(
+            "SELECT r.state FROM network_routes r
+             JOIN network_agents a ON a.id=r.agent_id AND a.tenant_id=r.tenant_id
+             JOIN network_tenants t ON t.id=r.tenant_id
+             WHERE r.id=?1 AND r.tenant_id=?2
+               AND t.state='active' AND a.revoked_at IS NULL",
+            params![route,tenant],|r|r.get(0)).optional()?;
+        let state=state.ok_or(NetworkError::Ownership)?;
+        if state=="disabled"{return Ok(());}
+        // A future live route requires separate DNS/TLS and gateway teardown;
+        // this local-only endpoint MUST NOT pretend to accomplish that.
+        if state!="reserved"{return Err(NetworkError::Unauthorized);}
+        let now=Utc::now().to_rfc3339();
+        tx.execute(
+            "UPDATE network_routes SET state='disabled'
+             WHERE id=?1 AND tenant_id=?2 AND state='reserved'",
+            params![route,tenant])?;
+        tx.execute("DELETE FROM network_route_challenges
+            WHERE route_id=?1 AND tenant_id=?2",params![route,tenant])?;
+        tx.execute("DELETE FROM network_agent_proofs
+            WHERE route_id=?1 AND tenant_id=?2",params![route,tenant])?;
+        tx.execute(
+            "INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+             VALUES(?1,?2,'hostname_reservation_disabled',?3)",
+            params![tenant,&now,route])?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// Restore a disabled reservation to reserved only after rechecking the
+    /// tenant/device and CURRENT quota inside the write transaction.
+    /// Restoration does not restore proof, DNS, tunnels or public routing.
+    pub fn restore_disabled_route(&mut self,tenant:&str,route:&str)->Result<()>{
+        require_uuid(tenant)?;require_uuid(route)?;
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let entry:Option<(String,i64)>=tx.query_row(
+            "SELECT r.state,t.max_hostnames FROM network_routes r
+             JOIN network_agents a ON a.id=r.agent_id AND a.tenant_id=r.tenant_id
+             JOIN network_tenants t ON t.id=r.tenant_id
+             WHERE r.id=?1 AND r.tenant_id=?2
+               AND t.state='active' AND a.revoked_at IS NULL",
+            params![route,tenant],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let (state,max_hostnames)=entry.ok_or(NetworkError::Ownership)?;
+        if state=="reserved"{return Ok(());}
+        if state!="disabled"{return Err(NetworkError::Unauthorized);}
+        let active:i64=tx.query_row(
+            "SELECT COUNT(*) FROM network_routes
+             WHERE tenant_id=?1 AND state IN ('reserved','active')",
+            [tenant],|r|r.get(0))?;
+        if active>=max_hostnames{return Err(NetworkError::Quota);}
+        let now=Utc::now().to_rfc3339();
+        tx.execute("DELETE FROM network_route_challenges
+            WHERE route_id=?1 AND tenant_id=?2",params![route,tenant])?;
+        tx.execute("DELETE FROM network_agent_proofs
+            WHERE route_id=?1 AND tenant_id=?2",params![route,tenant])?;
+        tx.execute(
+            "UPDATE network_routes SET state='reserved'
+             WHERE id=?1 AND tenant_id=?2 AND state='disabled'",
+            params![route,tenant])?;
+        tx.execute(
+            "INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+             VALUES(?1,?2,'hostname_reservation_restored',?3)",
+            params![tenant,&now,route])?;
+        tx.commit()?;
+        Ok(())
     }
     pub fn create_tenant(&mut self,name:&str)->Result<Tenant>{
         let name=name.trim();
@@ -979,5 +1083,106 @@ mod tests{
         registry.rename_agent(&a.id,&device.id,"Home").unwrap();
         assert_eq!(registry.list_tenant_agents(&a.id,10,0).unwrap()[0].display_name.as_deref(),
             Some("Home"));
+    }
+
+    #[test]
+    fn reservation_lifecycle_is_scoped_idempotent_and_non_routable(){
+        let mut r=Registry::memory("example.test").unwrap();
+        let a=r.create_tenant("A").unwrap();
+        let b=r.create_tenant("B").unwrap();
+        let ia=r.issue_invitation(&a.id,300).unwrap();
+        let ib=r.issue_invitation(&b.id,300).unwrap();
+        let device_a=r.enroll_agent(&ia.token,&key(71)).unwrap();
+        let device_b=r.enroll_agent(&ib.token,&key(72)).unwrap();
+        let site=Uuid::new_v4().to_string();
+        let route=r.reserve_hostname(&a.id,&device_a.id,&site,"pause-site").unwrap();
+        assert!(r.disable_reserved_route(&b.id,&route.id).is_err());
+        assert_eq!(r.list_tenant_reservations(&a.id,10,0).unwrap()[0].state,"reserved");
+        let challenge=r.issue_route_challenge(&a.id,&device_a.id,&route.id,120).unwrap();
+        assert_eq!(r.tenant_usage(&a.id).unwrap().reserved_hostnames,1);
+        r.disable_reserved_route(&a.id,&route.id).unwrap();
+        r.disable_reserved_route(&a.id,&route.id).unwrap();
+        assert_eq!(r.list_tenant_reservations(&a.id,10,0).unwrap()[0].state,"disabled");
+        assert!(r.list_tenant_routes(&a.id,10,0).unwrap().is_empty());
+        assert_eq!(r.tenant_usage(&a.id).unwrap().reserved_hostnames,0);
+        assert!(r.lookup_active_route(&route.hostname).unwrap().is_none());
+        let challenge_count:i64=r.db.query_row(
+            "SELECT COUNT(*) FROM network_route_challenges WHERE route_id=?1",
+            [&route.id],|row|row.get(0)).unwrap();
+        assert_eq!(challenge_count,0,"outstanding proof challenges must be purged");
+        assert!(r.verify_route_signature(&a.id,&device_a.id,&route.id,
+            &challenge.value,&"00".repeat(64)).is_err());
+        // Disabling does not release a reserved hostname to another tenant.
+        assert!(r.reserve_hostname(&b.id,&device_b.id,&Uuid::new_v4().to_string(),
+            "pause-site").is_err());
+        r.restore_disabled_route(&a.id,&route.id).unwrap();
+        r.restore_disabled_route(&a.id,&route.id).unwrap();
+        assert_eq!(r.list_tenant_reservations(&a.id,10,0).unwrap()[0].state,"reserved");
+        assert_eq!(r.tenant_usage(&a.id).unwrap().reserved_hostnames,1);
+        assert!(r.lookup_active_route(&route.hostname).unwrap().is_none());
+        assert!(r.list_tenant_reservations(&b.id,10,0).unwrap().is_empty());
+        assert!(r.list_tenant_reservations(&a.id,101,0).is_err());
+        let disabled_audits:i64=r.db.query_row(
+            "SELECT COUNT(*) FROM network_audit
+             WHERE tenant_id=?1 AND action='hostname_reservation_disabled'",
+            [&a.id],|row|row.get(0)).unwrap();
+        let restored_audits:i64=r.db.query_row(
+            "SELECT COUNT(*) FROM network_audit
+             WHERE tenant_id=?1 AND action='hostname_reservation_restored'",
+            [&a.id],|row|row.get(0)).unwrap();
+        assert_eq!((disabled_audits,restored_audits),(1,1));
+    }
+    #[test]
+    fn route_restoration_respects_quota_and_never_restores_revoked_devices(){
+        let mut r=Registry::memory("example.test").unwrap();
+        let a=r.create_tenant("A").unwrap();
+        let ia=r.issue_invitation(&a.id,300).unwrap();
+        let d=r.enroll_agent(&ia.token,&key(73)).unwrap();
+        let route=r.reserve_hostname(&a.id,&d.id,&Uuid::new_v4().to_string(),
+            "resume-site").unwrap();
+        r.disable_reserved_route(&a.id,&route.id).unwrap();
+        // Simulate another reservation filling the quota. No actual public
+        // route exists or is activated by this test.
+        r.db.execute("UPDATE network_tenants SET max_hostnames=0 WHERE id=?1",
+            [&a.id]).unwrap();
+        assert!(matches!(r.restore_disabled_route(&a.id,&route.id),Err(NetworkError::Quota)));
+        assert_eq!(r.list_tenant_reservations(&a.id,10,0).unwrap()[0].state,"disabled");
+        r.db.execute("UPDATE network_tenants SET max_hostnames=10 WHERE id=?1",
+            [&a.id]).unwrap();
+        r.revoke_agent(&a.id,&d.id).unwrap();
+        assert!(r.restore_disabled_route(&a.id,&route.id).is_err());
+        assert!(r.list_tenant_reservations(&a.id,10,0).unwrap().is_empty());
+    }
+    #[test]
+    fn reservation_mutations_rollback_if_audit_fails_and_refuse_active_route(){
+        let mut r=Registry::memory("example.test").unwrap();
+        let a=r.create_tenant("A").unwrap();
+        let invitation=r.issue_invitation(&a.id,300).unwrap();
+        let d=r.enroll_agent(&invitation.token,&key(74)).unwrap();
+        let route=r.reserve_hostname(&a.id,&d.id,&Uuid::new_v4().to_string(),
+            "audit-site").unwrap();
+        r.db.execute_batch(
+            "CREATE TRIGGER deny_route_disable BEFORE INSERT ON network_audit
+             WHEN NEW.action='hostname_reservation_disabled'
+             BEGIN SELECT RAISE(FAIL,'audit failure'); END;"
+        ).unwrap();
+        assert!(r.disable_reserved_route(&a.id,&route.id).is_err());
+        assert_eq!(r.list_tenant_reservations(&a.id,10,0).unwrap()[0].state,"reserved");
+        r.db.execute_batch("DROP TRIGGER deny_route_disable").unwrap();
+        r.disable_reserved_route(&a.id,&route.id).unwrap();
+        r.db.execute_batch(
+            "CREATE TRIGGER deny_route_restore BEFORE INSERT ON network_audit
+             WHEN NEW.action='hostname_reservation_restored'
+             BEGIN SELECT RAISE(FAIL,'audit failure'); END;"
+        ).unwrap();
+        assert!(r.restore_disabled_route(&a.id,&route.id).is_err());
+        assert_eq!(r.list_tenant_reservations(&a.id,10,0).unwrap()[0].state,"disabled");
+        r.db.execute_batch("DROP TRIGGER deny_route_restore").unwrap();
+        r.restore_disabled_route(&a.id,&route.id).unwrap();
+        r.db.execute("UPDATE network_routes SET state='active' WHERE id=?1",
+            [&route.id]).unwrap();
+        assert!(r.disable_reserved_route(&a.id,&route.id).is_err(),
+            "a future live route needs gateway-controlled teardown");
+        assert!(r.restore_disabled_route(&a.id,&route.id).is_err());
     }
 }

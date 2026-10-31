@@ -64,7 +64,9 @@ impl Controller {
             matches!(path,"/v1/tenant/invitations"|"/v1/tenant/routes/reserve"|
                 "/v1/tenant/agents/revoke"|"/v1/tenant/agents/list"|
                 "/v1/tenant/routes/list"|"/v1/tenant/audit/list"|
-                "/v1/tenant/usage"|"/v1/tenant/agents/rename");
+                "/v1/tenant/usage"|"/v1/tenant/agents/rename"|
+                "/v1/tenant/routes/reservations/list"|
+                "/v1/tenant/routes/disable"|"/v1/tenant/routes/restore");
         if !public_action && !tenant_action && !self.authorized(auth) {
             return (StatusCode::UNAUTHORIZED,json!({"error":"unauthorized"}));
         }
@@ -102,6 +104,8 @@ impl Controller {
         struct InventoryInput {tenant_id:String,limit:i64,offset:i64}
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
         struct UsageInput {tenant_id:String}
+        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
+        struct ReservationAction {tenant_id:String,route_id:String}
         let response:Result<Value,(StatusCode,&'static str)>=match path {
             "/v1/tenants"=>parse::<TenantInput>(body)
                 .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
@@ -172,6 +176,37 @@ impl Controller {
                     registry.list_tenant_routes(&p.tenant_id,p.limit,p.offset)
                         .map(|items|json!({"items":items,"limit":p.limit,
                             "offset":p.offset,"publiclyRoutable":false}))
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/routes/reservations/list"=>parse::<InventoryInput>(body)
+                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
+                .and_then(|p|{
+                    let accounts=self.accounts.as_ref().ok_or(
+                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
+                    accounts.authorize(auth,&p.tenant_id,Capability::View)?;
+                    registry.list_tenant_reservations(&p.tenant_id,p.limit,p.offset)
+                        .map(|items|json!({"items":items,"limit":p.limit,
+                            "offset":p.offset,"publiclyRoutable":false}))
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/routes/disable"=>parse::<ReservationAction>(body)
+                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
+                .and_then(|p|{
+                    let accounts=self.accounts.as_ref().ok_or(
+                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
+                    accounts.authorize(auth,&p.tenant_id,Capability::ManageSites)?;
+                    registry.disable_reserved_route(&p.tenant_id,&p.route_id)
+                        .map(|_|json!({"disabled":true,"publiclyRoutable":false}))
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/routes/restore"=>parse::<ReservationAction>(body)
+                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
+                .and_then(|p|{
+                    let accounts=self.accounts.as_ref().ok_or(
+                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
+                    accounts.authorize(auth,&p.tenant_id,Capability::ManageSites)?;
+                    registry.restore_disabled_route(&p.tenant_id,&p.route_id)
+                        .map(|_|json!({"reserved":true,"publiclyRoutable":false}))
                         .map_err(map_network_error)
                 }),
             "/v1/tenant/usage"=>parse::<UsageInput>(body)
@@ -514,6 +549,29 @@ mod tests{
             "tenantId":first.id,"limit":101,"offset":0
         }));
         assert_eq!(status,StatusCode::BAD_REQUEST);
+        let reservation_action=json!({"tenantId":first.id,"routeId":reserved["route"]["id"]});
+        assert_eq!(call("/v1/tenant/routes/disable",&viewer_auth,
+            reservation_action.clone()).0,StatusCode::FORBIDDEN);
+        assert_eq!(call("/v1/tenant/routes/disable",&owner_auth,json!({
+            "tenantId":second.id,"routeId":reserved["route"]["id"]
+        })).0,StatusCode::UNAUTHORIZED);
+        let (status,disabled)=call("/v1/tenant/routes/disable",&owner_auth,
+            reservation_action.clone());
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(disabled["publiclyRoutable"],false);
+        let (status,managed)=call("/v1/tenant/routes/reservations/list",&viewer_auth,
+            inventory.clone());
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(managed["items"][0]["state"],"disabled");
+        assert_eq!(call("/v1/tenant/routes/list",&viewer_auth,inventory.clone())
+            .1["items"].as_array().unwrap().len(),0);
+        let (status,restored)=call("/v1/tenant/routes/restore",&owner_auth,
+            reservation_action.clone());
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(restored["reserved"],true);
+        assert_eq!(restored["publiclyRoutable"],false);
+        assert_eq!(call("/v1/tenant/routes/reservations/list",&viewer_auth,
+            inventory.clone()).1["items"][0]["state"],"reserved");
         let (status,usage)=call("/v1/tenant/usage",&viewer_auth,
             json!({"tenantId":first.id}));
         assert_eq!(status,StatusCode::OK);

@@ -46,6 +46,9 @@ All endpoints are JSON, have a 32 KiB body limit, disable caches, and return no 
 | `POST /v1/members/role/update` | Tenant **Owner** session | Promotes/demotes only non-owner active members between Admin and Viewer, revokes all target sessions, audits atomically |
 | `POST /v1/tenant/invitations` | Tenant ManageDevices session | Issues one-use device enrollment invitation for own tenant |
 | `POST /v1/tenant/routes/reserve` | Tenant ManageSites session | Reserves a non-routable hostname for own tenant |
+| `POST /v1/tenant/routes/reservations/list` | Tenant View session | Lists own reserved and disabled hostnames on non-revoked devices, with status and paging |
+| `POST /v1/tenant/routes/disable` | Tenant ManageSites session | Disables a reserved hostname without releasing global ownership; frees local quota and invalidates proof/challenges |
+| `POST /v1/tenant/routes/restore` | Tenant ManageSites session | Rechecks active device and quota, then restores a disabled hostname to **reserved only**, never publicly active |
 | `POST /v1/tenant/agents/revoke` | Tenant ManageDevices session | Revokes own device and disables its reserved routes |
 | `POST /v1/tenant/agents/rename` | Tenant ManageDevices session | Sets a friendly name for an active device; no key or routing change; audited atomically |
 | `POST /v1/tenant/agents/list` | Tenant View session | Bounded, paginated inventory of the tenant's non-revoked devices |
@@ -68,6 +71,8 @@ Pending invitation management uses `tenantId`, `limit` (1–100) and `offset` (0
 Device rename accepts `tenantId`, `agentId` and `displayName` (1–48 trimmed Unicode characters, 160-byte maximum, no control characters, angle brackets or backslashes). Only active devices owned by the caller's tenant can be renamed. The display name is optional in device inventory, stored separately from Ed25519 keys and never used for authorization or routing. Renaming an unchanged display name is idempotent; real changes are audited atomically. Revoked devices cannot be renamed.
 
 The `tenant/usage` request accepts only `tenantId` and returns `usage` plus `publicReady:false`. Its counts mirror the quota checks for non-revoked devices and reserved/active hostnames, including an update after a device is revoked. `publiclyRoutable:false` is explicit because this local development service cannot provision an internet route. Usage is not billable metering and does not prove the existence of a live site.
+
+The reservation lifecycle API accepts `tenantId` and `routeId` for disable/restore, and `tenantId`, `limit` (1–100), `offset` (0–1,000,000) for listing including disabled reservations. Disabling a reserved hostname removes it from active quota accounting but **retains its unique ownership** to prevent another tenant claiming it. Restoring checks the configured quota again, and an agent must still be enrolled and not revoked. Repeated disable/restore operations are idempotent. Both mutations purge old challenges and identity proofs and append audit events atomically. Neither acts on a route whose state is already `active`; public teardown/activation would require a separate secure gateway. No DNS or Cloudflare changes occur.
 
 The hostname returned by `routes/reserve` or `tenant/routes/reserve` does **not** create public DNS, a Cloudflare tunnel, or a valid customer web route.
 

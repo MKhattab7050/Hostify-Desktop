@@ -1,7 +1,7 @@
 //! Local, central-only composition of tenant authorization and the network
 //! registry. There is deliberately no HTTP listener, Cloudflare DNS mutation,
  //! or site execution API here. Operator provisioning is not publicly exposed.
-use crate::network::{Registry,NetworkError,Tenant,Invitation,Route,DeviceChallenge,Agent,AuditEntry,TenantUsage};
+use crate::network::{Registry,NetworkError,Tenant,Invitation,Route,DeviceChallenge,Agent,AuditEntry,TenantUsage,ManagedRoute};
 use crate::network_auth::{Accounts,AccountError,Principal,Session,Role,Capability,MemberInvitation,TenantMember,ActiveSession,PendingMemberInvitation};
 use std::path::Path;
 use thiserror::Error;
@@ -92,6 +92,21 @@ impl NetworkControlPlane{
         self.accounts.authorize(token,tenant,Capability::View)?;
         Ok(self.registry.list_tenant_routes(tenant,limit,offset)?)
     }
+    /// Reservation lifecycle is local-only: pause releases a quota slot but
+    /// preserves tenant ownership. Restore never activates a public route.
+    pub fn list_reservations(&self,token:&str,tenant:&str,limit:i64,
+        offset:i64)->Result<Vec<ManagedRoute>>{
+        self.accounts.authorize(token,tenant,Capability::View)?;
+        Ok(self.registry.list_tenant_reservations(tenant,limit,offset)?)
+    }
+    pub fn disable_reservation(&mut self,token:&str,tenant:&str,route:&str)->Result<()>{
+        self.accounts.authorize(token,tenant,Capability::ManageSites)?;
+        Ok(self.registry.disable_reserved_route(tenant,route)?)
+    }
+    pub fn restore_reservation(&mut self,token:&str,tenant:&str,route:&str)->Result<()>{
+        self.accounts.authorize(token,tenant,Capability::ManageSites)?;
+        Ok(self.registry.restore_disabled_route(tenant,route)?)
+    }
     /// Owner and administrators may inspect tenant-local security activity.
     /// View-only members cannot inspect the security audit stream.
     pub fn list_security_audit(&self,token:&str,tenant:&str,limit:i64,offset:i64)->Result<Vec<AuditEntry>>{
@@ -180,6 +195,14 @@ mod tests{
         assert_eq!(service.list_devices(&viewer.token,&tenant.id,10,0).unwrap()[0]
             .display_name.as_deref(),Some("Home PC"));
         assert_eq!(service.list_routes(&viewer.token,&tenant.id,10,0).unwrap().len(),1);
+        assert!(service.disable_reservation(&viewer.token,&tenant.id,&route.id).is_err());
+        assert!(service.disable_reservation(&owner.token,&other.id,&route.id).is_err());
+        service.disable_reservation(&owner.token,&tenant.id,&route.id).unwrap();
+        assert_eq!(service.list_reservations(&viewer.token,&tenant.id,10,0).unwrap()[0]
+            .state,"disabled");
+        service.restore_reservation(&owner.token,&tenant.id,&route.id).unwrap();
+        assert_eq!(service.list_routes(&viewer.token,&tenant.id,10,0).unwrap().len(),1);
+        assert!(service.public_route(&route.hostname).unwrap().is_none());
         assert!(service.list_devices(&viewer.token,&other.id,10,0).is_err());
         assert!(service.list_routes(&owner.token,&other.id,10,0).is_err());
         assert!(service.reserve_subdomain(&viewer.token,&tenant.id,&agent.id,
