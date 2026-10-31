@@ -48,6 +48,16 @@ impl NetworkControlPlane{
     pub fn accept_member_invitation(&mut self,token:&str,password:&str)->Result<Principal>{
         Ok(self.accounts.accept_invitation(token,password)?)
     }
+    /// Read-only inventory requires an active tenant session, including for
+    /// viewers. Core Registry methods alone do not establish authorization.
+    pub fn list_devices(&self,token:&str,tenant:&str,limit:i64,offset:i64)->Result<Vec<Agent>>{
+        self.accounts.authorize(token,tenant,Capability::View)?;
+        Ok(self.registry.list_tenant_agents(tenant,limit,offset)?)
+    }
+    pub fn list_routes(&self,token:&str,tenant:&str,limit:i64,offset:i64)->Result<Vec<Route>>{
+        self.accounts.authorize(token,tenant,Capability::View)?;
+        Ok(self.registry.list_tenant_routes(tenant,limit,offset)?)
+    }
     pub fn issue_device_enrollment(&mut self,token:&str,tenant:&str,ttl_seconds:i64)->Result<Invitation>{
         self.accounts.authorize(token,tenant,Capability::ManageDevices)?;
         Ok(self.registry.issue_invitation(tenant,ttl_seconds)?)
@@ -107,6 +117,10 @@ mod tests{
         let agent=service.enroll_device(&invitation.token,&hex::encode(key.public_key().as_ref())).unwrap();
         let route=service.reserve_subdomain(&owner.token,&tenant.id,&agent.id,
             &Uuid::new_v4().to_string(),"tenant-a").unwrap();
+        assert_eq!(service.list_devices(&viewer.token,&tenant.id,10,0).unwrap().len(),1);
+        assert_eq!(service.list_routes(&viewer.token,&tenant.id,10,0).unwrap().len(),1);
+        assert!(service.list_devices(&viewer.token,&other.id,10,0).is_err());
+        assert!(service.list_routes(&owner.token,&other.id,10,0).is_err());
         assert!(service.reserve_subdomain(&viewer.token,&tenant.id,&agent.id,
             &Uuid::new_v4().to_string(),"denied").is_err());
         let challenge=service.issue_device_proof(&owner.token,&tenant.id,&agent.id,&route.id).unwrap();
@@ -117,6 +131,8 @@ mod tests{
         service.verify_device_proof(&tenant.id,&agent.id,&route.id,&challenge.value,&signature).unwrap();
         assert!(service.public_route(&route.hostname).unwrap().is_none());
         service.revoke_device(&owner.token,&tenant.id,&agent.id).unwrap();
+        assert!(service.list_devices(&owner.token,&tenant.id,10,0).unwrap().is_empty());
+        assert!(service.list_routes(&owner.token,&tenant.id,10,0).unwrap().is_empty());
         assert!(service.public_route(&route.hostname).unwrap().is_none());
     }
 }
