@@ -2,9 +2,9 @@ name: Validate Fast and Standard Publish
 
 on:
   push:
-    branches: [feature/fast-standard-publish, feature/v3-guardian-backups]
+    branches: [feature/fast-standard-publish, feature/v3-guardian-backups, feature/v4-network-core]
   pull_request:
-    branches: [release/v2-rc1, feature/fast-standard-publish]
+    branches: [release/v2-rc1, feature/fast-standard-publish, feature/v3-guardian-backups]
   workflow_dispatch:
 
 permissions:
