@@ -38,8 +38,10 @@ All endpoints are JSON, have a 32 KiB body limit, disable caches, and return no 
 | `POST /v1/tenant/invitations` | Tenant ManageDevices session | Issues one-use device enrollment invitation for own tenant |
 | `POST /v1/tenant/routes/reserve` | Tenant ManageSites session | Reserves a non-routable hostname for own tenant |
 | `POST /v1/tenant/agents/revoke` | Tenant ManageDevices session | Revokes own device and disables its reserved routes |
+| `POST /v1/tenant/agents/list` | Tenant View session | Bounded, paginated inventory of own non-revoked devices |
+| `POST /v1/tenant/routes/list` | Tenant View session | Bounded, paginated inventory of own non-disabled hostnames |
 
-Account login and single-use token redemption do not require an admin Bearer. All other account actions require either the operator secret or a tenant session with the appropriate role. A tenant session cannot reserve or revoke another tenant's resources.
+Account login and single-use token redemption do not require an admin Bearer. All other account actions require either the operator secret or a tenant session with the appropriate role. A tenant session cannot reserve or revoke another tenant's resources. The read-only inventory endpoints accept `tenantId`, `limit` (1–100), and `offset` (0–1,000,000), return `items`, and never include other tenants' rows. An inventory item is **not** evidence of public HTTPS reachability.
 
 The hostname returned by `routes/reserve` or `tenant/routes/reserve` does **not** create public DNS, a Cloudflare tunnel, or a valid customer web route.
 
