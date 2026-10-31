@@ -68,5 +68,26 @@ jobs:
             }
           }
 
+      # Package only an already-tested release-branch commit, never a PR.
+      # The result is an unsigned candidate, not an automatic public release.
+      - name: Build unsigned NSIS installer for release candidate
+        if: github.event_name == 'push' && github.ref == 'refs/heads/release/v2-rc1'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pnpm tauri build
+          if ($LASTEXITCODE -ne 0) { throw 'Tauri installer build failed' }
+          $bundles = @(Get-ChildItem -LiteralPath 'target/release/bundle/nsis' -Filter '*.exe' -File -ErrorAction Stop)
+          if ($bundles.Count -ne 1) { throw "Expected one NSIS installer, found $($bundles.Count)" }
+          Write-Host "Built unsigned candidate: $($bundles[0].Name)"
+      - name: Upload unsigned Windows installer artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/release/v2-rc1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hostify-V2-RC-Windows-unsigned
+          path: target/release/bundle/nsis/*.exe
+          retention-days: 7
+          if-no-files-found: error
+
 # Live PHP, Node, Caddy, MySQL and Cloudflare tests require explicit sandbox
 # binaries/credentials and are NOT treated as passed by this workflow.
