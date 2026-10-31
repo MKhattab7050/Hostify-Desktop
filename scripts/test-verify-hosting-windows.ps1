@@ -20,4 +20,23 @@ if ($report.fail -lt 1 -or $report.unverified -lt 1) {
 if (@($report.checks | Where-Object { $_.check -eq 'foreign_host_isolation' -and $_.status -eq 'pass' }).Count -gt 0) {
     throw "A non-existent Caddy server cannot pass foreign-host isolation"
 }
+# A syntactically invalid hostname must be rejected *before* an HTTP
+# attempt. We deliberately include bad middle labels that were accepted by
+# the earlier first/last-character-only guard.
+foreach ($badHostname in @(
+    'staging..example.test',
+    'staging.-example.test',
+    'staging.example-.test',
+    'staging._private.test',
+    '-staging.example.test',
+    'staging.example.test.'
+)) {
+    $errorOutput = & pwsh -NoProfile -File $script -LocalPort 1 -AllowedHostname $badHostname -HealthPath / 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        throw "Invalid hostname was accepted: $badHostname"
+    }
+    if (($errorOutput | Out-String) -notmatch 'AllowedHostname must be a valid DNS hostname') {
+        throw "Invalid hostname did not hit the DNS syntax guard: $badHostname"
+    }
+}
 Write-Host 'PASS: negative Windows integration verification fails closed on absent components'

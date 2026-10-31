@@ -32,8 +32,15 @@ function Test-Http([int]$Port,[string]$Path,[string]$HostHeader) {
 if (-not $HealthPath.StartsWith('/') -or $HealthPath.Contains([char]13) -or $HealthPath.Contains([char]10)) {
     throw 'HealthPath must start with / and cannot contain control newlines.'
 }
-if ($AllowedHostname -notmatch '^[a-zA-Z0-9][a-zA-Z0-9.-]{0,251}[a-zA-Z0-9]$' -or
-    $AllowedHostname.Contains('..')) {
+# Validate every DNS label, not only the first/last characters of the
+# complete hostname. This rejects malformed inputs like site.-tenant.test
+# and site.tenant-.test before making any HTTP requests.
+$hostnameLabels = $AllowedHostname.Split('.')
+$invalidLabels = @($hostnameLabels | Where-Object {
+    $_.Length -lt 1 -or $_.Length -gt 63 -or
+    $_ -cnotmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$'
+})
+if ($AllowedHostname.Length -gt 253 -or $hostnameLabels.Count -lt 2 -or $invalidLabels.Count -gt 0) {
     throw 'AllowedHostname must be a valid DNS hostname.'
 }
 $binary = Join-Path $HostifyRoot 'bin/caddy.exe'
