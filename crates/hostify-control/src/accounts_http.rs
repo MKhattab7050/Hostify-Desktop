@@ -338,7 +338,7 @@ mod tests {
         let mut registry=Registry::open(&path,"example.test").unwrap();
         let tenant=registry.create_tenant("A").unwrap();
         let api=AccountApi::new(Accounts::open(&path).unwrap());
-        let post=|path:&str,auth:Option<&str,admin:bool,value:Value|{
+        let post=|path:&str,auth:Option<&str>,admin:bool,value:Value|{
             api.dispatch(path,auth,admin,value.to_string().as_bytes())
         };
         assert_eq!(post("/v1/accounts/bootstrap",None,true,json!({
