@@ -49,9 +49,7 @@ fn quote(path: &std::path::Path) -> Result<String, CaddyError> {
     Ok(format!("\"{s}\""))
 }
 fn foreign_host_guard(hosts: &[String]) -> String {
-    if hosts.is_empty() {
-        return String::new();
-    }
+    // Unpublished sites are local-only: never accept arbitrary Host headers.
     let mut allowed = vec!["localhost".to_string(), "127.0.0.1".to_string()];
     for h in hosts {
         let clean = h.trim();
@@ -346,49 +344,23 @@ mod marker_integration {
 mod compatibility_tests {
     use super::*;
     #[test]
-    fn static_bytes_match_v1_literal() {
-        assert_eq!(
-            generate(&[Site {
+    fn unpublished_sites_are_host_restricted_and_still_serve_local_preview() {
+        for backend in [
+            Backend::Static { root: "site".into() },
+            Backend::Proxy { port: 9001 },
+            Backend::Php { root: "site".into(), upstreams: vec![9002] },
+        ] {
+            let config = generate(&[Site {
                 verify_root: "verify".into(),
                 port: 9000,
-                backend: Backend::Static {
-                    root: "site".into()
-                },
+                backend,
                 log: "log".into(),
                 hosts: vec![],
-            }])
-            .unwrap(),
-            r#"{
-    admin off
-}
-
-http://:9000 {
-    bind 127.0.0.1
-    route {
-        handle_path /.well-known/hostify-verify/* {
-            root * "verify"
-            header Cache-Control no-store
-            file_server
+            }]).unwrap();
+            assert!(config.contains("@foreign not host localhost 127.0.0.1"));
+            assert!(config.contains("respond @foreign \"Host not allowed\" 421"));
+            assert!(config.contains("bind 127.0.0.1"));
         }
-        handle {
-            root * "site"
-            @hidden path_regexp hidden (^|/)\.
-            respond @hidden 404
-            header {
-                X-Hostify-Verify hostify
-                X-Content-Type-Options nosniff
-                X-Frame-Options DENY
-                Referrer-Policy strict-origin-when-cross-origin
-            }
-            file_server
-        }
-    }
-    log {
-        output file "log"
-    }
-}
-"#
-        );
     }
     #[test]
     fn proxy_keeps_marker_headers_and_independent_health() {

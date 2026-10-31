@@ -2329,11 +2329,27 @@ impl Supervisor {
             let _ = std::fs::remove_file(&temp);
             return Err(e);
         }
+        let previous_config = std::fs::read_to_string(&path).ok();
+        let changed = previous_config.as_deref() != std::fs::read_to_string(&temp).ok().as_deref();
+        let key = format!("site:{id}");
+        let was_running = self.workers.lock().await.get(&key)
+            .is_some_and(|w| !w.task.is_finished());
+        // Caddy's admin API is disabled. Restart only this site's Caddy when
+        // its approved Host allowlist changes; keep Node/PHP workers alive.
+        if changed && was_running {
+            self.stop(&key).await?;
+        }
         if let Err(e) = std::fs::rename(&temp, &path) {
             let _ = std::fs::remove_file(&temp);
+            if changed && was_running {
+                // Restore the previous config if activation could not be staged.
+                if let Some(previous) = previous_config {
+                    let _ = std::fs::write(&path, previous);
+                }
+            }
             return Err(format!("Cannot replace the Caddy configuration: {e}"));
         }
-        self.launch(Spec {
+        let spec = Spec {
             key: format!("site:{id}"),
             site: Some(id.into()),
             exe: self.store.root.join("bin/caddy.exe"),
@@ -2359,8 +2375,16 @@ impl Supervisor {
             health: Health::Strict2xx,
             restart: RestartPolicy::Always,
             memory_limit_mb: None,
-        })
-        .await?;
+        };
+        if let Err(error) = self.launch(spec.clone()).await {
+            if changed && was_running {
+                if let Some(previous) = previous_config {
+                    let _ = std::fs::write(&path, previous);
+                    let _ = self.launch(spec).await;
+                }
+            }
+            return Err(error);
+        }
         for _ in 0..100 {
             if http_ok(site.local_port, "/.well-known/hostify-caddy-ok").await {
                 return Ok(());
