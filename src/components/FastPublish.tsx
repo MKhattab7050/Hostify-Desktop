@@ -89,7 +89,8 @@ export function FastPublish({ initialSite, onDone, onStandard }: { initialSite?:
   const [allowDatabase, setAllowDatabase] = useState(false);
   const [externalDatabase, setExternalDatabase] = useState(false);
   const [consentDns, setConsentDns] = useState(false);
-  const kind = site?.kind ?? project?.report.siteKind ?? "static";
+  const kind: SiteKind = site?.kind ??
+    (project?.report.siteKind === "node" || project?.report.siteKind === "php" ? project.report.siteKind : "static");
   const runtime = recommendedRuntime(project, site, runtimes);
   const requiresDatabase = !initialSite && !!project?.report.usesDatabase;
   const live = useStore((s) => deployment ? s.deployments[deployment.id] : undefined);
@@ -167,6 +168,7 @@ export function FastPublish({ initialSite, onDone, onStandard }: { initialSite?:
 
       if (!current) {
         if (!project) throw new Error("Choose a project first.");
+        if (project.report.siteKind === "unknown") throw new Error("Select a supported project type in Standard Publish.");
         currentStep = "import";
         note("import", "Importing a separate release copy.", "running");
         current = await api.addSite(
