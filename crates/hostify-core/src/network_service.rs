@@ -1,7 +1,7 @@
 //! Local, central-only composition of tenant authorization and the network
 //! registry. There is deliberately no HTTP listener, Cloudflare DNS mutation,
  //! or site execution API here. Operator provisioning is not publicly exposed.
-use crate::network::{Registry,NetworkError,Tenant,Invitation,Route,DeviceChallenge,Agent,AuditEntry};
+use crate::network::{Registry,NetworkError,Tenant,Invitation,Route,DeviceChallenge,Agent,AuditEntry,TenantUsage};
 use crate::network_auth::{Accounts,AccountError,Principal,Session,Role,Capability,MemberInvitation,TenantMember,ActiveSession};
 use std::path::Path;
 use thiserror::Error;
@@ -68,6 +68,11 @@ impl NetworkControlPlane{
     /// Management-only member roster with bounded, tenant-local pagination.
     pub fn list_members(&self,token:&str,tenant:&str,limit:i64,offset:i64)->Result<Vec<TenantMember>>{
         Ok(self.accounts.list_members(token,tenant,limit,offset)?)
+    }
+    /// Quota usage is a scoped, read-only reservation snapshot, not billing.
+    pub fn tenant_usage(&self,token:&str,tenant:&str)->Result<TenantUsage>{
+        self.accounts.authorize(token,tenant,Capability::View)?;
+        Ok(self.registry.tenant_usage(tenant)?)
     }
     /// Read-only inventory requires an active tenant session, including for
     /// viewers. Core Registry methods alone do not establish authorization.
@@ -150,6 +155,11 @@ mod tests{
         let agent=service.enroll_device(&invitation.token,&hex::encode(key.public_key().as_ref())).unwrap();
         let route=service.reserve_subdomain(&owner.token,&tenant.id,&agent.id,
             &Uuid::new_v4().to_string(),"tenant-a").unwrap();
+        let usage=service.tenant_usage(&viewer.token,&tenant.id).unwrap();
+        assert_eq!(usage.active_devices,1);
+        assert_eq!(usage.reserved_hostnames,1);
+        assert!(!usage.publicly_routable);
+        assert!(service.tenant_usage(&owner.token,&other.id).is_err());
         assert_eq!(service.list_devices(&viewer.token,&tenant.id,10,0).unwrap().len(),1);
         assert_eq!(service.list_routes(&viewer.token,&tenant.id,10,0).unwrap().len(),1);
         assert!(service.list_devices(&viewer.token,&other.id,10,0).is_err());

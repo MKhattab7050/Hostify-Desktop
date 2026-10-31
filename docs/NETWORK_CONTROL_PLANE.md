@@ -48,6 +48,7 @@ All endpoints are JSON, have a 32 KiB body limit, disable caches, and return no 
 | `POST /v1/tenant/agents/list` | Tenant View session | Bounded, paginated inventory of the tenant's non-revoked devices |
 | `POST /v1/tenant/routes/list` | Tenant View session | Bounded, paginated inventory of the tenant's non-disabled hostnames; not public reachability |
 | `POST /v1/tenant/audit/list` | Tenant ManageUsers session | Owner/Admin-only security activity: tenant-scoped, newest-first and bounded pages |
+| `POST /v1/tenant/usage` | Tenant View session | Own tenant's device and hostname reservation counts, quota limits and remaining capacity; **not** a public traffic or billing meter |
 
 For new operator-provisioned tenants, prefer `POST /v1/accounts/provision` with `name`, `email` and `password`. It rolls back the whole operation if owner creation or auditing fails. The old `POST /v1/tenants` plus `POST /v1/accounts/bootstrap` developer flow remains for compatibility but is not atomic across requests. **Neither is a public self-signup API.**
 
@@ -58,6 +59,8 @@ Account login and single-use token redemption do not require an admin Bearer. Al
 Both inventory endpoints require a valid scoped tenant session and strict `tenantId`, `limit` (1–100), and `offset` (0–1,000,000). They return `items`, `limit`, and `offset` (plus `publiclyRoutable: false` for routes). Results never include another tenant's rows or revoked devices. Inventory does not prove public HTTPS reachability.
 
 New member and session inventory calls accept `tenantId`, `limit` (1–100), and `offset` (0–100,000), and return `items`, `limit`, and `offset`. Member inventory requires Owner or Admin; Viewer cannot enumerate users. Session inventory is restricted to **the authenticated user's own** active sessions and returns `sessionId`, `createdAt`, `expiresUnix` and `isCurrent`. Session revocation accepts `tenantId` and `sessionId`. Member role updates accept `tenantId`, `userId` and `role` (admin/viewer). Only the owner may change roles, never the owner role; a real change invalidates all target member sessions and requires fresh sign-in. Password rotation accepts `tenantId`, `currentPassword` and `newPassword` (12–256 bytes and control-character restrictions). On success, existing sessions including the caller's are revoked. Transaction rollback prevents changing a credential or revoking a session without its audit event. These endpoints remain **local development facilities**, not a production self-service gateway.
+
+The `tenant/usage` request accepts only `tenantId` and returns `usage` plus `publicReady:false`. Its counts mirror the quota checks for non-revoked devices and reserved/active hostnames, including an update after a device is revoked. `publiclyRoutable:false` is explicit because this local development service cannot provision an internet route. Usage is not billable metering and does not prove the existence of a live site.
 
 The hostname returned by `routes/reserve` or `tenant/routes/reserve` does **not** create public DNS, a Cloudflare tunnel, or a valid customer web route.
 
