@@ -255,10 +255,11 @@ impl Registry {
             "SELECT id,tenant_id,ts,action,subject_id FROM network_audit
              WHERE tenant_id=?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3"
         )?;
-        Ok(statement.query_map(params![tenant,limit,offset],|row|Ok(AuditEntry{
+        let events=statement.query_map(params![tenant,limit,offset],|row|Ok(AuditEntry{
             id:row.get(0)?,tenant_id:row.get(1)?,ts:row.get(2)?,
             action:row.get(3)?,subject_id:row.get(4)?,
-        }))?.collect::<std::result::Result<Vec<_>,_>>()?)
+        }))?.collect::<std::result::Result<Vec<_>,_>>()?;
+        Ok(events)
     }
     /// Central-only, bounded tenant inventory. Call only after authenticating
     /// the requesting tenant; this registry itself is not an authorization API.
