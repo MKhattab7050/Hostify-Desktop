@@ -509,7 +509,9 @@ mod tests{
         let bytes=registry.challenge_message(&tenant.id,&agent.id,&route.id,&challenge.value).unwrap();
         let signed=hex::encode(keypair.sign(&bytes).as_ref());
         let mut forged=signed.clone();
-        forged.replace_range(0..2,"00");
+        // Ensure a different signature byte even if the original starts 00.
+        let replacement=if &signed[..2]=="00" {"ff"} else {"00"};
+        forged.replace_range(0..2,replacement);
         assert!(registry.verify_route_signature(&tenant.id,&agent.id,&route.id,&challenge.value,&forged).is_err());
         assert!(!registry.has_verified_identity(&tenant.id,&agent.id,&route.id).unwrap());
         registry.verify_route_signature(&tenant.id,&agent.id,&route.id,&challenge.value,&signed).unwrap();
