@@ -537,9 +537,16 @@ impl Manager {
             ("DB_HOST".into(), "127.0.0.1".into()),
             ("DB_PORT".into(), self.required_config()?.port.to_string()),
             ("DB_NAME".into(), name.into()),
+            ("DB_DATABASE".into(), name.into()),
             ("DB_USER".into(), user.into()),
+            ("DB_USERNAME".into(), user.into()),
             ("DB_PASSWORD".into(), password.into()),
         ])
+    }
+    pub fn ensure_site_env(&self, site: &str, name: &str) -> Result<()> {
+        let (user, password) = self.credentials(name)?;
+        let values = self.env_values(name, &user, &password)?;
+        self.inject(site, &values, true)
     }
     fn env_read(
         &self,

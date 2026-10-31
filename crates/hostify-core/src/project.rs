@@ -69,6 +69,10 @@ fn files(path: &Path, kind: &str) -> Result<ProjectFiles, String> {
             "wp-config-sample.php",
             "wp-config.php",
             "vendor",
+            "storage",
+            "database/schema.sql",
+            "app/database.php",
+            "config/database.php",
             "composer.json",
             "index.html",
             "dist/index.html",
@@ -82,7 +86,7 @@ fn files(path: &Path, kind: &str) -> Result<ProjectFiles, String> {
                 }
             }
             if let Ok(m) = fs::symlink_metadata(&p) {
-                if m.is_file() || n == "vendor" && m.is_dir() {
+                if m.is_file() || matches!(n, "vendor" | "storage") && m.is_dir() {
                     names.insert(PathBuf::from(n));
                     if wanted(Path::new(n)) {
                         data.insert(
@@ -218,6 +222,11 @@ fn php_satisfies(pin: &str, range: &str) -> bool {
             })
     })
 }
+pub fn read_source_dotenv(path: &Path, kind: &str) -> Option<String> {
+    let (_, data) = files(path, kind).ok()?;
+    let bytes = data.get(Path::new(".env"))?;
+    String::from_utf8(bytes.clone()).ok()
+}
 pub fn inspect(path: &Path, kind: &str) -> Result<ProjectReport, String> {
     let (names, files) = files(path, kind)?;
     let has = |s: &str| names.contains(Path::new(s));
@@ -343,14 +352,33 @@ pub fn inspect(path: &Path, kind: &str) -> Result<ProjectReport, String> {
             r.warnings.push("No pinned PHP runtime satisfies require.php; the newest pinned runtime is suggested.".into());
         }
         r.suggested.install = Install::None;
-        if has("public/index.php") && !has("index.php") {
+        if has("public/index.php") {
             r.suggested.document_root = "public".into();
         }
         if has("wp-config-sample.php") {
             r.framework = Some("wordpress".into());
             r.suggested.persistent_paths = vec!["wp-content".into(), "wp-config.php".into()];
+        } else if names
+            .iter()
+            .any(|p| p == Path::new("storage") || p.starts_with("storage/"))
+        {
+            r.suggested.persistent_paths = vec!["storage".into()];
         }
         r.uses_database = has("wp-config-sample.php")
+            || has("database/schema.sql")
+            || has("app/database.php")
+            || has("config/database.php")
+            || r.dotenv_names.iter().any(|n| {
+                matches!(
+                    n.as_str(),
+                    "DB_HOST"
+                        | "DB_DATABASE"
+                        | "DB_NAME"
+                        | "DB_USERNAME"
+                        | "DB_USER"
+                        | "DATABASE_URL"
+                )
+            })
             || ["require", "require-dev"].iter().any(|section| {
                 ["ext-mysqli", "ext-pdo_mysql", "mysqli", "pdo_mysql"]
                     .iter()

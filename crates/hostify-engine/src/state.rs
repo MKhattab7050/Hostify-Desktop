@@ -1077,6 +1077,7 @@ impl Engine {
                             .ok_or_else(|| anyhow!("No pinned runtime for this website kind."))?
                             .to_string()
                     };
+                    let release_dir = site_dir.join("app").join(&release);
                     let now = Utc::now().to_rfc3339();
                     if method == "add_site" {
                         config.active_release = None;
@@ -1097,6 +1098,52 @@ impl Engine {
                             )?);
                         }
                         s.db()?.execute("INSERT INTO websites(id,name,source_path,local_port,file_count,size_bytes,created_at,updated_at,kind,runtime_version,app_config_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?7,?10,?8,?9)",params![id,arg(&p,"name")?,source,port,report.file_count,report.size_bytes,now,recommended_runtime,serde_json::to_string(&config)?,site_kind])?;
+                        if let Some(dotenv_text) =
+                            hostify_core::project::read_source_dotenv(Path::new(source), kind)
+                        {
+                            if let Ok(db) = s.db() {
+                                let filtered: String = dotenv_text
+                                    .lines()
+                                    .filter(|line| {
+                                        let trimmed = line
+                                            .trim()
+                                            .strip_prefix("export ")
+                                            .unwrap_or(line.trim());
+                                        if let Some((k, v)) = trimmed.split_once('=') {
+                                            let key = k.trim();
+                                            let val =
+                                                v.trim().trim_matches(|c| c == '"' || c == '\'');
+                                            if key.eq_ignore_ascii_case("PORT")
+                                                || key.eq_ignore_ascii_case("HOST")
+                                            {
+                                                return false;
+                                            }
+                                            if key.eq_ignore_ascii_case("BASE_PATH")
+                                                && !val.is_empty()
+                                                && val != "/"
+                                            {
+                                                return false;
+                                            }
+                                        }
+                                        true
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                let _ =
+                                    hostify_core::env_vars::import_dotenv(&db, &id, &filtered, &[]);
+                            }
+                        }
+                        if release_dir.join("app/auto-install.php").is_file() {
+                            if let Ok(db) = s.db() {
+                                let _ = hostify_core::env_vars::set(
+                                    &db,
+                                    &id,
+                                    "AUTO_INSTALL",
+                                    "true",
+                                    false,
+                                );
+                            }
+                        }
                     } else {
                         config.pending_release = Some(release);
                         s.save_app_config(&id, &config)?;

@@ -996,16 +996,118 @@ impl Supervisor {
         hosts
     }
 }
-#[async_trait]
-impl SiteRuntime for Supervisor {
-    async fn start_site(&self, id: &str) -> Result<bool, String> {
+impl Supervisor {
+    async fn auto_heal_site(&self, id: &str) -> Result<(), String> {
+        let site = self.store.site(id).map_err(|e| e.to_string())?;
+        if !matches!(site.kind.as_str(), "node" | "php") {
+            return Ok(());
+        }
+        let mut config = self.store.app_config(id).map_err(|e| e.to_string())?;
+        let release_id = config
+            .built_release
+            .clone()
+            .or_else(|| config.active_release.clone())
+            .or_else(|| config.pending_release.clone());
+        let mut config_changed = false;
+        let mut needs_auto_db = false;
+        if let Some(ref rel) = release_id
+            && let Ok(rel_root) = self.release_root(id, rel)
+        {
+            if site.kind == "php"
+                && (config.document_root == "." || config.document_root.is_empty())
+                && rel_root.join("public/index.php").is_file()
+                && (rel_root.join("public/css").is_dir() || rel_root.join("public/js").is_dir())
+                && !rel_root.join("css").is_dir()
+            {
+                config.document_root = "public".into();
+                config_changed = true;
+            }
+            if site.kind == "php"
+                && rel_root.join("storage").is_dir()
+                && !config.persistent_paths.iter().any(|p| p == "storage")
+            {
+                config.persistent_paths.push("storage".into());
+                config_changed = true;
+            }
+            if rel_root.join("app/auto-install.php").is_file()
+                && let Ok(db) = self.store.db()
+            {
+                let _ = hostify_core::env_vars::set(&db, id, "AUTO_INSTALL", "true", false);
+                if let Ok(base_val) = hostify_core::env_vars::reveal(&db, id, "BASE_PATH")
+                    && !base_val.is_empty()
+                    && base_val != "/"
+                {
+                    let _ = hostify_core::env_vars::delete(&db, id, "BASE_PATH");
+                }
+            }
+            if rel_root.join("database/schema.sql").is_file()
+                || rel_root.join("app/database.php").is_file()
+                || rel_root.join("app/auto-install.php").is_file()
+            {
+                needs_auto_db = true;
+            }
+        }
+        if config_changed {
+            let _ = self.store.save_app_config(id, &config);
+        }
         if let Some(name) = self.mysql.linked_database(id).map_err(|e| e.to_string())? {
             if let Err(error) = self.mysql_start().await {
                 let message = format!("Database {name} could not start: {error}");
                 let _ = self.store.status(id, "error", Some(message.clone()));
                 return Err(message);
             }
+            let _ = self.mysql.ensure_site_env(id, &name);
+        } else if needs_auto_db && self.store.runtimes.resolve("mysql", "8.4.10").is_ok() {
+            if self.mysql.config().ok().flatten().is_none() {
+                let m = self.mysql.clone();
+                tokio::task::spawn_blocking(move || m.setup("8.4.10"))
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| format!("MySQL auto-setup failed: {e}"))?;
+            }
+            if let Err(error) = self.mysql_start().await {
+                let message = format!("MySQL could not start: {error}");
+                let _ = self.store.status(id, "error", Some(message.clone()));
+                return Err(message);
+            }
+            let raw_name: String = site
+                .name
+                .to_ascii_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect();
+            let trimmed = raw_name.trim_matches('_');
+            let base_db = if trimmed.is_empty() || !trimmed.as_bytes()[0].is_ascii_alphabetic() {
+                format!("site_{}", &site.id.replace('-', "")[..8])
+            } else {
+                trimmed.chars().take(32).collect()
+            };
+            let db_name = if ["mysql", "sys", "information_schema", "performance_schema"]
+                .contains(&base_db.as_str())
+            {
+                format!("site_{base_db}")
+            } else {
+                base_db
+            };
+            let m = self.mysql.clone();
+            let site_id = id.to_owned();
+            let db_name_clone = db_name.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                if m.create_database(&db_name_clone, Some(&site_id), true, true)
+                    .is_err()
+                {
+                    let _ = m.request("link_database", &json!({"name": db_name_clone, "siteId": site_id, "injectEnv": true, "replaceEnv": true}), true);
+                }
+            })
+            .await;
         }
+        Ok(())
+    }
+}
+#[async_trait]
+impl SiteRuntime for Supervisor {
+    async fn start_site(&self, id: &str) -> Result<bool, String> {
+        self.auto_heal_site(id).await?;
         if matches!(
             self.store
                 .site(id)

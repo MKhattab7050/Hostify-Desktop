@@ -3,6 +3,27 @@ import { api } from "../lib/api";
 import { useStore } from "../store";
 import type { Site } from "../lib/types";
 
+async function smartStartOrRestart(site: Site, restart = false) {
+  try {
+    return await (restart ? api.restartSite(site.id) : api.startSite(site.id));
+  } catch (e) {
+    const msg = (e as Error).message || "";
+    if (/Build and (trust|acknowledge)/i.test(msg)) {
+      await api.buildApp(site.id);
+      for (let i = 0; i < 300; i++) {
+        await new Promise((r) => setTimeout(r, 200));
+        const st = await api.getBuildStatus(site.id);
+        if (!st || st.state === "done") break;
+        if (st.state === "failed" || st.state === "cancelled") {
+          throw new Error(st.detail || "Application build failed.");
+        }
+      }
+      return await (restart ? api.restartSite(site.id) : api.startSite(site.id));
+    }
+    throw e;
+  }
+}
+
 /** Start/stop/restart/open with per-site busy tracking and honest error toasts. */
 export function useSiteActions() {
   const toast = useStore((s) => s.toast); const refresh = useStore((s) => s.refresh);
@@ -16,9 +37,9 @@ export function useSiteActions() {
   }
   return {
     busy,
-    start: (s: Site) => run(s, "start", () => api.startSite(s.id), `${s.name} started`),
+    start: (s: Site) => run(s, "start", () => smartStartOrRestart(s, false), `${s.name} started`),
     stop: (s: Site) => run(s, "stop", () => api.stopSite(s.id), `${s.name} stopped`),
-    restart: (s: Site) => run(s, "restart", () => api.restartSite(s.id), `${s.name} restarted`),
+    restart: (s: Site) => run(s, "restart", () => smartStartOrRestart(s, true), `${s.name} restarted`),
     preview: (s: Site) => run(s, "preview", async () => api.openExternal(await api.previewUrl(s.id))),
     openPublic: (s: Site) => s.publicUrl && api.openExternal(s.publicUrl),
   };

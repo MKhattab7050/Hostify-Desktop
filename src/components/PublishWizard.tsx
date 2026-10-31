@@ -319,11 +319,8 @@ function Step1Import({
         const detectedKind: SiteKind =
           projRep?.siteKind && projRep.siteKind !== "unknown" ? projRep.siteKind : "static";
 
-        const initialEnv: EnvVar[] = (projRep?.dotenvNames ?? []).map((name) => ({
-          name,
-          secret: /SECRET|KEY|TOKEN|PASS/i.test(name),
-          value: "",
-        }));
+        const rawDb = base.toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/^_+|_+$/g, "");
+        const defaultDb = (!rawDb || !/^[a-z]/.test(rawDb) ? `site_${rawDb || "db"}` : rawDb).slice(0, 32);
 
         onChange((prev) => ({
           ...prev,
@@ -340,8 +337,9 @@ function Step1Import({
                 ...projRep.suggested,
               }
             : prev.config,
-          newDbName: base.toLowerCase().replace(/[^a-z0-9_]/g, "_").slice(0, 32),
-          envVars: prev.envVars.length ? prev.envVars : initialEnv,
+          dbChoice: projRep?.usesDatabase ? "new" : prev.dbChoice,
+          newDbName: defaultDb,
+          envVars: prev.envVars,
         }));
       } catch (e) {
         toast("error", (e as Error).message);
@@ -758,8 +756,14 @@ function Step5Database({
   async function setupMysql() {
     setBusy(true);
     try {
-      await api.mysqlSetup("8.4.10");
-      toast("ok", "MySQL initialized successfully");
+      const rts = await api.listRuntimes();
+      const mysqlRt = rts.find((r) => r.kind === "mysql");
+      const ver = mysqlRt?.version ?? "8.4.10";
+      if (mysqlRt && !mysqlRt.ready) {
+        await api.installRuntime("mysql", ver);
+      }
+      await api.mysqlSetup(ver);
+      toast("ok", "MySQL initialized and started automatically");
       await load();
     } catch (e) {
       toast("error", (e as Error).message);
@@ -889,14 +893,35 @@ function Step5Database({
         <Button onClick={onBack}>Back</Button>
         <Button
           variant="primary"
+          busy={busy}
           disabled={
             state.dbChoice === "new"
-              ? !state.newDbName || (mysql && !mysql.setUp)
+              ? !state.newDbName
               : state.dbChoice === "existing"
                 ? !state.selectedDb
                 : false
           }
-          onClick={onNext}
+          onClick={async () => {
+            if (state.dbChoice === "new" && mysql && !mysql.setUp) {
+              setBusy(true);
+              try {
+                const rts = await api.listRuntimes();
+                const mysqlRt = rts.find((r) => r.kind === "mysql");
+                const ver = mysqlRt?.version ?? "8.4.10";
+                if (mysqlRt && !mysqlRt.ready) {
+                  await api.installRuntime("mysql", ver);
+                }
+                await api.mysqlSetup(ver);
+                await load();
+              } catch (e) {
+                toast("error", (e as Error).message);
+                setBusy(false);
+                return;
+              }
+              setBusy(false);
+            }
+            onNext();
+          }}
         >
           Continue to environment variables
         </Button>
@@ -1050,8 +1075,12 @@ function Step6EnvVars({
             </li>
           ))}
         </ul>
+      ) : state.projectReport?.dotenvNames?.length ? (
+        <p className="rounded-ctl bg-kelpsoft p-3 text-[13px] text-kelp">
+          Detected <strong>.env</strong> in your project ({state.projectReport.dotenvNames.join(", ")}). Hostify will automatically import these variables and configure database credentials for you.
+        </p>
       ) : (
-        <p className="text-[13px] text-ink2">No variables configured yet.</p>
+        <p className="text-[13px] text-ink2">No custom variables needed. Hostify will configure standard environment settings automatically.</p>
       )}
 
       <div className="flex justify-between border-t border-line pt-4">
@@ -1110,6 +1139,14 @@ function Step7LocalPreview({
         setCreated(s);
         await onSiteReadyRef.current(s);
 
+        if (state.siteKind !== "static" && state.runtimeVersion && state.runtimeVersion !== s.runtimeVersion) {
+          await api.setAppConfig(
+            s.id,
+            state.config,
+            state.siteKind === "php" ? { phpVersion: state.runtimeVersion } : { nodeVersion: state.runtimeVersion }
+          );
+        }
+
         for (const ev of state.envVars) {
           if (ev.value) {
             await api.setEnvVar(s.id, ev.name, ev.value, ev.secret);
@@ -1117,14 +1154,45 @@ function Step7LocalPreview({
         }
 
         if (state.dbChoice === "new" && state.newDbName) {
-          await api.createDatabase(state.newDbName, s.id, true, true);
+          const ms = await api.mysqlStatus();
+          if (!ms.setUp) {
+            const rts = await api.listRuntimes();
+            const mysqlRt = rts.find((r) => r.kind === "mysql");
+            const ver = mysqlRt?.version ?? "8.4.10";
+            if (mysqlRt && !mysqlRt.ready) {
+              await api.installRuntime("mysql", ver);
+            }
+            await api.mysqlSetup(ver);
+          } else if (!ms.running) {
+            await api.mysqlStart();
+          }
+          try {
+            await api.createDatabase(state.newDbName, s.id, true, true);
+          } catch {
+            await api.linkDatabase(state.newDbName, s.id, true, true);
+          }
         } else if (state.dbChoice === "existing" && state.selectedDb) {
+          const ms = await api.mysqlStatus();
+          if (ms.setUp && !ms.running) {
+            await api.mysqlStart();
+          }
           await api.linkDatabase(state.selectedDb, s.id, true, true);
         }
 
         if (s.kind === "static" || !s.kind) {
           await api.startSite(s.id);
           setBuildDone(true);
+        } else {
+          await api.buildApp(s.id);
+          for (let i = 0; i < 300; i++) {
+            await new Promise((r) => setTimeout(r, 200));
+            const st = await api.getBuildStatus(s.id);
+            if (!st || st.state === "done") {
+              setBuildDone(true);
+              break;
+            }
+            if (st.state === "failed" || st.state === "cancelled") break;
+          }
         }
       } catch (e) {
         if (!dead) toast("error", (e as Error).message);
