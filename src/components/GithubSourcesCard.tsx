@@ -108,7 +108,7 @@ export function GithubSourcesCard({ sites }: { sites: Site[] }) {
                 {pushes.map(push=><li key={push.deliveryId} className="flex flex-wrap items-center justify-between gap-2 rounded-ctl border border-line p-2">
                   <div>
                     <p className="text-[13px] font-medium">{push.commitSha.slice(0,12)}</p>
-                    <p className="text-[12px] text-ink2">{push.repository} · {push.branch} · {push.state.replaceAll("_"," ")}</p>
+                    <p className="text-[12px] text-ink2">{push.repository} · {push.branch} · {push.state.replace(/_/g," ")}</p>
                   </div>
                   {push.state==="awaiting_review"&&<Button size="sm" variant="danger" disabled={!!busy}
                     onClick={()=>void reject(site,push)}><XCircle size={13} aria-hidden/>Reject push</Button>}
