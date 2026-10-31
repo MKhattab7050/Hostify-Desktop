@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, ChevronRight, CircleHelp, ClipboardList, Cloud, FolderOpen, Globe2, Loader2, ShieldCheck, SlidersHorizontal, Upload, Zap } from "lucide-react";
 import { api } from "../lib/api";
 import { useStore } from "../store";
@@ -72,7 +72,6 @@ function riskNotice(kind: string) {
 export function FastPublish({ initialSite, onDone, onStandard }: { initialSite?: Site; onDone: () => void; onStandard: () => void }) {
   const setDeployment = useStore((s) => s.setDeployment);
   const refresh = useStore((s) => s.refresh);
-  const toast = useStore((s) => s.toast);
   const [phase, setPhase] = useState<Phase>(initialSite ? "review" : "project");
   const [project, setProject] = useState<Project>();
   const [site, setSite] = useState<Site | undefined>(initialSite);
@@ -84,6 +83,7 @@ export function FastPublish({ initialSite, onDone, onStandard }: { initialSite?:
   const [error, setError] = useState<string>();
   const [history, setHistory] = useState<Entry[]>([]);
   const [deployment, setLocalDeployment] = useState<Deployment>();
+  const siteIdRef = useRef(initialSite?.id);
   const [trust, setTrust] = useState(false);
   const [allowComponents, setAllowComponents] = useState(false);
   const [allowDatabase, setAllowDatabase] = useState(false);
@@ -92,7 +92,8 @@ export function FastPublish({ initialSite, onDone, onStandard }: { initialSite?:
   const kind = site?.kind ?? project?.report.siteKind ?? "static";
   const runtime = recommendedRuntime(project, site, runtimes);
   const requiresDatabase = !initialSite && !!project?.report.usesDatabase;
-  const active = deployment && useStore.getState().deployments[deployment.id] || deployment;
+  const live = useStore((s) => deployment ? s.deployments[deployment.id] : undefined);
+  const active = live ?? deployment;
 
   useEffect(() => {
     let mounted = true;
@@ -113,8 +114,11 @@ export function FastPublish({ initialSite, onDone, onStandard }: { initialSite?:
     return () => { alive = false; };
   }, [initialSite?.publishDeploymentId, setDeployment]);
 
-  const note = (step: string, detail: string, status: Entry["status"] = "done") =>
+  const note = (step: string, detail: string, status: Entry["status"] = "done") => {
     setHistory((h) => [...h.filter((x) => x.step !== step), { step, detail, status }]);
+    // Persist fixed event types in the engine activity log, never client-provided details.
+    if (siteIdRef.current) void api.recordPublishEvent(siteIdRef.current, step, status).catch(() => {});
+  };
 
   async function choose(sourceKind: SourceKind) {
     setBusy(true); setError(undefined);
@@ -130,6 +134,7 @@ export function FastPublish({ initialSite, onDone, onStandard }: { initialSite?:
         throw new Error("Project type is unclear. Use Standard Publish to choose and validate its runtime.");
       }
       setProject({ path, sourceKind, source, report });
+      setTrust(false); setConsentDns(false); setAllowDatabase(false); setExternalDatabase(false);
       note("project", `${report.siteKind.toUpperCase()} project detected: ${report.framework ?? "standard project"}`);
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
@@ -169,6 +174,7 @@ export function FastPublish({ initialSite, onDone, onStandard }: { initialSite?:
           project.path, project.sourceKind, project.report.siteKind, project.report.suggested
         );
         setSite(current);
+        siteIdRef.current = current.id;
         await refresh();
         note("import", "Project imported. Your original folder has not been changed.");
       }
@@ -291,7 +297,7 @@ export function FastPublish({ initialSite, onDone, onStandard }: { initialSite?:
           <Button size="sm" onClick={onStandard}><SlidersHorizontal size={14} />Advanced settings</Button>
         </div>
         <PublishProgress deployment={active} onDone={onDone} onRepublish={() => {
-          setDeployment({ ...active, state: "rolled_back" }); setLocalDeployment(undefined); setPhase("review");
+          setLocalDeployment(undefined); setPhase("review");
         }} />
         <Disclosure title="Fast Publish preparation history">
           <ol className="mt-2 grid gap-2 text-[13px]">

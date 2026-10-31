@@ -56,6 +56,7 @@ export const api = {
   cfPlanDns: (siteId: string, hostname: string) => call<DnsPlan>("cf_plan_dns", { siteId, hostname }),
   publishPreflight: (siteId: string) => call<PublishPreflight>("publish_preflight", { siteId }),
   publishDiagnosis: (siteId: string) => call<PublishDiagnostic>("publish_diagnosis", { siteId }),
+  recordPublishEvent: (siteId: string, step: string, outcome: "running" | "done" | "failed") => call<void>("publish_record_event", { siteId, step, outcome }),
   publishSite: (siteId: string, hostname: string, consentDns: boolean) =>
     call<Deployment>("publish_site", { siteId, hostname, consentDns }),
   getDeployment: (id: string) => call<Deployment>("get_deployment", { id }),

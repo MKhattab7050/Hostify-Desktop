@@ -149,6 +149,7 @@ export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise
       const blocked = [...(!build ? ["Trust and build this release first."] : []), ...(!running ? ["Start the website before publishing."] : [])];
       return r({ mode: "shared", ready: !blocked.length, blocked, checks: [{ key: "trusted-build", passed: build, detail: build ? "Release built." : "Trust required." }, { key: "local-site", passed: running, detail: running ? "Running." : "Stopped." }] });
     }
+    case "publish_record_event": return r(undefined);
     case "publish_diagnosis": return r({ class: "CONFIGURATION_ERROR", message: "Preview diagnostic", nextAction: "Inspect logs.", safeToRetry: false });
     case "cf_plan_dns": return r({ hostname: a.hostname, action: "create", message: `Hostify will add one CNAME record for ${a.hostname}. Nothing else changes.` });
     case "publish_site": {

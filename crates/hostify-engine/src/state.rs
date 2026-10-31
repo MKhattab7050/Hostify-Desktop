@@ -839,6 +839,33 @@ impl Engine {
                 Ok(json!({"ready":blocked.is_empty(),"checks":checks,"blocked":blocked,
                     "diagnostic":diagnostic,"mode":"shared"}))
             }
+            "publish_record_event" => {
+                let id = arg(&p, "siteId")?;
+                s.site(id)?;
+                let step = arg(&p, "step")?;
+                let event = match step {
+                    "project" => "Project detected",
+                    "domain" => "Domain ownership preflight",
+                    "import" => "Application release imported",
+                    "runtime" => "Runtime selected or installed",
+                    "components" => "Hosting components checked",
+                    "database" => "Dedicated database setup",
+                    "build" => "Trusted application build",
+                    "start" => "Local health preflight",
+                    "dns-plan" => "DNS conflict and ownership preflight",
+                    "publish" => "Deployment submitted to shared engine",
+                    "diagnosis" => "Failure classified",
+                    _ => bail!("Unknown publish event step."),
+                };
+                let outcome = arg(&p, "outcome")?;
+                if !matches!(outcome, "running" | "done" | "failed") {
+                    bail!("Invalid publish event outcome.");
+                }
+                let severity = if outcome == "failed" { "error" } else { "info" };
+                // Persist only fixed descriptions, never project-provided text, tokens or secrets.
+                s.activity(severity, Some(id), &format!("Fast Publish: {event} ({outcome})"))?;
+                Ok(Value::Null)
+            }
             "publish_diagnosis" => {
                 let id = arg(&p, "siteId")?;
                 let site = s.site(id)?;
