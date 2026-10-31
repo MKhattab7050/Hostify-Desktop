@@ -63,7 +63,7 @@ impl Controller {
         let tenant_action=method==Method::POST &&
             matches!(path,"/v1/tenant/invitations"|"/v1/tenant/routes/reserve"|
                 "/v1/tenant/agents/revoke"|"/v1/tenant/agents/list"|
-                "/v1/tenant/routes/list");
+                "/v1/tenant/routes/list"|"/v1/tenant/audit/list");
         if !public_action && !tenant_action && !self.authorized(auth) {
             return (StatusCode::UNAUTHORIZED,json!({"error":"unauthorized"}));
         }
@@ -167,6 +167,18 @@ impl Controller {
                     registry.list_tenant_routes(&p.tenant_id,p.limit,p.offset)
                         .map(|items|json!({"items":items,"limit":p.limit,
                             "offset":p.offset,"publiclyRoutable":false}))
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/audit/list"=>parse::<InventoryInput>(body)
+                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
+                .and_then(|p|{
+                    let accounts=self.accounts.as_ref().ok_or(
+                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
+                    // Viewing security history requires management permission.
+                    // Read-only viewers must never get tenant audit access.
+                    accounts.authorize(auth,&p.tenant_id,Capability::ManageUsers)?;
+                    registry.list_tenant_audit(&p.tenant_id,p.limit,p.offset)
+                        .map(|items|json!({"items":items,"limit":p.limit,"offset":p.offset}))
                         .map_err(map_network_error)
                 }),
             "/v1/tenant/agents/revoke"=>parse::<RevokeInput>(body)
@@ -403,6 +415,21 @@ mod tests{
         }));
         assert_eq!(status,StatusCode::OK);
         let viewer_auth=format!("Bearer {}",viewer["token"].as_str().unwrap());
+        let page=json!({"tenantId":first.id,"limit":10,"offset":0});
+        let (status,audit)=call("/v1/tenant/audit/list",&owner_auth,page.clone());
+        assert_eq!(status,StatusCode::OK);
+        assert!(!audit["items"].as_array().unwrap().is_empty());
+        assert_eq!(audit["items"][0]["tenantId"],first.id);
+        assert!(!audit.to_string().contains(owner_auth.strip_prefix("Bearer ").unwrap()));
+        assert!(!audit.to_string().contains("owner@site.test"));
+        let (status,_) = call("/v1/tenant/audit/list",&viewer_auth,page.clone());
+        assert_eq!(status,StatusCode::FORBIDDEN);
+        let (status,_) = call("/v1/tenant/audit/list",&owner_auth,
+            json!({"tenantId":second.id,"limit":10,"offset":0}));
+        assert_eq!(status,StatusCode::UNAUTHORIZED);
+        let (status,_) = call("/v1/tenant/audit/list",&owner_auth,
+            json!({"tenantId":first.id,"limit":101,"offset":0}));
+        assert_eq!(status,StatusCode::BAD_REQUEST);
         let (status,_)=call("/v1/tenant/invitations",&viewer_auth,json!({
             "tenantId":first.id,"ttlSeconds":120
         }));
