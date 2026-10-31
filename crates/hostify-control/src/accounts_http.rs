@@ -33,6 +33,8 @@ impl AccountApi{
                 .ok_or((StatusCode::UNAUTHORIZED,"unauthorized"))
         }
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
+        struct Provision {name:String,email:String,password:String}
+        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
         struct Bootstrap {tenant_id:String,email:String,password:String}
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
         struct Login {tenant_id:String,email:String,password:String}
@@ -46,6 +48,13 @@ impl AccountApi{
             let mut accounts=self.accounts.lock()
                 .map_err(|_|(StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
             match path {
+                "/v1/accounts/provision"=>{
+                    if !admin {return Err((StatusCode::UNAUTHORIZED,"unauthorized"));}
+                    let p:Provision=parse(body)?;
+                    let (tenant,owner)=accounts.provision_owner_tenant(
+                        &p.name,&p.email,&p.password).map_err(map_account_error)?;
+                    Ok(json!({"tenant":tenant,"owner":owner}))
+                },
                 "/v1/accounts/bootstrap"=>{
                     if !admin {return Err((StatusCode::UNAUTHORIZED,"unauthorized"));}
                     let p:Bootstrap=parse(body)?;
@@ -93,7 +102,7 @@ impl AccountApi{
 }
 
 pub fn is_account_path(path:&str)->bool{
-    matches!(path,"/v1/accounts/bootstrap"|"/v1/auth/login"|
+    matches!(path,"/v1/accounts/provision"|"/v1/accounts/bootstrap"|"/v1/auth/login"|
         "/v1/auth/logout"|"/v1/auth/me"|"/v1/members/invite"|"/v1/members/accept")
 }
 fn map_account_error(error:AccountError)->(StatusCode,&'static str){

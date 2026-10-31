@@ -417,4 +417,42 @@ mod tests{
         std::fs::remove_file(&path).unwrap();
     }
 
+    #[test]
+    fn operator_atomic_provision_refuses_bad_input_and_creates_working_owner(){
+        let path=std::env::temp_dir().join(format!("hostify-atomic-http-{}.db",Uuid::new_v4()));
+        let registry=Registry::open(&path,"example.test").unwrap();
+        let accounts=Accounts::open(&path).unwrap();
+        let api=Controller::new(registry,
+            b"0123456789abcdef0123456789abcdef".to_vec()).unwrap().with_accounts(accounts);
+        let valid=json!({"name":"Tenant Zero","email":"owner@site.test",
+            "password":"secure-owner-password-123"});
+        let (status,_) = command(&api,"/v1/accounts/provision",false,valid.clone());
+        assert_eq!(status,StatusCode::UNAUTHORIZED);
+        let (status,_) = command(&api,"/v1/accounts/provision",true,json!({
+            "name":"Orphan Must Not Exist","email":"owner@site.test","password":"short"
+        }));
+        assert_eq!(status,StatusCode::BAD_REQUEST);
+        let db=rusqlite::Connection::open(&path).unwrap();
+        let count:i64=db.query_row("SELECT COUNT(*) FROM network_tenants",
+            [],|row|row.get(0)).unwrap();
+        assert_eq!(count,0);
+        let (status,created)=command(&api,"/v1/accounts/provision",true,valid);
+        assert_eq!(status,StatusCode::OK);
+        let tenant_id=created["tenant"]["id"].as_str().unwrap();
+        assert_eq!(created["owner"]["tenantId"],tenant_id);
+        let (status,session)=command(&api,"/v1/auth/login",false,json!({
+            "tenantId":tenant_id,"email":"owner@site.test",
+            "password":"secure-owner-password-123"
+        }));
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(session["user"]["role"],"owner");
+        let audit:i64=db.query_row(
+            "SELECT COUNT(*) FROM network_audit WHERE tenant_id=?1 AND action='tenant_created'",
+            [tenant_id],|row|row.get(0)).unwrap();
+        assert_eq!(audit,1);
+        drop(db);
+        drop(api);
+        std::fs::remove_file(&path).unwrap();
+    }
+
 }
