@@ -281,6 +281,98 @@ impl CrashLoop {
         self.short_exits >= 5
     }
 }
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CrashDiagnostic {
+    pub exit_code: Option<i32>,
+    pub runtime_version: Option<String>,
+    pub error_headline: String,
+    pub location: Option<String>,
+    pub compatibility_issue: Option<String>,
+    pub suggested_action: Option<String>,
+    pub summary: String,
+}
+
+pub fn diagnose_crash(
+    log_path: &Path,
+    exit_code: Option<i32>,
+    runtime_version: Option<&str>,
+    kind: &str,
+) -> CrashDiagnostic {
+    let lines = tail_logs(log_path, 30).unwrap_or_default();
+    let text = lines.join("\n");
+    let exit_code_str = exit_code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into());
+
+    let mut headline = String::new();
+    let mut location = None;
+    let mut issue = None;
+    let mut action = None;
+
+    for line in lines.iter().rev() {
+        let trimmed = line.trim();
+        if (trimmed.starts_with("TypeError:")
+            || trimmed.starts_with("ReferenceError:")
+            || trimmed.starts_with("SyntaxError:")
+            || trimmed.starts_with("Error:")
+            || trimmed.contains("Cannot read properties of undefined"))
+            && headline.is_empty()
+        {
+            headline = trimmed.to_string();
+        }
+        if (trimmed.contains(".js:") || trimmed.contains(".cjs:") || trimmed.contains(".mjs:") || trimmed.contains(".php:"))
+            && (trimmed.contains("node_modules") || trimmed.contains('\\') || trimmed.contains('/'))
+            && location.is_none()
+        {
+            location = Some(trimmed.strip_prefix("at ").unwrap_or(trimmed).to_string());
+        }
+    }
+
+    if text.contains("buffer-equal-constant-time") || (text.contains("Cannot read properties of undefined") && text.contains("SlowBuffer")) {
+        issue = Some("Node.js 26 removed the deprecated SlowBuffer class, which is required by buffer-equal-constant-time (used by jsonwebtoken / jwa).".to_string());
+        action = Some("Switch this website to Node.js 24 LTS, which fully supports SlowBuffer and constant-time buffer comparisons.".to_string());
+    } else if text.contains("NODE_MODULE_VERSION") || text.contains("was compiled against a different Node.js") {
+        issue = Some("Native module ABI mismatch: a compiled dependency was built for a different Node.js version.".to_string());
+        action = Some("Rebuild dependencies with 'npm rebuild' or switch to the matching Node.js runtime.".to_string());
+    } else if text.contains("EADDRINUSE") {
+        issue = Some("Port conflict: another application or process is already listening on the required port.".to_string());
+        action = Some("Stop the conflicting process or restart the website to allocate a new port.".to_string());
+    } else if text.contains("MODULE_NOT_FOUND") || text.contains("Cannot find module") {
+        issue = Some("Missing dependency: required module is not installed in node_modules.".to_string());
+        action = Some("Run 'npm install' to ensure all dependencies in package.json are installed.".to_string());
+    } else if text.contains("Visual C++") || exit_code == Some(-1073741515) {
+        issue = Some("Missing Microsoft Visual C++ Redistributable.".to_string());
+        action = Some("Install Microsoft's Visual C++ Redistributable for x64 from https://aka.ms/vs/17/release/vc_redist.x64.exe.".to_string());
+    }
+
+    let mut summary = format!("Application exited with code {exit_code_str}.");
+    if let Some(v) = runtime_version {
+        let prefix = if kind == "php" { "PHP" } else { "Node.js" };
+        summary.push_str(&format!(" Runtime: {prefix} {v}."));
+    }
+    if !headline.is_empty() {
+        summary.push_str(&format!("\nError: {headline}"));
+    }
+    if let Some(ref loc) = location {
+        summary.push_str(&format!("\nLocation: {loc}"));
+    }
+    if let Some(ref iss) = issue {
+        summary.push_str(&format!("\nCompatibility: {iss}"));
+    }
+    if let Some(ref act) = action {
+        summary.push_str(&format!("\nSuggested action: {act}"));
+    }
+
+    CrashDiagnostic {
+        exit_code,
+        runtime_version: runtime_version.map(String::from),
+        error_headline: headline,
+        location,
+        compatibility_issue: issue,
+        suggested_action: action,
+        summary,
+    }
+}
 struct Worker {
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
@@ -720,12 +812,38 @@ impl Supervisor {
                                 }
                                 break;
                             }
+                            let diag = if spec.role == Role::App && spec.site.is_some() {
+                                let s = spec.site.as_deref().and_then(|sid| store.site(sid).ok());
+                                let rver = s.as_ref().and_then(|x| x.runtime_version.as_deref());
+                                let kind = s.as_ref().map(|x| x.kind.as_str()).unwrap_or("node");
+                                Some(diagnose_crash(&spec.log, code.parse().ok(), rver, kind))
+                            } else {
+                                None
+                            };
+
+                            if let Some(ref d) = diag
+                                && d.compatibility_issue.is_some()
+                            {
+                                if let Some(id) = &spec.site {
+                                    let _ = store.process_status(
+                                        id,
+                                        &spec.key,
+                                        "error",
+                                        Some(d.summary.clone()),
+                                    );
+                                    let _ = store.status(id, "error", Some(d.summary.clone()));
+                                }
+                                let _ = store.activity("error", spec.site.as_deref(), &d.summary);
+                                break;
+                            }
+
                             if crash_loop.php_exit(started.elapsed(), recycling)
                                 && (spec.site.is_some() || spec.role == Role::Service)
                                 && !(spec.role == Role::Caddy && retained_static(&store, &spec))
                             {
+                                let diag_summary = diag.as_ref().map(|d| format!("\n{}", d.summary)).unwrap_or_default();
                                 let message = format!(
-                                    "{} stopped after five exits within 30 seconds of starting ({last_exit}). Start the website manually to try again.",
+                                    "{} stopped after five exits within 30 seconds of starting ({last_exit}). Start the website manually to try again.{diag_summary}",
                                     spec.label()
                                 );
                                 if let Some(id) = &spec.site {
@@ -1045,24 +1163,7 @@ impl Supervisor {
                 config.built_release = Some(rel.clone());
                 config_changed = true;
             }
-            if site.kind == "node"
-                && (config.working_dir == "." || config.working_dir.is_empty())
-                && !rel_root.join("package.json").is_file()
-                && let Some(sub) = detect_nested_node_dir(&rel_root)
-            {
-                config.working_dir = sub.clone();
-                if config.document_root == "." || config.document_root.is_empty() {
-                    config.document_root = sub;
-                }
-                config_changed = true;
-            }
-            if site.kind == "php"
-                && (config.document_root == "." || config.document_root.is_empty())
-                && rel_root.join("public/index.php").is_file()
-                && (rel_root.join("public/css").is_dir() || rel_root.join("public/js").is_dir())
-                && !rel_root.join("css").is_dir()
-            {
-                config.document_root = "public".into();
+            if config.auto_heal(&rel_root, &site.kind) {
                 config_changed = true;
             }
             if site.kind == "php"
@@ -1118,6 +1219,21 @@ impl Supervisor {
             }
 
             if site.kind == "node" && cwd.join("package.json").is_file() {
+                let cur_ver = site.runtime_version.as_deref().unwrap_or("26.13.0");
+                let has_slowbuffer = cwd.join("node_modules/buffer-equal-constant-time").is_dir()
+                    || rel_root.join("node_modules/buffer-equal-constant-time").is_dir()
+                    || std::fs::read_to_string(cwd.join("package-lock.json")).map(|s| s.contains("buffer-equal-constant-time")).unwrap_or(false)
+                    || std::fs::read_to_string(rel_root.join("package-lock.json")).map(|s| s.contains("buffer-equal-constant-time")).unwrap_or(false)
+                    || std::fs::read_to_string(cwd.join("package.json")).map(|s| s.contains("jsonwebtoken") || s.contains("buffer-equal-constant-time")).unwrap_or(false);
+                if cur_ver.starts_with("26.") && has_slowbuffer {
+                    if self.store.runtimes.resolve("node", "24.22.2").is_ok() {
+                        if let Ok(db) = self.store.db() {
+                            let _ = db.execute("UPDATE websites SET runtime_version='24.22.2' WHERE id=?1", [&site.id]);
+                            let msg = "Automatically selected Node.js 24 LTS runtime (buffer-equal-constant-time is incompatible with Node.js 26).";
+                            let _ = self.store.activity("info", Some(id), msg);
+                        }
+                    }
+                }
                 if !cwd.join("node_modules").is_dir() {
                     let runtime_ver = site
                         .runtime_version
@@ -1573,6 +1689,17 @@ impl SiteRuntime for Supervisor {
             .map_err(|e| e.to_string())?
             .into_iter()
             .find(|s| s.local_port == port && matches!(s.kind.as_str(), "node" | "php"));
+        if let Some(ref site) = app_site {
+            let app_key = format!("app:{}", site.id);
+            let process_alive = self
+                .info
+                .lock()
+                .map(|all| all.get(&app_key).and_then(|i| i.pid).is_some())
+                .unwrap_or(false);
+            if !process_alive {
+                return Ok(false);
+            }
+        }
         // An app's home page may legitimately fail or redirect; its chosen health path decides.
         let (path, health, probe_host) = match app_site {
             Some(ref site) => {
@@ -1609,6 +1736,20 @@ mod tests {
         append_log(&p, "new").expect("rotate");
         assert!(dir.path().join("log.1").exists());
         assert_eq!(tail_logs(&p, 1).expect("tail"), vec!["new"]);
+    }
+    #[test]
+    fn crash_diagnostics_detects_slowbuffer_and_node26() {
+        let dir = tempfile::tempdir().expect("temp");
+        let log = dir.path().join("app.log");
+        let error_log = "TypeError: Cannot read properties of undefined (reading 'prototype')\n    at Object.<anonymous> (C:\\app\\node_modules\\buffer-equal-constant-time\\index.js:37:35)\n    at Module._compile (node:internal/modules/cjs/loader:1968:14)\n\nNode.js v26.13.0\n";
+        std::fs::write(&log, error_log).unwrap();
+        let diag = diagnose_crash(&log, Some(1), Some("26.13.0"), "node");
+        assert_eq!(diag.exit_code, Some(1));
+        assert_eq!(diag.runtime_version.as_deref(), Some("26.13.0"));
+        assert!(diag.compatibility_issue.as_ref().unwrap().contains("SlowBuffer"));
+        assert!(diag.suggested_action.as_ref().unwrap().contains("Node.js 24 LTS"));
+        assert!(diag.summary.contains("TypeError"));
+        assert!(diag.summary.contains("SlowBuffer"));
     }
 }
 
@@ -2043,18 +2184,16 @@ impl Supervisor {
                 if let Some(i) = all.get(&format!("app:{id}"))
                     && i.pid.is_none()
                 {
-                    let lines = tail_logs(
+                    let site = self.store.site(id).ok();
+                    let runtime_ver = site.as_ref().and_then(|s| s.runtime_version.as_deref());
+                    let kind = site.as_ref().map(|s| s.kind.as_str()).unwrap_or("node");
+                    let diag = diagnose_crash(
                         &self.store.root.join("logs").join(format!("{id}.app.log")),
-                        20,
-                    )
-                    .unwrap_or_default()
-                    .join("\n");
-                    return Err(format!(
-                        "The application exited with code {} before becoming healthy.\n{lines}",
-                        i.last_exit_code
-                            .map(|c| c.to_string())
-                            .unwrap_or_else(|| "unknown".into())
-                    ));
+                        i.last_exit_code,
+                        runtime_ver,
+                        kind,
+                    );
+                    return Err(diag.summary);
                 }
             }
             if tokio::time::Instant::now() >= deadline {
@@ -2072,6 +2211,9 @@ impl Supervisor {
         use hostify_core::app_config::{Start, inside};
         let root = self.release_root(id, release)?;
         let kind = self.store.site(id).map_err(|e| e.to_string())?.kind;
+        if config.auto_heal(&root, &kind) {
+            let _ = self.store.save_app_config(id, config);
+        }
         config.validate_kind(&root, &kind)?;
         if kind == "php" {
             return self.start_php_release(id, config, &root).await;
@@ -2144,10 +2286,25 @@ impl Supervisor {
                     .iter()
                     .map(|a| a.replace("{PORT}", &port.to_string()))
                     .collect::<Vec<_>>();
-                let entry = inside(&root, &format!("{}/{}", config.working_dir, argv[0]))?;
-                if !entry.is_file() {
-                    return Err("The Node entry path must name a file inside the release.".into());
-                }
+                let entry_cand = inside(&root, &format!("{}/{}", config.working_dir, argv[0]))
+                    .or_else(|_| inside(&root, &argv[0]))
+                    .or_else(|_| {
+                        if let Some(file_name) = Path::new(&argv[0]).file_name().and_then(|s| s.to_str()) {
+                            inside(&root, &format!("{}/{}", config.working_dir, file_name))
+                                .or_else(|_| inside(&root, file_name))
+                        } else {
+                            Err("Invalid entry path".into())
+                        }
+                    });
+                let entry = match entry_cand {
+                    Ok(p) if p.is_file() => p,
+                    _ => {
+                        return Err(format!(
+                            "The Node.js start file '{}' was not found in '{}' or in the project root.",
+                            argv[0], config.working_dir
+                        ));
+                    }
+                };
                 argv[0] = entry.to_string_lossy().into_owned();
                 argv
             }

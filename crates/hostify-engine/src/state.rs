@@ -762,9 +762,11 @@ impl Engine {
                     .as_ref()
                     .or(config.active_release.as_ref())
                     .ok_or_else(|| anyhow!("Import a release first."))?;
+                let release_path = s.root.join("sites").join(id).join("app").join(release);
+                config.auto_heal(&release_path, &site.kind);
                 config
                     .validate_kind(
-                        &s.root.join("sites").join(id).join("app").join(release),
+                        &release_path,
                         &site.kind,
                     )
                     .map_err(|e| anyhow!(e))?;
@@ -1055,8 +1057,10 @@ impl Engine {
                     let site_dir = s.root.join("sites").join(&id);
                     let (report, release) =
                         hostify_core::import::import_release(Path::new(source), kind, &site_dir)?;
+                    let release_path = site_dir.join("app").join(&release);
+                    config.auto_heal(&release_path, &site_kind);
                     if let Err(e) =
-                        config.validate_kind(&site_dir.join("app").join(&release), &site_kind)
+                        config.validate_kind(&release_path, &site_kind)
                     {
                         // Leave no refused import behind; add_site's folder is brand new.
                         let _ = std::fs::remove_dir_all(if method == "add_site" {

@@ -149,17 +149,123 @@ pub fn inside(release: &Path, text: &str) -> Result<PathBuf, String> {
     let rel = relative(text)?;
     let root = release
         .canonicalize()
-        .map_err(|e| format!("Cannot open the release: {e}"))?;
-    let path = root.join(rel);
-    let canonical = path
-        .canonicalize()
-        .map_err(|e| format!("Cannot open the configured path: {e}"))?;
+        .map_err(|e| format!("Cannot open release directory: {e}"))?;
+    let path = root.join(&rel);
+    let canonical = match path.canonicalize() {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "The configured path '{text}' does not exist inside the project files (checked '{}').",
+                path.display()
+            ));
+        }
+        Err(e) => return Err(format!("Cannot open the configured path '{text}': {e}")),
+    };
     if !canonical.starts_with(&root) {
         return Err(
             "The configured path must stay inside the release, including through junctions.".into(),
         );
     }
     Ok(canonical)
+}
+
+pub fn find_best_node_sub(root: &Path) -> Option<String> {
+    if root.join("package.json").is_file() {
+        return Some(".".into());
+    }
+
+    let entries = std::fs::read_dir(root).ok()?;
+    let mut best: Option<(i32, String)> = None;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+
+        let pkg_path = path.join("package.json");
+        if pkg_path.is_file() {
+            let mut score = 1;
+            if path.join("server.js").is_file() || path.join("app.js").is_file() || path.join("index.js").is_file() {
+                score += 10;
+            }
+            if path.join(".env").is_file() {
+                score += 5;
+            }
+            if let Ok(bytes) = std::fs::read(&pkg_path)
+                && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                && v["scripts"]["start"].is_string()
+            {
+                score += 10;
+            }
+            if best.as_ref().is_none_or(|(b, _)| score > *b) {
+                best = Some((score, name.to_owned()));
+            }
+        } else if path.join("server.js").is_file() || path.join("app.js").is_file() || path.join("index.js").is_file() {
+            let score = 5;
+            if best.as_ref().is_none_or(|(b, _)| score > *b) {
+                best = Some((score, name.to_owned()));
+            }
+        } else if let Ok(sub_entries) = std::fs::read_dir(&path) {
+            for sub_entry in sub_entries.flatten() {
+                let sub_path = sub_entry.path();
+                if !sub_path.is_dir() {
+                    continue;
+                }
+                let Some(sub_name) = sub_path.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                if sub_name.starts_with('.') || sub_name == "node_modules" {
+                    continue;
+                }
+                if sub_path.join("package.json").is_file() || sub_path.join("server.js").is_file() {
+                    let score = 3;
+                    let relative_sub = format!("{name}/{sub_name}");
+                    if best.as_ref().is_none_or(|(b, _)| score > *b) {
+                        best = Some((score, relative_sub));
+                    }
+                }
+            }
+        }
+    }
+
+    best.map(|(_, d)| d)
+}
+
+pub fn find_best_php_sub(root: &Path) -> Option<String> {
+    if root.join("public/index.php").is_file() {
+        return Some("public".into());
+    }
+    if root.join("index.php").is_file() {
+        return Some(".".into());
+    }
+
+    let entries = std::fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') || name == "vendor" {
+            continue;
+        }
+        if path.join("public/index.php").is_file() {
+            return Some(format!("{name}/public"));
+        }
+        if path.join("index.php").is_file() {
+            return Some(name.to_owned());
+        }
+    }
+    None
 }
 impl AppConfig {
     pub fn validate(&self, release: &Path) -> Result<(), String> {
@@ -195,9 +301,78 @@ impl AppConfig {
         }
         Ok(())
     }
+    pub fn auto_heal(&mut self, release: &Path, kind: &str) -> bool {
+        let mut changed = false;
+        let root = match release.canonicalize() {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+
+        if kind == "node" {
+            let cwd_ok = inside(&root, &self.working_dir)
+                .map(|p| p.join("package.json").is_file() || p.join("server.js").is_file() || p.join("app.js").is_file())
+                .unwrap_or(false);
+
+            if !cwd_ok {
+                if let Some(sub) = find_best_node_sub(&root) {
+                    if self.working_dir != sub {
+                        self.working_dir = sub.clone();
+                        changed = true;
+                    }
+                    if self.document_root == "." || self.document_root.is_empty() || !root.join(&self.document_root).is_dir() {
+                        self.document_root = sub;
+                        changed = true;
+                    }
+                }
+            }
+
+            if let Start::Node { ref mut args } = self.start {
+                if let Some(entry_arg) = args.first_mut() {
+                    let cwd = inside(&root, &self.working_dir).unwrap_or_else(|_| root.clone());
+                    if !cwd.join(&*entry_arg).is_file() {
+                        let prefix = format!("{}/", self.working_dir);
+                        if let Some(stripped) = entry_arg.strip_prefix(&prefix) {
+                            if cwd.join(stripped).is_file() {
+                                *entry_arg = stripped.to_string();
+                                changed = true;
+                            }
+                        } else if let Some(file_name) = Path::new(&*entry_arg).file_name().and_then(|s| s.to_str()) {
+                            if cwd.join(file_name).is_file() {
+                                *entry_arg = file_name.to_string();
+                                changed = true;
+                            } else if root.join(file_name).is_file() {
+                                if self.working_dir != "." {
+                                    self.working_dir = ".".into();
+                                    *entry_arg = file_name.to_string();
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if kind == "php" {
+            let doc_ok = inside(&root, &self.document_root)
+                .map(|p| p.join("index.php").is_file())
+                .unwrap_or(false);
+
+            if !doc_ok {
+                if let Some(sub) = find_best_php_sub(&root) {
+                    if self.document_root != sub {
+                        self.document_root = sub;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        changed
+    }
+
     pub fn validate_kind(&self, release: &Path, kind: &str) -> Result<(), String> {
         self.validate_php()?;
-        if !inside(release, &self.document_root)?.is_dir() {
+        let doc_dir = inside(release, &self.document_root)
+            .map_err(|e| format!("Website folder (documentRoot): {e}"))?;
+        if !doc_dir.is_dir() {
             return Err("The document root must be a directory.".into());
         }
         for text in &self.persistent_paths {
@@ -217,7 +392,8 @@ impl AppConfig {
                 );
             }
         }
-        let cwd = inside(release, &self.working_dir)?;
+        let cwd = inside(release, &self.working_dir)
+            .map_err(|e| format!("Working folder (workingDir): {e}"))?;
         if !cwd.is_dir() {
             return Err("The working directory must be a directory.".into());
         }
@@ -414,5 +590,72 @@ mod php_tests {
         c.document_root = ".".into();
         c.persistent_paths = vec!["../outside".into()];
         assert!(c.validate_kind(d.path(), "php").is_err());
+    }
+}
+
+#[cfg(test)]
+mod auto_heal_tests {
+    use super::*;
+
+    #[test]
+    fn auto_heals_nested_node_project_and_entry_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let cyphers = dir.path().join("Cyphers");
+        std::fs::create_dir_all(&cyphers).unwrap();
+        std::fs::write(
+            cyphers.join("package.json"),
+            r#"{"name":"cyphers-chat","scripts":{"start":"node server.js"}}"#,
+        )
+        .unwrap();
+        std::fs::write(cyphers.join("server.js"), "console.log('hi');").unwrap();
+
+        let mut c = AppConfig {
+            working_dir: ".".into(),
+            document_root: ".".into(),
+            start: Start::Node {
+                args: vec!["Cyphers/server.js".into()],
+            },
+            ..Default::default()
+        };
+
+        // Before auto_heal, validating root as working_dir would fail because package.json/server.js are in Cyphers
+        let changed = c.auto_heal(dir.path(), "node");
+        assert!(changed);
+        assert_eq!(c.working_dir, "Cyphers");
+        assert_eq!(c.document_root, "Cyphers");
+        if let Start::Node { ref args } = c.start {
+            assert_eq!(args[0], "server.js");
+        } else {
+            panic!("Expected Start::Node");
+        }
+
+        // Now validate succeeds
+        assert!(c.validate(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn auto_heals_nested_php_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("myapp").join("public");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("index.php"), "<?php echo 'ok';").unwrap();
+
+        let mut c = AppConfig {
+            document_root: ".".into(),
+            ..Default::default()
+        };
+
+        let changed = c.auto_heal(dir.path(), "php");
+        assert!(changed);
+        assert_eq!(c.document_root, "myapp/public");
+        assert!(c.validate_kind(dir.path(), "php").is_ok());
+    }
+
+    #[test]
+    fn clear_error_message_on_missing_configured_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = inside(dir.path(), "non_existent_folder").unwrap_err();
+        assert!(err.contains("non_existent_folder"));
+        assert!(err.contains("does not exist"));
     }
 }

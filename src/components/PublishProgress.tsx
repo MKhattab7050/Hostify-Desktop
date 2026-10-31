@@ -87,15 +87,35 @@ export function PublishProgress({ deployment, onRepublish, onDone }: { deploymen
 
   const published = d.state === "published"; const stuck = d.state === "recovery_required";
   const failed = d.state === "failed" || d.state === "rolled_back"; const verifying = isVerifying(d.state);
+  const site = useStore((s) => s.sites.find((x) => x.id === d.siteId));
+  const isSiteUnhealthy = site?.status === "error" || (site && site.kind !== "static" && site.status === "stopped");
 
   return (
     <div className="grid gap-4">
-      {published && (
+      {published && !isSiteUnhealthy && (
         <div className="flex items-center gap-3 rounded-card border border-kelp bg-kelpsoft p-4" role="status">
           <span className="pop grid h-10 w-10 shrink-0 place-items-center rounded-full bg-kelp text-kelpink">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path className="check-draw" d="M5 13l4 4L19 7" /></svg></span>
           <div className="min-w-0"><p className="font-display text-lg font-semibold">Your website is on the internet</p>
             <p className="selectable break-all text-ink2">https://{host}</p></div>
+        </div>)}
+      {published && isSiteUnhealthy && (
+        <div className="rounded-card border border-buoy bg-buoysoft p-4" role="alert">
+          <p className="flex items-center gap-2 font-semibold text-buoy">
+            <AlertTriangle size={18} className="text-buoy" aria-hidden />
+            Public domain published, but application is unhealthy
+          </p>
+          <p className="mt-1 text-[13px] text-ink2">
+            The domain <span className="font-semibold text-ink">https://{host}</span> and secure tunnel are active, but the application on this computer is {site?.status === "error" ? "reporting an error" : "stopped"}.
+          </p>
+          {site?.statusDetail && (
+            <pre className="selectable mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-ctl bg-chalk p-3 font-mono text-[12px] leading-5 text-ink2">
+              {site.statusDetail}
+            </pre>
+          )}
+          <p className="mt-2 text-[12px] text-ink3">
+            Tunnel and DNS records are safely preserved. Fix the application error or select a compatible Node.js runtime, then restart the website.
+          </p>
         </div>)}
       {published && v?.visibleFromThisPc === false && (
         <p className="rounded-ctl bg-lanternsoft p-3 text-[13px]" role="status">Hostify reached your site through Cloudflare, but this PC still remembers an older DNS answer, so it may not open here for up to 30 minutes. Visitors elsewhere aren't affected and it clears by itself.</p>)}

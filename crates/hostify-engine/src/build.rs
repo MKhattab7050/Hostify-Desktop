@@ -178,15 +178,7 @@ pub(crate) async fn begin(engine: &Arc<Engine>, p: &Value) -> Result<Value> {
         .join(&id)
         .join("app")
         .join(&release);
-    if site.kind == "node"
-        && (config.working_dir == "." || config.working_dir.is_empty())
-        && !root.join("package.json").is_file()
-        && let Some(sub) = crate::supervisor::detect_nested_node_dir(&root)
-    {
-        config.working_dir = sub.clone();
-        if config.document_root == "." || config.document_root.is_empty() {
-            config.document_root = sub;
-        }
+    if config.auto_heal(&root, &site.kind) {
         let _ = engine.store.save_app_config(&id, &config);
     }
     config
