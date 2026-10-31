@@ -147,15 +147,19 @@ mod tests {
     }
     #[test]
     fn cannot_silently_accept_untrusted_privileged_dynamic_site(){
-        let findings=evaluate_site(&site("node","running",false),Evidence{
+        let mut website=site("node","running",false);
+        website.name="CANARY_SECRET_59721".into();
+        website.status_detail=Some("API_KEY=CANARY_SECRET_59721".into());
+        let findings=evaluate_site(&website,Evidence{
             caddy_guard_configured:false,service:true,trusted_active:false,has_local_snapshot:false
         });
         for id in ["TRUSTED_RELEASE","PRIVILEGED_WORKLOAD","HOST_GUARD_MISSING"]{
             assert!(findings.iter().any(|f|f.id==id && f.status=="block"),"{id}");
         }
         let json=serde_json::to_string(&findings).unwrap();
-        assert!(!json.contains("token"));
-        assert!(!json.contains("password"));
+        // Normal remediation prose may mention OS tokens/password policies.
+        // Test for an actual injected secret rather than those generic words.
+        assert!(!json.contains("CANARY_SECRET_59721"));
     }
     #[test]
     fn local_passes_do_not_claim_public_readiness(){
