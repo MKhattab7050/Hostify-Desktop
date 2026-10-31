@@ -67,21 +67,39 @@ pub struct Principal {
     pub role:Role,
 }
 /// A token returned exactly once. Only the SHA-256 digest is persisted.
-#[derive(Debug)]
 pub struct Session {
     pub token:String,
     pub expires_unix:i64,
     pub principal:Principal,
 }
-#[derive(Debug)]
+/// Bearer credentials must never appear in diagnostic logs.
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {
+        f.debug_struct("Session")
+            .field("token",&"[REDACTED]")
+            .field("expires_unix",&self.expires_unix)
+            .field("user_id",&self.principal.user_id)
+            .field("tenant_id",&self.principal.tenant_id)
+            .field("role",&self.principal.role)
+            .finish()
+    }
+}
 pub struct MemberInvitation {
     pub token:String,
     pub expires_unix:i64,
 }
+impl std::fmt::Debug for MemberInvitation {
+    fn fmt(&self, f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {
+        f.debug_struct("MemberInvitation")
+            .field("token",&"[REDACTED]")
+            .field("expires_unix",&self.expires_unix)
+            .finish()
+    }
+}
 pub(crate) fn canonical_email(raw:&str)->Result<String>{
     let s=raw.trim().to_ascii_lowercase();
     if s.len()<5||s.len()>254||s.matches('@').count()!=1||
-        s.contains([' ','\n','\r','\t']) || !s.is_ascii(){
+        s.bytes().any(|b|b.is_ascii_whitespace()||b.is_ascii_control()) || !s.is_ascii(){
         return Err(AccountError::Invalid);
     }
     let (local,domain)=s.split_once('@').ok_or(AccountError::Invalid)?;
@@ -339,6 +357,10 @@ mod tests {
         assert!(accounts.bootstrap_owner(&a,"attacker@example.com","another-secret-234").is_err());
         assert!(accounts.sign_in(&a,"owner@example.com","wrong-password").is_err());
         let logged=accounts.sign_in(&a,"owner@example.com","super-long-password-1").unwrap();
+        let debug_session=format!("{logged:?}");
+        assert!(debug_session.contains("[REDACTED]"));
+        assert!(!debug_session.contains(&logged.token));
+        assert!(!debug_session.contains(&logged.principal.email));
         assert!(accounts.authorize(&logged.token,&a,Capability::ManageBilling).is_ok());
         assert!(accounts.authorize(&logged.token,&b,Capability::View).is_err());
         accounts.sign_out(&logged.token).unwrap();
@@ -356,6 +378,9 @@ mod tests {
         assert!(acc.invite_member(&owner.token,&b,"wrong@example.com",Role::Admin,600).is_err());
         assert!(acc.invite_member(&owner.token,&a,"other@example.com",Role::Owner,600).is_err());
         let invite=acc.invite_member(&owner.token,&a,"admin@example.com",Role::Admin,600).unwrap();
+        let debug_invitation=format!("{invite:?}");
+        assert!(debug_invitation.contains("[REDACTED]"));
+        assert!(!debug_invitation.contains(&invite.token));
         let member=acc.accept_invitation(&invite.token,"my-admin-password-123").unwrap();
         assert_eq!(member.role,Role::Admin);
         assert!(acc.accept_invitation(&invite.token,"my-admin-password-123").is_err());
@@ -368,6 +393,20 @@ mod tests {
         let token=acc.sign_in(&a,"viewer@example.com","viewer-secret-password").unwrap();
         assert!(acc.authorize(&token.token,&a,Capability::View).is_ok());
         assert!(acc.authorize(&token.token,&a,Capability::ManageUsers).is_err());
+    }
+    #[test]
+    fn account_email_rejects_ascii_controls_and_whitespace(){
+        for email in [
+            "user\\0@example.com",
+            "user\\x7f@example.com",
+            "user\\x0b@example.com",
+            "user\\n@example.com",
+            "user\\r@example.com",
+            "user\\t@example.com",
+        ] {
+            assert!(matches!(canonical_email(email),Err(AccountError::Invalid)));
+        }
+        assert_eq!(canonical_email("  USER@EXAMPLE.COM ").unwrap(),"user@example.com");
     }
     #[test]
     fn lockout_fails_closed_without_disclosing_passwords(){
