@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { Archive, CheckCircle2, RotateCcw, ShieldAlert } from "lucide-react";
 import { api } from "../lib/api";
-import type { Site, SiteSnapshot } from "../lib/types";
+import type { Site, SiteSnapshot, SiteSnapshotSchedule } from "../lib/types";
 import { Button, Card, Disclosure, Field, fmtBytes, fmtTime } from "./ui";
 
 /** Source-only snapshots. Database and credential recovery remain separate workflows. */
 export function TimeMachineCard({ sites }: { sites: Site[] }) {
   const [records, setRecords] = useState<Record<string, SiteSnapshot[]>>({});
+  const [schedules, setSchedules] = useState<Record<string, SiteSnapshotSchedule>>({});
   const [busy, setBusy] = useState<string>();
   const [confirm, setConfirm] = useState<{ siteId: string; snapshotId: string; name: string }>();
   const [error, setError] = useState<string>();
@@ -14,12 +15,29 @@ export function TimeMachineCard({ sites }: { sites: Site[] }) {
 
   useEffect(() => {
     let active = true;
-    void Promise.all(sites.map(async (s) => ({ id:s.id, snapshots:await api.listSiteSnapshots(s.id) })))
-      .then((result) => { if (active) setRecords(Object.fromEntries(result.map((s) => [s.id,s.snapshots]))); })
+    void Promise.all(sites.map(async (site) => ({
+      id:site.id,
+      snapshots:await api.listSiteSnapshots(site.id),
+      schedule:await api.siteSnapshotSchedule(site.id),
+    })))
+      .then((results) => { if (active) {
+        setRecords(Object.fromEntries(results.map(({id,snapshots})=>[id,snapshots])));
+        setSchedules(Object.fromEntries(results.map(({id,schedule})=>[id,schedule])));
+      } })
       .catch((e) => { if (active) setError((e as Error).message); });
     return () => { active = false; };
   }, [sites.map((s) => s.id).join("|")]);
 
+  async function schedule(site: Site, enabled: boolean, everyHours: 24 | 72 | 168) {
+    setError(undefined); setBusy(site.id);
+    try {
+      const current=await api.setSiteSnapshotSchedule(site.id,enabled,everyHours);
+      setSchedules((old)=>({...old,[site.id]:current}));
+      setSuccess(enabled ? `Scheduled file-only snapshots for ${site.name} every ${everyHours} hours. Existing files are never auto-deleted.` :
+        `Automatic snapshots disabled for ${site.name}.`);
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(undefined); }
+  }
   async function create(site: Site) {
     setError(undefined);setSuccess(undefined);setBusy(site.id);
     try {
@@ -71,6 +89,21 @@ export function TimeMachineCard({ sites }: { sites: Site[] }) {
             <Button size="sm" busy={busy===site.id} disabled={!!busy} onClick={() => void create(site)}>
               <Archive size={13} />Create snapshot
             </Button>
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-[13px]">
+            <span className="text-ink2">Scheduled file snapshots:</span>
+            <select aria-label={`Backup schedule for ${site.name}`}
+              value={schedules[site.id]?.everyHours ?? 24}
+              disabled={!!busy}
+              className="rounded-ctl border border-line bg-panel px-2 py-1"
+              onChange={(e) => void schedule(site,!!schedules[site.id]?.enabled, Number(e.target.value) as 24 | 72 | 168)}>
+              <option value={24}>Daily</option><option value={72}>Every 3 days</option><option value={168}>Weekly</option>
+            </select>
+            <Button size="sm" disabled={!!busy || !schedules[site.id]} variant={schedules[site.id]?.enabled ? "secondary" : "primary"}
+              onClick={() => void schedule(site,!schedules[site.id]?.enabled,schedules[site.id]?.everyHours ?? 24)}>
+              {schedules[site.id]?.enabled ? "Disable schedule" : "Enable schedule"}
+            </Button>
+            {schedules[site.id]?.pausedForCapacity && <span className="text-lantern">Paused: five copies retained. No automatic deletion.</span>}
           </div>
           <Disclosure title={`Snapshots (${records[site.id]?.length ?? 0})`}>
             {!records[site.id]?.length ? <p className="mt-2 text-[12px] text-ink3">No file snapshots yet.</p> :
