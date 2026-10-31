@@ -930,6 +930,19 @@ impl Engine {
                 s.activity(severity, Some(id), &format!("Fast Publish: {event} ({outcome})"))?;
                 Ok(Value::Null)
             }
+            "doctor_analyze" => {
+                let id=arg(&p,"siteId")?;
+                let site=s.site(id)?;
+                let logs=["app.log","build.log","process.log","log"]
+                    .iter()
+                    .flat_map(|suffix| {
+                        let path=s.root.join("logs").join(format!("{id}.{suffix}"));
+                        crate::supervisor::tail_logs(&path,150).unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>();
+                let report=hostify_core::doctor::analyze(&logs,&site.kind,&site.status);
+                Ok(json!(report))
+            }
             "publish_diagnosis" => {
                 let id = arg(&p, "siteId")?;
                 let site = s.site(id)?;

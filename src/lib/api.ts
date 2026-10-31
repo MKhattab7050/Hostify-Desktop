@@ -1,4 +1,4 @@
-import type { PublishPreflight, PublishDiagnostic, GuardianStatus, SiteSnapshot, SiteSnapshotSchedule, AppTemplate,
+import type { PublishPreflight, PublishDiagnostic, GuardianStatus, SiteSnapshot, SiteSnapshotSchedule, AppTemplate, DoctorReport,
   ActivityEntry, AppConfig, AppSettings, AppStatus, BuildStatus, CloudflareAccount, DatabaseBackup, DatabaseConnection, Deployment, DnsPlan, Domain, DomainCheck,
   EngineStatus, EnvVar, ComponentName, LogStream, ManagedDatabase, MysqlStatus, ProjectReport, RuntimeKind, RuntimeStatus, Site, SiteKind, SourceKind, SourceReport, SystemStats, TunnelHealth,
 } from "./types";
@@ -89,6 +89,7 @@ export const api = {
   guardianStatus: (siteId: string) => call<GuardianStatus>("guardian_status", { siteId }),
   guardianEnable: (siteId: string, enabled: boolean) => call<GuardianStatus>("guardian_enable", { siteId, enabled }),
   guardianCheckNow: (siteId: string) => call<GuardianStatus>("guardian_check_now", { siteId }),
+  doctorAnalyze: (siteId: string) => call<DoctorReport>("doctor_analyze", { siteId }),
   appStatus: (siteId: string) => call<AppStatus>("app_status", { siteId }),
   appLogs: (siteId: string, stream: LogStream, lines = 300) => call<string[]>("app_logs", { siteId, stream, lines }),
   listRuntimes: () => call<RuntimeStatus[]>("list_runtimes"),
