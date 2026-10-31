@@ -176,3 +176,29 @@ async fn rejected_untrusted_start_does_not_patch_files_or_allocate_database() {
     ).unwrap() == 0);
     engine.shutdown().await;
 }
+
+#[tokio::test]
+async fn built_in_node_template_is_imported_but_cannot_run_without_trust() {
+    let temp=tempfile::tempdir().unwrap();
+    let store=Store::open(temp.path().join("data")).unwrap();
+    let supervisor=Supervisor::new(store.clone()).unwrap();
+    let engine=Engine::production(store.clone(),supervisor,false);
+    let templates=engine.dispatch("list_app_templates",json!({})).await.unwrap();
+    assert_eq!(templates.as_array().unwrap().len(),4);
+    let site=engine.dispatch("create_site_from_template",json!({
+        "templateId":"node-api","name":"Secure Starter"})).await.unwrap();
+    let id=site["id"].as_str().unwrap();
+    let config=store.app_config(id).unwrap();
+    assert_eq!(site["kind"],"node");
+    assert_eq!(site["status"],"stopped");
+    assert!(config.pending_release.is_some());
+    assert!(config.built_release.is_none());
+    assert!(config.trusted_release.is_none());
+    let source=std::path::PathBuf::from(site["sourcePath"].as_str().unwrap());
+    assert!(source.join("server.cjs").exists());
+    assert!(!source.join(".env").exists());
+    let blocked=engine.dispatch("build_app",json!({"siteId":id,"trustAcknowledged":false}))
+        .await.unwrap_err().to_string();
+    assert!(blocked.contains("trust"),"{blocked}");
+    engine.shutdown().await;
+}

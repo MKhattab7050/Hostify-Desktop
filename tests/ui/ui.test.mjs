@@ -305,6 +305,16 @@ await test("Time Machine makes explicit code-only snapshots with integrity check
   await page.context().close();
 });
 
+await test("offline App Catalog can import a static project using the existing site flow", async () => {
+  const page=await open();
+  const catalog=page.locator("section").filter({hasText:"App Catalog · One-click starters"}).first();
+  await catalog.getByText("Portfolio",{exact:true}).waitFor();
+  await catalog.getByRole("button",{name:"Use template"}).first().click();
+  await page.getByRole("heading",{level:1,name:"Websites"}).waitFor();
+  await page.getByText("Portfolio",{exact:true}).first().waitFor();
+  await page.context().close();
+});
+
 await test("no uncaught errors in the browser console", async () => {
   const real = pageErrors.filter((e) => !/favicon/.test(e));
   assert.deepEqual(real, []);
