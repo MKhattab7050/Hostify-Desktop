@@ -123,3 +123,12 @@ export interface AppTemplate {
   id: string; name: string; kind: SiteKind; framework: string;
   description: string; requiresTrust: boolean; requiresDatabase: boolean;
 }
+
+export interface DoctorIssue {
+  id: string; severity: "low" | "medium" | "high"; category: string;
+  headline: string; explanation: string; action: string; autoFixed: false;
+}
+export interface DoctorReport {
+  issues: DoctorIssue[]; linesReviewed: number;
+  hasActionableFindings: boolean; engine: "offline-rules-v1";
+}

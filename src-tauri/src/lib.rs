@@ -50,6 +50,7 @@ forward! {
     guardian_status(site_id: String => "siteId");
     guardian_enable(site_id: String => "siteId", enabled: bool => "enabled");
     guardian_check_now(site_id: String => "siteId");
+    doctor_analyze(site_id: String => "siteId");
     app_status(site_id: String => "siteId");
     app_logs(site_id: String => "siteId", stream: String => "stream", lines: u32 => "lines");
     list_runtimes();
@@ -203,6 +204,7 @@ pub fn run() {
             cancel_build,
             get_build_status,
             app_status,
+            doctor_analyze,
             site_snapshot_schedule,
             set_site_snapshot_schedule,
             create_site_snapshot,

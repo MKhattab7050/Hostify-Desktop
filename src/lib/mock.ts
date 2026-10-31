@@ -144,6 +144,9 @@ export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise
       const status = guardian.get(a.siteId) ?? { enabled: false, consecutiveFailures: 0, recoveryAttempts: 0, lastResult: "Monitoring disabled" };
       return r({ ...status, lastResult: status.enabled ? "Healthy" : "Monitoring paused" });
     }
+    case "doctor_analyze": return r({
+      issues: [],linesReviewed:0,hasActionableFindings:false,engine:"offline-rules-v1"
+    });
     case "app_status": { const s = sites.find((x) => x.id === a.siteId); return r(s?.status === "running" ? { health: "running", exposedAddresses: [], pid: 4242, processCount: 2, cpuPercent: 0.4, memoryBytes: 63_000_000, restarts: 0, internalPort: 19100, activeRelease: "r1" } : { health: "stopped", exposedAddresses: [] }); }
     case "app_logs": return r(a.stream === "build" ? ["[preview] npm ci", "[preview] added 69 packages"] : ["[preview] Logs appear here when the engine is running."]);
     case "list_runtimes": return r(runtimes);
