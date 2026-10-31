@@ -44,6 +44,8 @@ impl AccountApi{
         struct Invite {tenant_id:String,email:String,role:Role,ttl_seconds:i64}
         #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
         struct Accept {invitation:String,password:String}
+        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
+        struct Disable {tenant_id:String,user_id:String}
         let response:Result<Value,(StatusCode,&'static str)>=(||{
             let mut accounts=self.accounts.lock()
                 .map_err(|_|(StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
@@ -85,6 +87,12 @@ impl AccountApi{
                         &p.email,p.role,p.ttl_seconds).map_err(map_account_error)?;
                     Ok(json!({"invitation":invitation.token,"expiresUnix":invitation.expires_unix}))
                 },
+                "/v1/members/disable"=>{
+                    let p:Disable=parse(body)?;
+                    accounts.disable_member(session_token(auth)?,&p.tenant_id,&p.user_id)
+                        .map_err(map_account_error)?;
+                    Ok(json!({"disabled":true}))
+                },
                 "/v1/members/accept"=>{
                     let p:Accept=parse(body)?;
                     let member=accounts.accept_invitation(&p.invitation,&p.password)
@@ -103,7 +111,8 @@ impl AccountApi{
 
 pub fn is_account_path(path:&str)->bool{
     matches!(path,"/v1/accounts/provision"|"/v1/accounts/bootstrap"|"/v1/auth/login"|
-        "/v1/auth/logout"|"/v1/auth/me"|"/v1/members/invite"|"/v1/members/accept")
+        "/v1/auth/logout"|"/v1/auth/me"|"/v1/members/invite"|
+        "/v1/members/accept"|"/v1/members/disable")
 }
 fn map_account_error(error:AccountError)->(StatusCode,&'static str){
     match error{
@@ -114,5 +123,68 @@ fn map_account_error(error:AccountError)->(StatusCode,&'static str){
         AccountError::Forbidden=>(StatusCode::FORBIDDEN,"not_authorized"),
         AccountError::Database(_)|AccountError::Random=>
             (StatusCode::SERVICE_UNAVAILABLE,"temporarily_unavailable"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hostify_core::network::Registry;
+    use uuid::Uuid;
+
+    #[test]
+    fn local_member_disable_requires_role_and_revokes_existing_sessions() {
+        let path=std::env::temp_dir().join(format!("hostify-member-disable-{}.db",Uuid::new_v4()));
+        let mut registry=Registry::open(&path,"example.test").unwrap();
+        let tenant=registry.create_tenant("A").unwrap();
+        let other=registry.create_tenant("B").unwrap();
+        let api=AccountApi::new(Accounts::open(&path).unwrap());
+        let post=|path:&str,auth:Option<&str>,admin:bool,value:Value|{
+            api.dispatch(path,auth,admin,value.to_string().as_bytes())
+        };
+        let (status,created)=post("/v1/accounts/bootstrap",None,true,json!({
+            "tenantId":tenant.id,"email":"owner@example.com","password":"long-owner-password"
+        }));
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(created["owner"]["role"],"owner");
+        let (status,login)=post("/v1/auth/login",None,false,json!({
+            "tenantId":tenant.id,"email":"owner@example.com","password":"long-owner-password"
+        }));
+        assert_eq!(status,StatusCode::OK);
+        let owner_auth=format!("Bearer {}",login["token"].as_str().unwrap());
+        let (status,invite)=post("/v1/members/invite",Some(&owner_auth),false,json!({
+            "tenantId":tenant.id,"email":"viewer@example.com","role":"viewer","ttlSeconds":600
+        }));
+        assert_eq!(status,StatusCode::OK);
+        let (status,member)=post("/v1/members/accept",None,false,json!({
+            "invitation":invite["invitation"],"password":"long-viewer-password"
+        }));
+        assert_eq!(status,StatusCode::OK);
+        let user_id=member["member"]["userId"].as_str().unwrap();
+        let (status,viewer)=post("/v1/auth/login",None,false,json!({
+            "tenantId":tenant.id,"email":"viewer@example.com","password":"long-viewer-password"
+        }));
+        assert_eq!(status,StatusCode::OK);
+        let viewer_auth=format!("Bearer {}",viewer["token"].as_str().unwrap());
+        let payload=json!({"tenantId":tenant.id,"userId":user_id});
+        assert_eq!(post("/v1/members/disable",Some(&viewer_auth),false,payload.clone()).0,
+            StatusCode::FORBIDDEN);
+        assert_eq!(post("/v1/members/disable",Some(&owner_auth),false,json!({
+            "tenantId":other.id,"userId":user_id
+        })).0,StatusCode::UNAUTHORIZED);
+        let (status,disabled)=post("/v1/members/disable",Some(&owner_auth),false,payload);
+        assert_eq!(status,StatusCode::OK);
+        assert_eq!(disabled["disabled"],true);
+        assert_eq!(post("/v1/auth/me",Some(&viewer_auth),false,
+            json!({"tenantId":tenant.id})).0,StatusCode::UNAUTHORIZED);
+        assert_eq!(post("/v1/auth/login",None,false,json!({
+            "tenantId":tenant.id,"email":"viewer@example.com","password":"long-viewer-password"
+        })).0,StatusCode::UNAUTHORIZED);
+        assert_eq!(post("/v1/auth/me",Some(&owner_auth),false,
+            json!({"tenantId":tenant.id})).0,StatusCode::OK);
+        drop(post);
+        drop(api);
+        drop(registry);
+        std::fs::remove_file(&path).unwrap();
     }
 }
