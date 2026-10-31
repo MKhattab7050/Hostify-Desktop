@@ -86,34 +86,82 @@ pub(crate) enum Health {
     AnyBelow500,
     TcpConnect,
 }
-pub(crate) async fn http_health(port: u16, path: &str, health: Health) -> bool {
+pub(crate) async fn http_probe_detailed(
+    port: u16,
+    path: &str,
+    host: Option<&str>,
+    health: Health,
+) -> Result<u16, String> {
     if health == Health::TcpConnect {
-        return matches!(
-            tokio::time::timeout(
-                Duration::from_secs(2),
-                tokio::net::TcpStream::connect(("127.0.0.1", port))
-            )
-            .await,
-            Ok(Ok(_))
-        );
+        return match tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(200),
+            Ok(Err(e)) => Err(format!("TCP connection to 127.0.0.1:{port} failed: {e}")),
+            Err(_) => Err(format!("TCP connection to 127.0.0.1:{port} timed out")),
+        };
     }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let result = tokio::time::timeout(Duration::from_secs(2), async {
+    let host_header = host.unwrap_or("localhost");
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
         let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
         stream
             .write_all(
-                format!("GET {path} HTTP/1.1\r\nHost: hostify-health.example\r\nConnection: close\r\n\r\n")
+                format!("GET {path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\n\r\n")
                     .as_bytes(),
             )
             .await?;
-        let mut bytes = [0; 128];
+        let mut bytes = [0; 4096];
         let n = stream.read(&mut bytes).await?;
         let text = String::from_utf8_lossy(&bytes[..n]);
-        let code=text.split_whitespace().nth(1).and_then(|s|s.parse::<u16>().ok());
-        Ok::<bool, io::Error>(code.is_some_and(|c|match health {Health::Strict2xx=>(200..300).contains(&c),Health::AnyBelow500=>(100..500).contains(&c),Health::TcpConnect=>false}))
+        let code = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse::<u16>().ok());
+        match code {
+            Some(c) => {
+                let matches = match health {
+                    Health::Strict2xx => (200..300).contains(&c),
+                    Health::AnyBelow500 => (100..500).contains(&c),
+                    Health::TcpConnect => false,
+                };
+                if matches {
+                    Ok(c)
+                } else {
+                    let first_line = text.lines().next().unwrap_or("").trim();
+                    let body = text.split("\r\n\r\n").nth(1).unwrap_or("").trim();
+                    let summary = if !body.is_empty() {
+                        let short: String = body.chars().take(150).collect();
+                        format!("{first_line} - {short}")
+                    } else {
+                        first_line.to_string()
+                    };
+                    Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("HTTP {c} ({summary})"),
+                    ))
+                }
+            }
+            None => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid HTTP response from server",
+            )),
+        }
     })
     .await;
-    matches!(result, Ok(Ok(true)))
+    match result {
+        Ok(Ok(code)) => Ok(code),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err(format!(
+            "Request to 127.0.0.1:{port}{path} timed out after 5 seconds"
+        )),
+    }
+}
+pub(crate) async fn http_health(port: u16, path: &str, health: Health) -> bool {
+    http_probe_detailed(port, path, None, health).await.is_ok()
 }
 pub async fn tunnel_connections(port: u16) -> u64 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -924,6 +972,30 @@ pub(crate) fn pump_redacted(
         }
     })
 }
+impl Supervisor {
+    pub(crate) fn site_hosts(&self, site: &crate::state::Site) -> Vec<String> {
+        let mut hosts = Vec::new();
+        if let Some(h) = &site.publish_hostname {
+            let clean = h.trim();
+            if !clean.is_empty() && !hosts.contains(&clean.to_string()) {
+                hosts.push(clean.to_string());
+            }
+        }
+        if let Ok(db) = self.store.db() {
+            if let Ok(mut st) = db.prepare("SELECT hostname FROM domains WHERE site_id=?1") {
+                if let Ok(rows) = st.query_map([&site.id], |r| r.get::<_, String>(0)) {
+                    for row in rows.flatten() {
+                        let clean = row.trim().to_string();
+                        if !clean.is_empty() && !hosts.contains(&clean) {
+                            hosts.push(clean);
+                        }
+                    }
+                }
+            }
+        }
+        hosts
+    }
+}
 #[async_trait]
 impl SiteRuntime for Supervisor {
     async fn start_site(&self, id: &str) -> Result<bool, String> {
@@ -957,6 +1029,7 @@ impl SiteRuntime for Supervisor {
         std::fs::create_dir_all(self.store.root.join("run/verify").join(id))
             .map_err(|e| e.to_string())?;
         let site = self.store.site(id).map_err(|e| e.to_string())?;
+        let hosts = self.site_hosts(&site);
         let config = hostify_core::caddy::generate(&[hostify_core::caddy::Site {
             verify_root: self.store.root.join("run/verify").join(id),
             port: site.local_port,
@@ -964,6 +1037,7 @@ impl SiteRuntime for Supervisor {
                 root: self.store.root.join("sites").join(id).join("current"),
             },
             log: self.store.root.join("logs").join(format!("{id}.log")),
+            hosts,
         }])
         .map_err(|e| e.to_string())?;
         let path = self.store.root.join("run").join(format!("{id}.Caddyfile"));
@@ -1126,25 +1200,30 @@ impl SiteRuntime for Supervisor {
         ))
     }
     async fn site_responds(&self, port: u16) -> Result<bool, String> {
-        let node = self
+        let app_site = self
             .store
             .sites()
             .map_err(|e| e.to_string())?
             .into_iter()
-            .find(|s| s.local_port == port && s.kind == "node");
+            .find(|s| s.local_port == port && matches!(s.kind.as_str(), "node" | "php"));
         // An app's home page may legitimately fail or redirect; its chosen health path decides.
-        let (path, health) = match node {
-            Some(site) => (
-                self.store
-                    .app_config(&site.id)
-                    .map_err(|e| e.to_string())?
-                    .health_path,
-                Health::AnyBelow500,
-            ),
-            None => ("/".to_owned(), Health::Strict2xx),
+        let (path, health, probe_host) = match app_site {
+            Some(ref site) => {
+                let config = self.store.app_config(&site.id).map_err(|e| e.to_string())?;
+                let hosts = self.site_hosts(site);
+                let host = hosts
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "localhost".to_string());
+                (config.health_path, Health::AnyBelow500, host)
+            }
+            None => ("/".to_owned(), Health::Strict2xx, "localhost".to_string()),
         };
         for _ in 0..20 {
-            if http_health(port, &path, health).await {
+            if http_probe_detailed(port, &path, Some(&probe_host), health)
+                .await
+                .is_ok()
+            {
                 return Ok(true);
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1743,8 +1822,35 @@ impl Supervisor {
             .map_err(|e| e.to_string())?;
         self.start_proxy(id, hostify_core::caddy::Backend::Proxy { port })
             .await?;
-        if !http_health(site.local_port, &config.health_path, Health::AnyBelow500).await {
-            return Err("The application did not respond through the website server with a public Host header.".into());
+        let hosts = self.site_hosts(&site);
+        let probe_host = hosts.first().map(|s| s.as_str()).unwrap_or("localhost");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let mut last_error = String::new();
+        let mut healthy = false;
+        while tokio::time::Instant::now() < deadline {
+            match http_probe_detailed(
+                site.local_port,
+                &config.health_path,
+                Some(probe_host),
+                Health::AnyBelow500,
+            )
+            .await
+            {
+                Ok(_) => {
+                    healthy = true;
+                    break;
+                }
+                Err(err) => {
+                    last_error = err;
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        }
+        if !healthy {
+            return Err(format!(
+                "The application did not respond correctly on {}: {}",
+                config.health_path, last_error
+            ));
         }
         self.store
             .process_status(id, &format!("site:{id}"), "running", None)
@@ -1858,8 +1964,35 @@ impl Supervisor {
             },
         )
         .await?;
-        if !http_health(site.local_port, &config.health_path, Health::AnyBelow500).await {
-            return Err("PHP did not respond through Caddy with a foreign Host header.".into());
+        let hosts = self.site_hosts(&site);
+        let probe_host = hosts.first().map(|s| s.as_str()).unwrap_or("localhost");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let mut last_error = String::new();
+        let mut healthy = false;
+        while tokio::time::Instant::now() < deadline {
+            match http_probe_detailed(
+                site.local_port,
+                &config.health_path,
+                Some(probe_host),
+                Health::AnyBelow500,
+            )
+            .await
+            {
+                Ok(_) => {
+                    healthy = true;
+                    break;
+                }
+                Err(err) => {
+                    last_error = err;
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        }
+        if !healthy {
+            return Err(format!(
+                "The PHP application did not respond correctly on {}: {}",
+                config.health_path, last_error
+            ));
         }
         self.store
             .process_status(id, &format!("site:{id}"), "running", None)
@@ -1875,6 +2008,7 @@ impl Supervisor {
             return Err(hostify_core::components::CADDY_UNAVAILABLE.into());
         }
         let site = self.store.site(id).map_err(|e| e.to_string())?;
+        let hosts = self.site_hosts(&site);
         std::fs::create_dir_all(self.store.root.join("run/verify").join(id))
             .map_err(|e| e.to_string())?;
         let config = hostify_core::caddy::generate(&[hostify_core::caddy::Site {
@@ -1882,6 +2016,7 @@ impl Supervisor {
             port: site.local_port,
             backend,
             log: self.store.root.join("logs").join(format!("{id}.log")),
+            hosts,
         }])
         .map_err(|e| e.to_string())?;
         let path = self.store.root.join("run").join(format!("{id}.Caddyfile"));

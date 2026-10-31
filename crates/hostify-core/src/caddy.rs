@@ -3,14 +3,30 @@ use std::{
     path::PathBuf,
 };
 use thiserror::Error;
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Site {
     pub verify_root: PathBuf,
     pub port: u16,
     pub backend: Backend,
     pub log: PathBuf,
+    pub hosts: Vec<String>,
 }
-#[derive(Debug)]
+impl Site {
+    pub fn new(verify_root: PathBuf, port: u16, backend: Backend, log: PathBuf) -> Self {
+        Self {
+            verify_root,
+            port,
+            backend,
+            log,
+            hosts: Vec::new(),
+        }
+    }
+    pub fn with_hosts(mut self, hosts: Vec<String>) -> Self {
+        self.hosts = hosts;
+        self
+    }
+}
+#[derive(Debug, Clone)]
 pub enum Backend {
     Static { root: PathBuf },
     Proxy { port: u16 },
@@ -32,14 +48,31 @@ fn quote(path: &std::path::Path) -> Result<String, CaddyError> {
     }
     Ok(format!("\"{s}\""))
 }
+fn foreign_host_guard(hosts: &[String]) -> String {
+    if hosts.is_empty() {
+        return String::new();
+    }
+    let mut allowed = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+    for h in hosts {
+        let clean = h.trim();
+        if !clean.is_empty() && !allowed.iter().any(|a| a.eq_ignore_ascii_case(clean)) {
+            allowed.push(clean.to_string());
+        }
+    }
+    format!(
+        "        @foreign not host {}\n        respond @foreign \"Host not allowed\" 421\n",
+        allowed.join(" ")
+    )
+}
 pub fn generate(sites: &[Site]) -> Result<String, CaddyError> {
     let mut result = String::from("{\n    admin off\n}\n");
     for site in sites {
+        let foreign_guard = foreign_host_guard(&site.hosts);
         // No hostname in the address: tunnel requests carry the public Host, and Caddy answers
         // 200 with an empty body when no site matches. `bind` keeps the listener on loopback.
         match &site.backend {
             Backend::Static { root } => {
-                result.push_str(&format!("\nhttp://:{} {{\n    bind 127.0.0.1\n    route {{\n        handle_path /.well-known/hostify-verify/* {{\n            root * {}\n            header Cache-Control no-store\n            file_server\n        }}\n        handle {{\n            root * {}\n            @hidden path_regexp hidden (^|/)\\.\n            respond @hidden 404\n            header {{\n                X-Hostify-Verify hostify\n                X-Content-Type-Options nosniff\n                X-Frame-Options DENY\n                Referrer-Policy strict-origin-when-cross-origin\n            }}\n            file_server\n        }}\n    }}\n",site.port,quote(&site.verify_root)?,quote(root)?));
+                result.push_str(&format!("\nhttp://:{} {{\n    bind 127.0.0.1\n    route {{\n        handle_path /.well-known/hostify-verify/* {{\n            root * {}\n            header Cache-Control no-store\n            file_server\n        }}\n{}        handle {{\n            root * {}\n            @hidden path_regexp hidden (^|/)\\.\n            respond @hidden 404\n            header {{\n                X-Hostify-Verify hostify\n                X-Content-Type-Options nosniff\n                X-Frame-Options DENY\n                Referrer-Policy strict-origin-when-cross-origin\n            }}\n            file_server\n        }}\n    }}\n",site.port,quote(&site.verify_root)?,foreign_guard,quote(root)?));
             }
             Backend::Php { root, upstreams } => {
                 // PHP CGI cannot open SCRIPT_FILENAME with the Win32 extended-path prefix.
@@ -62,7 +95,7 @@ http://:{} {{
         handle /.well-known/hostify-caddy-ok {{
             respond 200
         }}
-        handle {{
+{}        handle {{
             route {{
             @hidden path_regexp (^|/)\.
             respond @hidden 404
@@ -86,10 +119,10 @@ http://:{} {{
             }}
         }}
     }}
-"#, site.port, quote(&site.verify_root)?, quote(&root)?, upstreams));
+"#, site.port, quote(&site.verify_root)?, foreign_guard, quote(&root)?, upstreams));
             }
             Backend::Proxy { port } => {
-                result.push_str(&format!("\nhttp://:{} {{\n    bind 127.0.0.1\n    route {{\n        handle_path /.well-known/hostify-verify/* {{\n            root * {}\n            header Cache-Control no-store\n            file_server\n        }}\n        handle /.well-known/hostify-caddy-ok {{\n            respond 200\n        }}\n        handle {{\n            header {{\n                X-Hostify-Verify hostify\n                X-Content-Type-Options nosniff\n                X-Frame-Options DENY\n                Referrer-Policy strict-origin-when-cross-origin\n            }}\n            reverse_proxy 127.0.0.1:{} {{\n                flush_interval -1\n            }}\n        }}\n    }}\n", site.port, quote(&site.verify_root)?, port));
+                result.push_str(&format!("\nhttp://:{} {{\n    bind 127.0.0.1\n    route {{\n        handle_path /.well-known/hostify-verify/* {{\n            root * {}\n            header Cache-Control no-store\n            file_server\n        }}\n        handle /.well-known/hostify-caddy-ok {{\n            respond 200\n        }}\n{}        handle {{\n            header {{\n                X-Hostify-Verify hostify\n                X-Content-Type-Options nosniff\n                X-Frame-Options DENY\n                Referrer-Policy strict-origin-when-cross-origin\n            }}\n            reverse_proxy 127.0.0.1:{} {{\n                flush_interval -1\n            }}\n        }}\n    }}\n", site.port, quote(&site.verify_root)?, foreign_guard, port));
             }
         }
         result.push_str(&format!(
@@ -119,6 +152,7 @@ mod tests {
                 root: "site".into(),
             },
             log: "log".into(),
+            hosts: vec![],
         }])
         .expect("config");
         assert!(s.contains("admin off"));
@@ -179,6 +213,7 @@ mod marker_integration {
             port,
             backend: Backend::Static { root },
             log: dir.path().join("access.log"),
+            hosts: vec!["www.example.test".into()],
         }])
         .unwrap();
         assert!(config.contains("handle_path /.well-known/hostify-verify/*"));
@@ -252,6 +287,15 @@ mod marker_integration {
             .is_err(),
             "the listener must stay on 127.0.0.1"
         );
+        // Foreign Host header is rejected with 421 Misdirected Request.
+        let foreign_resp = client
+            .get(format!("{base}/"))
+            .header(reqwest::header::HOST, "foreign.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(foreign_resp.status(), 421);
+
         for path in [
             "/.env",
             "/.well-known/anything-else",
@@ -310,7 +354,8 @@ mod compatibility_tests {
                 backend: Backend::Static {
                     root: "site".into()
                 },
-                log: "log".into()
+                log: "log".into(),
+                hosts: vec![],
             }])
             .unwrap(),
             r#"{
@@ -352,6 +397,7 @@ http://:9000 {
             port: 9000,
             backend: Backend::Proxy { port: 9001 },
             log: "log".into(),
+            hosts: vec![],
         }])
         .unwrap();
         for text in [
@@ -383,6 +429,7 @@ mod php_tests {
                 upstreams: vec![19001, 19002],
             },
             log: d.path().join("access.log"),
+            hosts: vec![],
         }])
         .unwrap();
         for expected in [

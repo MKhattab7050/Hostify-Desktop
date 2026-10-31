@@ -132,16 +132,18 @@ impl Fixture {
     }
 }
 async fn get(port: u16, path: &str) -> String {
+    get_with_host(port, path, "localhost").await
+}
+
+async fn get_with_host(port: u16, path: &str, host: &str) -> String {
     tokio::time::timeout(Duration::from_secs(30), async {
         let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .unwrap();
         socket
             .write_all(
-                format!(
-                    "GET {path} HTTP/1.1\r\nHost: foreign.example\r\nConnection: close\r\n\r\n"
-                )
-                .as_bytes(),
+                format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
             )
             .await
             .unwrap();
@@ -616,5 +618,189 @@ async fn trust_document_root_and_junction_refusals_and_mixed_sites() {
     f.call("restart_site", json!({"id":static_id})).await;
     assert_eq!(f.status(&id).await["workers"], php_pids);
     assert!(get(f.port(&id), "/").await.contains("cgi-fcgi"));
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires HOSTIFY_LIVE_RUNTIMES and real Caddy"]
+async fn regression_host_isolation_foreign_host_rejection_and_diagnostics() {
+    let f = Fixture::new();
+
+    // 1. Set up PHP Site 1 with domain 'php1.example.test'
+    let source1 =
+        f.source("<?php echo 'php1-app-response:' . ($_SERVER['HTTP_HOST'] ?? 'no-host');");
+    let id1 = f.add_project(&source1, None).await;
+    f.engine
+        .store
+        .db()
+        .unwrap()
+        .execute(
+            "INSERT INTO domains(id, hostname, zone_name, zone_id, site_id, dns_status, https_verified) VALUES(?1, ?2, 'example.test', 'z1', ?3, 'active', 1)",
+            [uuid::Uuid::new_v4().to_string(), "php1.example.test".into(), id1.clone()],
+        )
+        .unwrap();
+    f.build(&id1).await;
+    f.start(&id1).await;
+
+    // 2. Set up PHP Site 2 with domain 'php2.example.test'
+    let source2 =
+        f.source("<?php echo 'php2-app-response:' . ($_SERVER['HTTP_HOST'] ?? 'no-host');");
+    let id2 = f.add_project(&source2, None).await;
+    f.engine
+        .store
+        .db()
+        .unwrap()
+        .execute(
+            "INSERT INTO domains(id, hostname, zone_name, zone_id, site_id, dns_status, https_verified) VALUES(?1, ?2, 'example.test', 'z2', ?3, 'active', 1)",
+            [uuid::Uuid::new_v4().to_string(), "php2.example.test".into(), id2.clone()],
+        )
+        .unwrap();
+    f.build(&id2).await;
+    f.start(&id2).await;
+
+    let port1 = f.port(&id1);
+    let port2 = f.port(&id2);
+
+    // REGRESSION TEST 1: Valid hostname reaches the intended PHP website
+    let r1 = get_with_host(port1, "/", "php1.example.test").await;
+    assert!(
+        r1.starts_with("HTTP/1.1 200 OK"),
+        "Expected 200 OK, got: {r1}"
+    );
+    assert!(
+        r1.contains("php1-app-response:php1.example.test"),
+        "Got: {r1}"
+    );
+
+    let r2 = get_with_host(port2, "/", "php2.example.test").await;
+    assert!(
+        r2.starts_with("HTTP/1.1 200 OK"),
+        "Expected 200 OK, got: {r2}"
+    );
+    assert!(
+        r2.contains("php2-app-response:php2.example.test"),
+        "Got: {r2}"
+    );
+
+    // Also loopback addresses reach the PHP website
+    let r1_loopback = get_with_host(port1, "/", "localhost").await;
+    assert!(
+        r1_loopback.starts_with("HTTP/1.1 200 OK"),
+        "Loopback should reach site: {r1_loopback}"
+    );
+    assert!(r1_loopback.contains("php1-app-response:localhost"));
+
+    let r1_ip = get_with_host(port1, "/", "127.0.0.1").await;
+    assert!(
+        r1_ip.starts_with("HTTP/1.1 200 OK"),
+        "Loopback IP should reach site: {r1_ip}"
+    );
+
+    // REGRESSION TEST 2: Foreign hostname cannot reach the PHP website
+    let r1_foreign = get_with_host(port1, "/", "foreign.example").await;
+    assert!(
+        r1_foreign.starts_with("HTTP/1.1 421"),
+        "Expected 421 Misdirected Request, got: {r1_foreign}"
+    );
+    assert!(
+        !r1_foreign.contains("php1-app-response"),
+        "Foreign host must never reach PHP application!"
+    );
+
+    let r1_evil = get_with_host(port1, "/", "evil-attacker.com").await;
+    assert!(
+        r1_evil.starts_with("HTTP/1.1 421"),
+        "Expected 421 for evil.com: {r1_evil}"
+    );
+    assert!(!r1_evil.contains("php1-app-response"));
+
+    // REGRESSION TEST 3: Multiple PHP websites remain isolated
+    let r1_cross = get_with_host(port1, "/", "php2.example.test").await;
+    assert!(
+        r1_cross.starts_with("HTTP/1.1 421"),
+        "Cross-site Host on port 1 must be rejected: {r1_cross}"
+    );
+    assert!(!r1_cross.contains("php2-app-response") && !r1_cross.contains("php1-app-response"));
+
+    let r2_cross = get_with_host(port2, "/", "php1.example.test").await;
+    assert!(
+        r2_cross.starts_with("HTTP/1.1 421"),
+        "Cross-site Host on port 2 must be rejected: {r2_cross}"
+    );
+    assert!(!r2_cross.contains("php1-app-response") && !r2_cross.contains("php2-app-response"));
+
+    // REGRESSION TEST 4: PHP and Node.js websites coexist
+    let node_source = f.temp.path().join("node-coexist");
+    std::fs::create_dir(&node_source).unwrap();
+    std::fs::write(
+        node_source.join("server.cjs"),
+        "require('http').createServer((q,s)=>s.end('node-coexist-ok:'+q.headers.host)).listen(+process.env.PORT);",
+    )
+    .unwrap();
+    std::fs::write(node_source.join("package.json"), "{}").unwrap();
+    let node_site = f
+        .call(
+            "add_site",
+            json!({"name":"node-coexist","sourcePath":node_source,"kind":"directory","siteKind":"node","config":{"install":"none","start":{"type":"node","args":["server.cjs"]}}}),
+        )
+        .await;
+    let node_id = node_site["id"].as_str().unwrap();
+    let node_config = f.engine.store.app_config(node_id).unwrap();
+    f.call(
+        "set_app_config",
+        json!({"siteId":node_id,"config":node_config,"nodeVersion":"24.22.2"}),
+    )
+    .await;
+    f.build(node_id).await;
+    f.start(node_id).await;
+    let node_port = f.port(node_id);
+
+    // Both PHP and Node serve concurrently
+    assert!(
+        get_with_host(port1, "/", "php1.example.test")
+            .await
+            .contains("php1-app-response")
+    );
+    assert!(get(node_port, "/").await.contains("node-coexist-ok"));
+
+    // Restarting PHP does not affect Node
+    f.call("restart_site", json!({"id": id1})).await;
+    assert!(get(node_port, "/").await.contains("node-coexist-ok"));
+    assert!(
+        get_with_host(port1, "/", "php1.example.test")
+            .await
+            .contains("php1-app-response")
+    );
+
+    // REGRESSION TEST 5: No PHP source code is exposed
+    for path in ["/.env", "/composer.json", "/php.ini", "/index.php::$DATA"] {
+        let resp = get_with_host(port1, path, "php1.example.test").await;
+        assert!(!resp.contains("<?php"), "Source leaked on {path}: {resp}");
+    }
+
+    // REGRESSION TEST 6: Deployment startup succeeds when the correct local route is healthy
+    assert_eq!(f.engine.store.site(&id1).unwrap().status, "running");
+
+    // REGRESSION TEST 7: Deployment fails with accurate diagnostics when routing/service is genuinely broken
+    let broken_source =
+        f.source("<?php http_response_code(500); echo 'Fatal database connection error';");
+    let broken_id = f.add_project(&broken_source, None).await;
+    f.build(&broken_id).await;
+
+    let start_result = f
+        .engine
+        .dispatch("start_site", json!({"id": broken_id}))
+        .await;
+    assert!(start_result.is_err(), "Broken PHP site must fail to start");
+    let err_msg = start_result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("500"),
+        "Error message must report HTTP 500: {err_msg}"
+    );
+    assert!(
+        !err_msg.contains("PHP did not respond through Caddy with a foreign Host header."),
+        "Error message must not use the misleading foreign Host header text: {err_msg}"
+    );
+
     f.engine.shutdown().await;
 }
