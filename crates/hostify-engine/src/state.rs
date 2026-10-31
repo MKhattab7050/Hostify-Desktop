@@ -805,7 +805,7 @@ impl Engine {
                 let site = s.site(id)?;
                 let mut checks = Vec::<Value>::new();
                 let mut blocked = Vec::<String>::new();
-                let static_site = site.kind == "static";
+
                 let dynamic = matches!(site.kind.as_str(), "node" | "php");
                 if dynamic {
                     let config = s.app_config(id)?;

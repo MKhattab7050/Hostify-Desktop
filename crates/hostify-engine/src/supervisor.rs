@@ -1200,45 +1200,6 @@ pub fn detect_nested_node_dir(root: &Path) -> Option<String> {
     }
     best.map(|(_, d)| d)
 }
-fn clean_sql_for_mysql8(raw: &str) -> String {
-    let mut out = String::new();
-    let mut in_delimiter_block = false;
-    let mut skip_alter = false;
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        let upper = trimmed.to_ascii_uppercase();
-        if upper.starts_with("DELIMITER ") {
-            in_delimiter_block = !upper.ends_with(';');
-            continue;
-        }
-        if in_delimiter_block {
-            continue;
-        }
-        if upper.starts_with("CREATE DATABASE ") || upper.starts_with("USE ") {
-            if !trimmed.ends_with(';') {
-                skip_alter = true;
-            }
-            continue;
-        }
-        if upper.starts_with("ALTER TABLE ") {
-            skip_alter = !trimmed.ends_with(';');
-            continue;
-        }
-        if skip_alter {
-            if trimmed.ends_with(';') {
-                skip_alter = false;
-            }
-            continue;
-        }
-        if trimmed.contains("`username` VARCHAR(255) NOT NULL UNIQUE") {
-            out.push_str("  `username` VARCHAR(255) DEFAULT NULL UNIQUE,\n  `name` VARCHAR(255) DEFAULT NULL,\n");
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
-}
 #[async_trait]
 impl SiteRuntime for Supervisor {
     async fn start_site(&self, id: &str) -> Result<bool, String> {
