@@ -420,7 +420,8 @@ mod tests{
         assert_eq!(status,StatusCode::OK);
         assert!(!audit["items"].as_array().unwrap().is_empty());
         assert_eq!(audit["items"][0]["tenantId"],first.id);
-        assert!(!audit.to_string().contains(&owner_auth));
+        assert!(!audit.to_string().contains(owner_auth.strip_prefix("Bearer ").unwrap()));
+        assert!(!audit.to_string().contains("owner@site.test"));
         let (status,_) = call("/v1/tenant/audit/list",&viewer_auth,page.clone());
         assert_eq!(status,StatusCode::FORBIDDEN);
         let (status,_) = call("/v1/tenant/audit/list",&owner_auth,
