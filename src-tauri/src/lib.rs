@@ -39,6 +39,15 @@ forward! {
     set_app_config(site_id: String => "siteId", config: Value => "config", node_version: Option<String> => "nodeVersion", php_version: Option<String> => "phpVersion");
     build_app(site_id: String => "siteId", trust_acknowledged: bool => "trustAcknowledged");
     cancel_build(site_id: String => "siteId"); get_build_status(site_id: String => "siteId");
+    site_snapshot_schedule(site_id: String => "siteId");
+    set_site_snapshot_schedule(site_id: String => "siteId", enabled: bool => "enabled", every_hours: u32 => "everyHours");
+    create_site_snapshot(site_id: String => "siteId");
+    list_site_snapshots(site_id: String => "siteId");
+    verify_site_snapshot(site_id: String => "siteId", snapshot_id: String => "snapshotId");
+    restore_site_snapshot(site_id: String => "siteId", snapshot_id: String => "snapshotId", confirm_name: String => "confirmName");
+    guardian_status(site_id: String => "siteId");
+    guardian_enable(site_id: String => "siteId", enabled: bool => "enabled");
+    guardian_check_now(site_id: String => "siteId");
     app_status(site_id: String => "siteId");
     app_logs(site_id: String => "siteId", stream: String => "stream", lines: u32 => "lines");
     list_runtimes();
@@ -190,6 +199,15 @@ pub fn run() {
             cancel_build,
             get_build_status,
             app_status,
+            site_snapshot_schedule,
+            set_site_snapshot_schedule,
+            create_site_snapshot,
+            list_site_snapshots,
+            verify_site_snapshot,
+            restore_site_snapshot,
+            guardian_status,
+            guardian_enable,
+            guardian_check_now,
             app_logs,
             list_runtimes,
             install_runtime,

@@ -555,10 +555,15 @@ impl Engine {
                 }
             }
         });
-        self.background
-            .lock()
-            .map_err(|_| anyhow!("Background tasks unavailable"))?
-            .push(retry);
+        {
+            let mut tasks = self.background.lock()
+                .map_err(|_| anyhow!("Background tasks unavailable"))?;
+            tasks.push(retry);
+            if self.supervisor.is_some() {
+                tasks.push(crate::guardian::spawn(self));
+                tasks.push(crate::time_machine::spawn(self));
+            }
+        }
         for r in records {
             if let Some(id) = r["tunnel_id"].as_str() {
                 let result = async {
@@ -799,6 +804,36 @@ impl Engine {
                 Ok(
                     json!({"restartRequired":changed && site.status!="stopped","rebuildRequired":rebuild}),
                 )
+            }
+            "site_snapshot_schedule" => {
+                Ok(json!(crate::time_machine::schedule(self,arg(&p,"siteId")?)?))
+            }
+            "set_site_snapshot_schedule" => {
+                crate::time_machine::configure_schedule(self,arg(&p,"siteId")?,
+                    boolean(&p,"enabled")?,number(&p,"everyHours",168)? as u32)
+            }
+            "create_site_snapshot" => {
+                crate::time_machine::create(self, arg(&p,"siteId")?).await
+            }
+            "list_site_snapshots" => {
+                crate::time_machine::list(self, arg(&p,"siteId")?).await
+            }
+            "verify_site_snapshot" => {
+                crate::time_machine::verify(self, arg(&p,"siteId")?,arg(&p,"snapshotId")?).await
+            }
+            "restore_site_snapshot" => {
+                crate::time_machine::restore(self, arg(&p,"siteId")?,arg(&p,"snapshotId")?,
+                    arg(&p,"confirmName")?).await
+            }
+            "guardian_status" => {
+                Ok(json!(crate::guardian::load(self, arg(&p, "siteId")?)?))
+            }
+            "guardian_enable" => {
+                let id = arg(&p, "siteId")?;
+                crate::guardian::enable(self, id, boolean(&p, "enabled")?)
+            }
+            "guardian_check_now" => {
+                crate::guardian::check(self, arg(&p, "siteId")?).await
             }
             "publish_preflight" => {
                 let id = arg(&p, "siteId")?;

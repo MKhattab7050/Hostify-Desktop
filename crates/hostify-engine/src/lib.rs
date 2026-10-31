@@ -6,6 +6,8 @@ mod php;
 #[cfg(windows)]
 pub mod pipe;
 pub mod state;
+pub mod guardian;
+pub mod time_machine;
 pub mod supervisor;
 #[cfg(windows)]
 pub mod windows;

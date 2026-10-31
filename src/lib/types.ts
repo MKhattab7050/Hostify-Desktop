@@ -97,3 +97,23 @@ export interface PublishPreflight {
   checks: { key: string; passed: boolean; detail: string }[];
   diagnostic?: PublishDiagnostic | null;
 }
+
+/** Opt-in Guardian monitoring. It never repairs project files or DNS. */
+export interface GuardianStatus {
+  enabled: boolean; consecutiveFailures: number; recoveryAttempts: number;
+  lastRestartUnix?: number | null; lastCheckedAt?: string | null; lastResult?: string | null;
+}
+
+/** Integrity-checked local code snapshot. MySQL, secrets and machine disaster recovery excluded. */
+export interface SiteSnapshot {
+  id: string; siteId: string; siteKind: string; release: string | null; createdAt: string;
+  fileCount: number; sourceBytes: number; archiveBytes: number; sha256: string;
+  includesDatabase: false; includesSecrets: false;
+}
+
+/** Local file-only backup cadence; paused at five retained copies, never deleting automatically. */
+export interface SiteSnapshotSchedule {
+  enabled: boolean; everyHours: 24 | 72 | 168;
+  lastRunUnix: number | null; lastAttemptUnix: number | null;
+  pausedForCapacity: boolean;
+}

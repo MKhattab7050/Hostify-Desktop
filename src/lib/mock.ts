@@ -61,6 +61,11 @@ const runtimes: RuntimeStatus[] = [
 let mysql = { setUp: false, running: false } as { setUp: boolean; running: boolean; version?: string; port?: number; healthy?: boolean; dataBytes?: number; memoryBytes?: number; freeDiskBytes?: number };
 let databases: ManagedDatabase[] = [];
 const backups = new Map<string, { file: string; sizeBytes: number; createdAt: string }[]>();
+const guardian = new Map<string, { enabled: boolean; consecutiveFailures: number; recoveryAttempts: number; lastResult: string }>();
+const snapshotSchedules = new Map<string, {enabled:boolean;everyHours:24|72|168;lastRunUnix:null;lastAttemptUnix:null;pausedForCapacity:boolean}>();
+const siteSnapshots = new Map<string, { id: string; siteId: string; siteKind: string; release: null; createdAt: string;
+  fileCount: number; sourceBytes: number; archiveBytes: number; sha256: string;
+  includesDatabase: false; includesSecrets: false; }[]>();
 function inspect(path: string): ProjectReport {
   const node = /node|express|socket/i.test(path); const php = /php|wordpress/i.test(path);
   return { siteKind: node ? "node" : php ? "php" : "static", framework: /socket/i.test(path) ? "socket.io" : /express|node/i.test(path) ? "express" : /wordpress/i.test(path) ? "wordpress" : null, name: null, engines: null,
@@ -94,6 +99,40 @@ export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise
     case "build_app": { if (a.trustAcknowledged !== true) throw new Error("Explicit trust is required before building an application."); const id = "b" + Date.now(); builds.set(a.siteId, { at: Date.now(), fail: /fail/i.test(sites.find((s) => s.id === a.siteId)?.sourcePath ?? ""), id }); return r({ buildId: id }); }
     case "cancel_build": builds.delete(a.siteId); return r(undefined);
     case "get_build_status": return r(buildStatus(a.siteId));
+    case "site_snapshot_schedule": return r(snapshotSchedules.get(a.siteId) ?? {
+      enabled:false,everyHours:24,lastRunUnix:null,lastAttemptUnix:null,pausedForCapacity:false
+    });
+    case "set_site_snapshot_schedule": {
+      const state={enabled:!!a.enabled,everyHours:a.everyHours,lastRunUnix:null,lastAttemptUnix:null,pausedForCapacity:false};
+      snapshotSchedules.set(a.siteId,state);return r(state);
+    }
+    case "create_site_snapshot": {
+      const site = sites.find((s) => s.id === a.siteId);
+      if (!site) throw new Error("Website not found");
+      const snap = { id: "preview-" + Date.now(), siteId:site.id,siteKind:site.kind ?? "static",release:null,
+        createdAt:now(),fileCount:site.fileCount,sourceBytes:site.sizeBytes,
+        archiveBytes:Math.floor(site.sizeBytes * 0.7),sha256:"preview-not-a-real-sha256",
+        includesDatabase:false as const,includesSecrets:false as const };
+      siteSnapshots.set(site.id,[snap,...(siteSnapshots.get(site.id) ?? [])]);return r(snap);
+    }
+    case "list_site_snapshots": return r(siteSnapshots.get(a.siteId) ?? []);
+    case "verify_site_snapshot": return r({ verified:true,
+      snapshot:(siteSnapshots.get(a.siteId) ?? []).find(s => s.id===a.snapshotId) });
+    case "restore_site_snapshot": {
+      const site = sites.find(s => s.id===a.siteId);
+      if (!site || site.name !== a.confirmName || site.status !== "stopped") throw new Error("Stop the website and confirm its exact name.");
+      if (!(siteSnapshots.get(a.siteId) ?? []).some(s=>s.id===a.snapshotId)) throw new Error("Snapshot not found");
+      return r({restored:true,requiresBuild:site.kind==="node"||site.kind==="php",includesDatabase:false});
+    }
+    case "guardian_status": return r(guardian.get(a.siteId) ?? { enabled: false, consecutiveFailures: 0, recoveryAttempts: 0, lastResult: "Monitoring disabled" });
+    case "guardian_enable": {
+      const status = { enabled: a.enabled, consecutiveFailures: 0, recoveryAttempts: guardian.get(a.siteId)?.recoveryAttempts ?? 0, lastResult: a.enabled ? "Monitoring enabled" : "Monitoring disabled" };
+      guardian.set(a.siteId, status); return r(status);
+    }
+    case "guardian_check_now": {
+      const status = guardian.get(a.siteId) ?? { enabled: false, consecutiveFailures: 0, recoveryAttempts: 0, lastResult: "Monitoring disabled" };
+      return r({ ...status, lastResult: status.enabled ? "Healthy" : "Monitoring paused" });
+    }
     case "app_status": { const s = sites.find((x) => x.id === a.siteId); return r(s?.status === "running" ? { health: "running", exposedAddresses: [], pid: 4242, processCount: 2, cpuPercent: 0.4, memoryBytes: 63_000_000, restarts: 0, internalPort: 19100, activeRelease: "r1" } : { health: "stopped", exposedAddresses: [] }); }
     case "app_logs": return r(a.stream === "build" ? ["[preview] npm ci", "[preview] added 69 packages"] : ["[preview] Logs appear here when the engine is running."]);
     case "list_runtimes": return r(runtimes);
