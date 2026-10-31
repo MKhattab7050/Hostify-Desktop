@@ -57,6 +57,7 @@ forward! {
     start_site(id: String => "id"); stop_site(id: String => "id"); restart_site(id: String => "id");
     remove_site(id: String => "id", delete_files: bool => "deleteFiles");
     preview_url(id: String => "id"); cf_connect(token: String => "token"); cf_status(); cf_disconnect();
+    publish_preflight(site_id: String => "siteId"); publish_diagnosis(site_id: String => "siteId");
     cf_check_domain(hostname: String => "hostname");
     cf_plan_dns(site_id: String => "siteId", hostname: String => "hostname");
     publish_site(site_id: String => "siteId", hostname: String => "hostname", consent_dns: bool => "consentDns");
