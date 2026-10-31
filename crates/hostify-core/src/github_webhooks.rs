@@ -166,7 +166,15 @@ pub fn configure_source(
         return Err(rusqlite::Error::InvalidQuery);
     }
     create_inbox_tables(db)?;
-    db.execute(
+    let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let existing:Option<(String,String,bool)>={
+        use rusqlite::OptionalExtension;
+        tx.query_row(
+            "SELECT repository,branch,enabled FROM github_site_sources WHERE site_id=?1",
+            [site.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))
+        ).optional()?
+    };
+    tx.execute(
         "INSERT INTO github_site_sources(site_id,repository,branch,enabled)
          VALUES(?1,?2,?3,?4)
          ON CONFLICT(site_id) DO UPDATE SET
@@ -175,6 +183,18 @@ pub fn configure_source(
            enabled=excluded.enabled",
         rusqlite::params![site.to_string(),policy.repository,policy.branch,policy.enabled]
     )?;
+    // Changing the approved source or opting out revokes all outstanding
+    // approvals, atomically, so stale commits cannot be reviewed later.
+    let source_changed=existing.is_some_and(|(repo,branch,_)|
+        !repo.eq_ignore_ascii_case(&policy.repository) || branch!=policy.branch);
+    if source_changed || !policy.enabled {
+        tx.execute(
+            "UPDATE github_push_inbox SET state='rejected'
+             WHERE site_id=?1 AND state='awaiting_review'",
+            [site.to_string()]
+        )?;
+    }
+    tx.commit()?;
     Ok(())
 }
 fn create_inbox_tables(db:&rusqlite::Connection)->std::result::Result<(),rusqlite::Error>{
@@ -378,6 +398,24 @@ mod tests {
         configure_source(&mut db,&SourcePolicy{site_id:id.clone(),
             repository:"org/site".into(),branch:"main".into(),enabled:false}).unwrap();
         assert_eq!(enqueue_verified_push(&mut db,&id,&push).unwrap(),IntakeOutcome::Disabled);
+    }
+    #[test]
+    fn opting_out_or_changing_repository_revokes_pending_commits_atomically() {
+        let mut db=rusqlite::Connection::open_in_memory().unwrap();
+        let id=Uuid::new_v4().to_string();
+        let policy=SourcePolicy{site_id:id.clone(),repository:"org/site".into(),
+            branch:"main".into(),enabled:true};
+        configure_source(&mut db,&policy).unwrap();
+        let mut push=VerifiedPush{delivery_id:Uuid::new_v4().to_string(),
+            repository:"org/site".into(),branch:"main".into(),commit_sha:"a".repeat(40)};
+        assert_eq!(enqueue_verified_push(&mut db,&id,&push).unwrap(),IntakeOutcome::Queued);
+        configure_source(&mut db,&SourcePolicy{enabled:false,..policy.clone()}).unwrap();
+        assert_eq!(pending_pushes(&db,&id).unwrap()[0].state,"rejected");
+        configure_source(&mut db,&policy).unwrap();
+        push.delivery_id=Uuid::new_v4().to_string();
+        assert_eq!(enqueue_verified_push(&mut db,&id,&push).unwrap(),IntakeOutcome::Queued);
+        configure_source(&mut db,&SourcePolicy{repository:"org/another".into(),..policy}).unwrap();
+        assert!(pending_pushes(&db,&id).unwrap().iter().all(|item|item.state=="rejected"));
     }
     #[test]
     fn malformed_input_fails_closed(){
