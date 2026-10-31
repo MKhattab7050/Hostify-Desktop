@@ -1496,7 +1496,11 @@ mod tests {
             let expected = String::from_utf16_lossy(
                 std::slice::from_raw_parts(expected_text, expected_len)
             );
-            assert_eq!(actual, expected, "The MySQL directory ACL must match the explicitly restricted owner+SYSTEM DACL");
+            // SetNamedSecurityInfoW may annotate the installed ACL with AI
+            // (auto-inherited) even though the DACL is protected. This marker
+            // is metadata, not an additional permission grant.
+            let normalized = actual.replacen("D:PAI(", "D:P(", 1);
+            assert_eq!(normalized, expected, "The MySQL ACL must have exactly the expected owner+SYSTEM grants");
             assert!(actual.contains(";;;SY)"));
             assert_eq!(actual.matches("(A;").count(), 2);
             LocalFree(expected_text.cast());
