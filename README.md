@@ -2,7 +2,7 @@
 
 Host static websites from your Windows PC. Pick a folder or ZIP, preview it locally, connect a domain on Cloudflare, and publish over HTTPS — no router changes, no public IP.
 
-**Status: 0.2.0, unsigned.** Local hosting, the installer, upgrade, uninstall and background hosting are verified on one Windows 11 machine, and publishing over HTTPS has succeeded on one real domain. A real Windows restart and a clean machine are not yet tested. See [docs/VERIFICATION.md](docs/VERIFICATION.md).
+**Current code: 2.0.0-rc.1 (unsigned pre-release).** Version **0.2.0** passed a limited set of Windows 11 and real-domain tests on one machine. Those older results do **not** certify this release candidate or commercial multi-tenant hosting. Real reboot, clean-machine installation, independent external-network verification, and customer workload isolation are still outstanding. See [docs/VERIFICATION.md](docs/VERIFICATION.md).
 
 ## Install
 
@@ -40,7 +40,18 @@ pnpm tauri build               # installer → target/release/bundle/nsis/
 
 Layout: `src/` React UI (`src/lib/api.ts` is the only IPC caller; it uses an in-memory mock in a plain browser) · `src-tauri/` desktop shell · `crates/hostify-core` (SQLite, import, Caddyfile, Cloudflare client, deploy state machine) · `crates/hostify-engine` (supervisor, named-pipe control server, autostart) · `docs/` architecture, IPC contract, engine and installer notes.
 
+## What's experimental in V2+
+
+- **Fast Publish and Standard Publish** share guarded deployment logic. Untrusted app code, DNS changes and new database provisioning still require explicit consent. See [Fast and Standard Publish](docs/FAST_STANDARD_PUBLISH.md).
+- **Guardian, Time Machine, App Catalog, Doctor and Security Center** provide local support, backups, templates and diagnostics. Security Center is read-only and does **not** prove Windows process isolation or public reachability.
+- **GitHub push inbox** stores verified, opt-in review requests. It is not a public webhook endpoint or an automatic checkout/build/deployment pipeline.
+- **Hostify Network** currently has a local-only development control plane for device enrollment and reserved subdomains. A reserved name is **not** publicly routable. No production-grade multi-tenant gateway, per-customer sandbox or billing service is shipped. See [Hostify Network](docs/HOSTIFY_NETWORK.md) and [local control plane](docs/NETWORK_CONTROL_PLANE.md).
+
+Do **not** expose the local Hostify control plane through a tunnel or sell multi-tenant hosting from this candidate.
+
 ## Verification status
+
+The table below records the **0.2.0 baseline**, not a complete acceptance test for `2.0.0-rc.1`.
 
 | Area | Status |
 |---|---|
