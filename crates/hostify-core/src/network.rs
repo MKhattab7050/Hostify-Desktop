@@ -488,6 +488,58 @@ mod tests{
         assert_eq!(normalize_label(" My-Site ").unwrap(),"my-site");
     }
     #[test]
+    fn ed25519_identity_proof_is_bound_to_tenant_agent_route_and_expiry(){
+        use ring::{rand::SystemRandom,signature::{Ed25519KeyPair,KeyPair}};
+        let rng=SystemRandom::new();
+        let private=Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let keypair=Ed25519KeyPair::from_pkcs8(private.as_ref()).unwrap();
+        let mut registry=Registry::memory("example.test").unwrap();
+        let tenant=registry.create_tenant("Authorized tenant").unwrap();
+        let outsider=registry.create_tenant("Other tenant").unwrap();
+        let invitation=registry.issue_invitation(&tenant.id,300).unwrap();
+        let agent=registry.enroll_agent(&invitation.token,&hex::encode(keypair.public_key().as_ref())).unwrap();
+        let route=registry.reserve_hostname(&tenant.id,&agent.id,&Uuid::new_v4().to_string(),"verified-device").unwrap();
+        assert!(!registry.has_verified_identity(&tenant.id,&agent.id,&route.id).unwrap());
+        assert!(registry.issue_route_challenge(&outsider.id,&agent.id,&route.id,60).is_err());
+        let challenge=registry.issue_route_challenge(&tenant.id,&agent.id,&route.id,60).unwrap();
+        let stored_hash:String=registry.db.query_row(
+            "SELECT challenge_hash FROM network_route_challenges",[],|r|r.get(0)).unwrap();
+        assert_eq!(stored_hash,token_hash(&challenge.value));
+        assert_ne!(stored_hash,challenge.value);
+        let bytes=registry.challenge_message(&tenant.id,&agent.id,&route.id,&challenge.value).unwrap();
+        let signed=hex::encode(keypair.sign(&bytes).as_ref());
+        let mut forged=signed.clone();
+        forged.replace_range(0..2,"00");
+        assert!(registry.verify_route_signature(&tenant.id,&agent.id,&route.id,&challenge.value,&forged).is_err());
+        assert!(!registry.has_verified_identity(&tenant.id,&agent.id,&route.id).unwrap());
+        registry.verify_route_signature(&tenant.id,&agent.id,&route.id,&challenge.value,&signed).unwrap();
+        assert!(registry.has_verified_identity(&tenant.id,&agent.id,&route.id).unwrap());
+        assert!(registry.verify_route_signature(&tenant.id,&agent.id,&route.id,&challenge.value,&signed).is_err());
+        // Signing is not consent for DNS mutation, tunnel creation, or public routing.
+        assert!(registry.lookup_active_route(&route.hostname).unwrap().is_none());
+        registry.revoke_agent(&tenant.id,&agent.id).unwrap();
+        assert!(!registry.has_verified_identity(&tenant.id,&agent.id,&route.id).unwrap());
+    }
+    #[test]
+    fn challenge_cannot_be_reused_after_expiry(){
+        use ring::{rand::SystemRandom,signature::{Ed25519KeyPair,KeyPair}};
+        let rng=SystemRandom::new();
+        let private=Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let pair=Ed25519KeyPair::from_pkcs8(private.as_ref()).unwrap();
+        let mut registry=Registry::memory("example.test").unwrap();
+        let tenant=registry.create_tenant("T").unwrap();
+        let invitation=registry.issue_invitation(&tenant.id,60).unwrap();
+        let agent=registry.enroll_agent(&invitation.token,&hex::encode(pair.public_key().as_ref())).unwrap();
+        let route=registry.reserve_hostname(&tenant.id,&agent.id,&Uuid::new_v4().to_string(),"expired-proof").unwrap();
+        let challenge=registry.issue_route_challenge(&tenant.id,&agent.id,&route.id,30).unwrap();
+        registry.db.execute("UPDATE network_route_challenges SET expires_unix=0
+            WHERE challenge_hash=?1",[token_hash(&challenge.value)]).unwrap();
+        let message=registry.challenge_message(&tenant.id,&agent.id,&route.id,&challenge.value).unwrap();
+        assert!(registry.verify_route_signature(&tenant.id,&agent.id,&route.id,&challenge.value,
+            &hex::encode(pair.sign(&message).as_ref())).is_err());
+        assert!(!registry.has_verified_identity(&tenant.id,&agent.id,&route.id).unwrap());
+    }
+    #[test]
     fn registry_is_durable_across_reopen_and_stores_no_raw_token(){
         let dir=tempfile::tempdir().unwrap();
         let path=dir.path().join("network.db");
