@@ -14,6 +14,7 @@ The `hostify_core::network_auth::Accounts` registry stores tenant-scoped account
 - 12-hour expiring sessions; explicit logout invalidates a session, and cross-tenant access is denied.
 - Per-account five-failure, 15-minute login lockout. This is not a substitute for per-IP or device abuse throttling on a public ingress.
 - Invite-only member creation, expiring invitations, atomic single-use consumption, and tests for revoked sessions, account takeover attempts and RBAC.
+- **Transactional membership audit:** invitation creation and redemption each write an audit entry in the same SQLite transaction as the affected row. Failing the audit write rolls the operation back. Audit subjects use internal UUIDs, never invitation tokens, passwords or member emails. This is not yet a publicly exposed audit viewer.
 
 ## Security restrictions
 
