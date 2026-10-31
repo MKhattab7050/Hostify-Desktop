@@ -106,8 +106,21 @@ impl std::fmt::Debug for Session {
     }
 }
 pub struct MemberInvitation {
+    pub id:String,
     pub token:String,
     pub expires_unix:i64,
+}
+/// Redacted, management-only pending invitations. The raw token and digest
+/// are never included in a list response.
+#[derive(Debug,Clone,Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct PendingMemberInvitation {
+    pub id:String,
+    pub tenant_id:String,
+    pub email:String,
+    pub role:Role,
+    pub expires_unix:i64,
+    pub created_at:String,
 }
 impl std::fmt::Debug for MemberInvitation {
     fn fmt(&self, f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {
@@ -197,6 +210,10 @@ impl Accounts{
                 expires_unix INTEGER NOT NULL,
                 consumed_at TEXT,
                 created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS network_member_invitation_revocations(
+                invitation_id TEXT PRIMARY KEY REFERENCES network_member_invitations(id),
+                revoked_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS network_sessions(
                 id TEXT PRIMARY KEY,
@@ -566,7 +583,73 @@ impl Accounts{
             VALUES(?1,?2,'member_invited',?3)",
             params![tenant,&issued_at,&invitation_id])?;
         tx.commit()?;
-        Ok(MemberInvitation{token:pending_token,expires_unix})
+        Ok(MemberInvitation{id:invitation_id,token:pending_token,expires_unix})
+    }
+    /// List only unconsumed, unexpired and non-revoked invitations for this
+    /// tenant. Admins may manage viewer invitations only.
+    pub fn list_pending_invitations(&self,token:&str,tenant:&str,
+        limit:i64,offset:i64)->Result<Vec<PendingMemberInvitation>>{
+        let actor=self.authorize(token,tenant,Capability::ManageUsers)?;
+        if !(1..=100).contains(&limit)||!(0..=100_000).contains(&offset){
+            return Err(AccountError::Invalid);
+        }
+        let mut stmt=self.db.prepare(
+            "SELECT i.id,i.tenant_id,i.email,i.role,i.expires_unix,i.created_at
+             FROM network_member_invitations i
+             WHERE i.tenant_id=?1 AND i.consumed_at IS NULL AND i.expires_unix>?2
+               AND (?3='owner' OR i.role='viewer')
+               AND NOT EXISTS (
+                   SELECT 1 FROM network_member_invitation_revocations v
+                   WHERE v.invitation_id=i.id
+               )
+             ORDER BY i.created_at DESC,i.id DESC LIMIT ?4 OFFSET ?5")?;
+        let rows=stmt.query_map(
+            params![tenant,Utc::now().timestamp(),actor.role.db(),limit,offset],
+            |r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+                r.get::<_,String>(2)?,r.get::<_,String>(3)?,
+                r.get::<_,i64>(4)?,r.get::<_,String>(5)?)))?;
+        let mut items=Vec::new();
+        for row in rows{
+            let (id,tenant_id,email,role,expires_unix,created_at)=row?;
+            items.push(PendingMemberInvitation{
+                id,tenant_id,email,role:Role::parse(&role)?,expires_unix,created_at,
+            });
+        }
+        Ok(items)
+    }
+    /// Immediately invalidate a single invitation without exposing its
+    /// bearer token. Revocation and audit must commit atomically.
+    pub fn revoke_member_invitation(&mut self,token:&str,tenant:&str,
+        invitation_id:&str)->Result<()>{
+        let actor=self.authorize(token,tenant,Capability::ManageUsers)?;
+        require_uuid(invitation_id)?;
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let target:Option<(String,Option<String>,i64)>=tx.query_row(
+            "SELECT role,consumed_at,expires_unix FROM network_member_invitations
+             WHERE id=?1 AND tenant_id=?2",
+            params![invitation_id,tenant],
+            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        let (role,consumed,expires)=target.ok_or(AccountError::Invitation)?;
+        if actor.role==Role::Admin && role!="viewer" {
+            return Err(AccountError::Forbidden);
+        }
+        let already_revoked:i64=tx.query_row(
+            "SELECT COUNT(*) FROM network_member_invitation_revocations
+             WHERE invitation_id=?1",[invitation_id],|r|r.get(0))?;
+        if already_revoked==1 {return Ok(());}
+        if consumed.is_some()||expires<=Utc::now().timestamp(){
+            return Err(AccountError::Invitation);
+        }
+        let now=Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT INTO network_member_invitation_revocations(invitation_id,revoked_at)
+             VALUES(?1,?2)",params![invitation_id,&now])?;
+        tx.execute(
+            "INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+             VALUES(?1,?2,'member_invitation_revoked',?3)",
+            params![tenant,&now,invitation_id])?;
+        tx.commit()?;
+        Ok(())
     }
     pub fn accept_invitation(&mut self,token:&str,password:&str)->Result<Principal>{
         if token.len()!=64||!token.bytes().all(|b|b.is_ascii_hexdigit()){
@@ -580,7 +663,10 @@ impl Accounts{
                 i.expires_unix,i.consumed_at
                 FROM network_member_invitations i
                 JOIN network_tenants t ON t.id=i.tenant_id
-                WHERE i.token_hash=?1",[digest(token)],
+                WHERE i.token_hash=?1 AND NOT EXISTS (
+                    SELECT 1 FROM network_member_invitation_revocations v
+                    WHERE v.invitation_id=i.id
+                )",[digest(token)],
             |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,
                 r.get(4)?,r.get(5)?,r.get(6)?))).optional()?;
         let (inv,tenant,email,role,state,expiry,consumed)=info.ok_or(AccountError::Invitation)?;
@@ -1031,5 +1117,65 @@ mod tests {
         acc.db.execute_batch("DROP TRIGGER deny_role_audit").unwrap();
         acc.update_member_role(&owner.token,&tenant,&member.user_id,Role::Viewer).unwrap();
         assert!(acc.authorize(&admin.token,&tenant,Capability::View).is_err());
+    }
+    #[test]
+    fn pending_invitation_list_and_revocation_enforce_tenant_roles_and_single_use(){
+        let (_tmp,a,b,mut acc)=init();
+        acc.bootstrap_owner(&a,"owner@site.test","owner-valid-password").unwrap();
+        acc.bootstrap_owner(&b,"other@site.test","other-valid-password").unwrap();
+        let owner=acc.sign_in(&a,"owner@site.test","owner-valid-password").unwrap();
+        let foreign=acc.sign_in(&b,"other@site.test","other-valid-password").unwrap();
+        let admin_invite=acc.invite_member(&owner.token,&a,
+            "admin@site.test",Role::Admin,600).unwrap();
+        let viewer_invite=acc.invite_member(&owner.token,&a,
+            "viewer@site.test",Role::Viewer,600).unwrap();
+        let manager=acc.accept_invitation(&admin_invite.token,"admin-valid-password").unwrap();
+        let admin=acc.sign_in(&a,&manager.email,"admin-valid-password").unwrap();
+        let pending=acc.list_pending_invitations(&owner.token,&a,10,0).unwrap();
+        assert_eq!(pending.len(),1);
+        assert_eq!(pending[0].id,viewer_invite.id);
+        assert!(acc.list_pending_invitations(&owner.token,&b,10,0).is_err());
+        assert!(matches!(acc.list_pending_invitations(&owner.token,&a,101,0),
+            Err(AccountError::Invalid)));
+        let admin_visible=acc.list_pending_invitations(&admin.token,&a,10,0).unwrap();
+        assert_eq!(admin_visible.len(),1);
+        let text=serde_json::to_string(&admin_visible).unwrap();
+        assert!(!text.contains(&viewer_invite.token));
+        assert!(!text.contains("tokenHash"));
+        assert!(acc.revoke_member_invitation(&foreign.token,&b,&viewer_invite.id).is_err());
+        assert!(acc.revoke_member_invitation(&admin.token,&a,&viewer_invite.id).is_ok());
+        assert!(acc.revoke_member_invitation(&admin.token,&a,&viewer_invite.id).is_ok());
+        assert!(acc.accept_invitation(&viewer_invite.token,"viewer-valid-password").is_err());
+        assert!(acc.list_pending_invitations(&owner.token,&a,10,0).unwrap().is_empty());
+        let audit:i64=acc.db.query_row(
+            "SELECT COUNT(*) FROM network_audit
+             WHERE tenant_id=?1 AND action='member_invitation_revoked'",
+            [&a],|r|r.get(0)).unwrap();
+        assert_eq!(audit,1);
+        let new_admin_invite=acc.invite_member(&owner.token,&a,
+            "another-admin@site.test",Role::Admin,600).unwrap();
+        assert!(matches!(acc.revoke_member_invitation(&admin.token,&a,
+            &new_admin_invite.id),Err(AccountError::Forbidden)));
+        acc.revoke_member_invitation(&owner.token,&a,&new_admin_invite.id).unwrap();
+        assert!(acc.accept_invitation(&new_admin_invite.token,"another-admin-secret").is_err());
+    }
+    #[test]
+    fn failed_revocation_audit_preserves_invitation_redeemability(){
+        let (_tmp,a,_b,mut acc)=init();
+        acc.bootstrap_owner(&a,"owner@site.test","owner-valid-password").unwrap();
+        let owner=acc.sign_in(&a,"owner@site.test","owner-valid-password").unwrap();
+        let invitation=acc.invite_member(&owner.token,&a,
+            "viewer@site.test",Role::Viewer,600).unwrap();
+        acc.db.execute_batch(
+            "CREATE TRIGGER deny_invite_revoke_audit BEFORE INSERT ON network_audit
+             WHEN NEW.action='member_invitation_revoked'
+             BEGIN SELECT RAISE(FAIL,'audit failure'); END;"
+        ).unwrap();
+        assert!(acc.revoke_member_invitation(&owner.token,&a,&invitation.id).is_err());
+        assert_eq!(acc.list_pending_invitations(&owner.token,&a,10,0).unwrap().len(),1);
+        acc.db.execute_batch("DROP TRIGGER deny_invite_revoke_audit").unwrap();
+        let accepted=acc.accept_invitation(&invitation.token,"viewer-valid-password").unwrap();
+        assert_eq!(accepted.role,Role::Viewer);
+        assert!(acc.revoke_member_invitation(&owner.token,&a,&invitation.id).is_err());
     }
 }

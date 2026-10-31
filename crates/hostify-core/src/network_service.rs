@@ -2,7 +2,7 @@
 //! registry. There is deliberately no HTTP listener, Cloudflare DNS mutation,
  //! or site execution API here. Operator provisioning is not publicly exposed.
 use crate::network::{Registry,NetworkError,Tenant,Invitation,Route,DeviceChallenge,Agent,AuditEntry,TenantUsage};
-use crate::network_auth::{Accounts,AccountError,Principal,Session,Role,Capability,MemberInvitation,TenantMember,ActiveSession};
+use crate::network_auth::{Accounts,AccountError,Principal,Session,Role,Capability,MemberInvitation,TenantMember,ActiveSession,PendingMemberInvitation};
 use std::path::Path;
 use thiserror::Error;
 
@@ -44,6 +44,14 @@ impl NetworkControlPlane{
     }
     pub fn invite_member(&mut self,token:&str,tenant:&str,email:&str,role:Role,ttl_seconds:i64)->Result<MemberInvitation>{
         Ok(self.accounts.invite_member(token,tenant,email,role,ttl_seconds)?)
+    }
+    pub fn list_pending_member_invitations(&self,token:&str,tenant:&str,
+        limit:i64,offset:i64)->Result<Vec<PendingMemberInvitation>>{
+        Ok(self.accounts.list_pending_invitations(token,tenant,limit,offset)?)
+    }
+    pub fn revoke_member_invitation(&mut self,token:&str,tenant:&str,
+        invitation_id:&str)->Result<()>{
+        Ok(self.accounts.revoke_member_invitation(token,tenant,invitation_id)?)
     }
     pub fn accept_member_invitation(&mut self,token:&str,password:&str)->Result<Principal>{
         Ok(self.accounts.accept_invitation(token,password)?)
