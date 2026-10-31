@@ -24,3 +24,7 @@ pub mod catalog;
 pub mod doctor;
 pub mod github_webhooks;
 pub mod diagnostics;
+
+pub mod network_auth;
+
+pub mod network_service;
