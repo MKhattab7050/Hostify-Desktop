@@ -108,9 +108,109 @@ pub async fn restore(engine: &Arc<Engine>, id: &str, snapshot_id: &str, confirm_
     }
 }
 
+
+#[derive(Clone,Debug,serde::Serialize,serde::Deserialize)]
+#[serde(rename_all="camelCase",default)]
+pub struct Schedule {
+    pub enabled: bool,
+    pub every_hours: u32,
+    pub last_run_unix: Option<i64>,
+    pub last_attempt_unix: Option<i64>,
+    pub paused_for_capacity: bool,
+}
+impl Default for Schedule {
+    fn default() -> Self {
+        Self { enabled:false,every_hours:24,last_run_unix:None,
+            last_attempt_unix:None,paused_for_capacity:false }
+    }
+}
+fn schedule_key(id:&str)->String { format!("snapshot-schedule:{id}") }
+pub fn schedule(engine:&Engine,id:&str)->Result<Schedule>{
+    engine.store.site(id)?;
+    Ok(match engine.store.saved(&schedule_key(id))? {
+        Some(v)=>serde_json::from_value(v)?, None=>Schedule::default()
+    })
+}
+pub fn configure_schedule(engine:&Engine,id:&str,enabled:bool,hours:u32)->Result<Value>{
+    engine.store.site(id)?;
+    if ![24,72,168].contains(&hours) { bail!("Choose 24, 72 or 168 hours."); }
+    let mut state=schedule(engine,id)?;
+    state.enabled=enabled;
+    state.every_hours=hours;
+    state.paused_for_capacity=false;
+    if enabled && state.last_attempt_unix.is_none() {
+        // Enabling does not silently take a potentially large first backup.
+        // The owner can create one immediately using Create Snapshot.
+        state.last_attempt_unix=Some(Utc::now().timestamp());
+    }
+    engine.store.save(&schedule_key(id),&json!(state))?;
+    engine.store.activity("info",Some(id),if enabled{
+        "Time Machine: periodic local file snapshots enabled. Database and off-site copies remain separate."
+    }else{"Time Machine: periodic file snapshots disabled."})?;
+    Ok(json!(state))
+}
+fn scheduled_due(s:&Schedule,now:i64,snapshot_count:usize)->bool{
+    if !s.enabled || s.paused_for_capacity || snapshot_count>=5{return false;}
+    let interval=(s.every_hours as i64).saturating_mul(3600);
+    let last=s.last_run_unix.unwrap_or(0).max(s.last_attempt_unix.unwrap_or(0));
+    now.saturating_sub(last)>=interval
+}
+pub fn spawn(engine:&Arc<Engine>)->tokio::task::JoinHandle<()>{
+    let weak=Arc::downgrade(engine);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30*60)).await;
+            let Some(engine)=weak.upgrade() else {return};
+            let Ok(sites)=engine.store.sites() else {continue};
+            for site in sites {
+                let Ok(mut schedule)=schedule(&engine,&site.id) else {continue};
+                if !schedule.enabled {continue;}
+                let Ok(records)=list(&engine,&site.id).await else {continue};
+                if records.as_array().is_some_and(|a|a.len()>=5) {
+                    if !schedule.paused_for_capacity {
+                        schedule.paused_for_capacity=true;
+                        let _=engine.store.save(&schedule_key(&site.id),&json!(schedule));
+                        let _=engine.store.activity("warn",Some(&site.id),
+                            "Time Machine: five retained snapshots reached; scheduling paused. Export and manage backups manually.");
+                    }
+                    continue;
+                }
+                if !scheduled_due(&schedule,Utc::now().timestamp(),
+                    records.as_array().map_or(0,Vec::len)){continue;}
+                // At most one attempt per schedule interval, including failure;
+                // never delete old archives automatically.
+                schedule.last_attempt_unix=Some(Utc::now().timestamp());
+                if engine.store.save(&schedule_key(&site.id),&json!(schedule)).is_err(){continue;}
+                match create(&engine,&site.id).await {
+                    Ok(_)=> {
+                        schedule.last_run_unix=Some(Utc::now().timestamp());
+                        let _=engine.store.save(&schedule_key(&site.id),&json!(schedule));
+                    }
+                    Err(_)=> {
+                        let _=engine.store.activity("warn",Some(&site.id),
+                            "Time Machine: scheduled snapshot postponed due to local resource or deployment issue.");
+                    }
+                }
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scheduling_is_opt_in_bounded_and_capacity_limited() {
+        let mut s=Schedule::default();
+        assert!(!scheduled_due(&s,500_000,0));
+        s.enabled=true;s.last_attempt_unix=Some(1000);
+        assert!(!scheduled_due(&s,1000+23*3600,0));
+        assert!(scheduled_due(&s,1000+24*3600,0));
+        assert!(!scheduled_due(&s,1000+48*3600,5));
+        s.paused_for_capacity=true;
+        assert!(!scheduled_due(&s,1000+168*3600,1));
+    }
+
     #[test]
     fn invalid_identifiers_cannot_escape_site_backup_directory() {
         let base=std::env::temp_dir();

@@ -62,6 +62,7 @@ let mysql = { setUp: false, running: false } as { setUp: boolean; running: boole
 let databases: ManagedDatabase[] = [];
 const backups = new Map<string, { file: string; sizeBytes: number; createdAt: string }[]>();
 const guardian = new Map<string, { enabled: boolean; consecutiveFailures: number; recoveryAttempts: number; lastResult: string }>();
+const snapshotSchedules = new Map<string, {enabled:boolean;everyHours:24|72|168;lastRunUnix:null;lastAttemptUnix:null;pausedForCapacity:boolean}>();
 const siteSnapshots = new Map<string, { id: string; siteId: string; siteKind: string; release: null; createdAt: string;
   fileCount: number; sourceBytes: number; archiveBytes: number; sha256: string;
   includesDatabase: false; includesSecrets: false; }[]>();
@@ -98,6 +99,13 @@ export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise
     case "build_app": { if (a.trustAcknowledged !== true) throw new Error("Explicit trust is required before building an application."); const id = "b" + Date.now(); builds.set(a.siteId, { at: Date.now(), fail: /fail/i.test(sites.find((s) => s.id === a.siteId)?.sourcePath ?? ""), id }); return r({ buildId: id }); }
     case "cancel_build": builds.delete(a.siteId); return r(undefined);
     case "get_build_status": return r(buildStatus(a.siteId));
+    case "site_snapshot_schedule": return r(snapshotSchedules.get(a.siteId) ?? {
+      enabled:false,everyHours:24,lastRunUnix:null,lastAttemptUnix:null,pausedForCapacity:false
+    });
+    case "set_site_snapshot_schedule": {
+      const state={enabled:!!a.enabled,everyHours:a.everyHours,lastRunUnix:null,lastAttemptUnix:null,pausedForCapacity:false};
+      snapshotSchedules.set(a.siteId,state);return r(state);
+    }
     case "create_site_snapshot": {
       const site = sites.find((s) => s.id === a.siteId);
       if (!site) throw new Error("Website not found");

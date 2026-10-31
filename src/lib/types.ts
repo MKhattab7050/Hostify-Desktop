@@ -110,3 +110,10 @@ export interface SiteSnapshot {
   fileCount: number; sourceBytes: number; archiveBytes: number; sha256: string;
   includesDatabase: false; includesSecrets: false;
 }
+
+/** Local file-only backup cadence; paused at five retained copies, never deleting automatically. */
+export interface SiteSnapshotSchedule {
+  enabled: boolean; everyHours: 24 | 72 | 168;
+  lastRunUnix: number | null; lastAttemptUnix: number | null;
+  pausedForCapacity: boolean;
+}

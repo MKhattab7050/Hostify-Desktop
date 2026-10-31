@@ -1,4 +1,4 @@
-import type { PublishPreflight, PublishDiagnostic, GuardianStatus, SiteSnapshot,
+import type { PublishPreflight, PublishDiagnostic, GuardianStatus, SiteSnapshot, SiteSnapshotSchedule,
   ActivityEntry, AppConfig, AppSettings, AppStatus, BuildStatus, CloudflareAccount, DatabaseBackup, DatabaseConnection, Deployment, DnsPlan, Domain, DomainCheck,
   EngineStatus, EnvVar, ComponentName, LogStream, ManagedDatabase, MysqlStatus, ProjectReport, RuntimeKind, RuntimeStatus, Site, SiteKind, SourceKind, SourceReport, SystemStats, TunnelHealth,
 } from "./types";
@@ -74,6 +74,9 @@ export const api = {
   buildApp: (siteId: string, trustAcknowledged: boolean) => call<{ buildId: string }>("build_app", { siteId, trustAcknowledged }),
   cancelBuild: (siteId: string) => call<void>("cancel_build", { siteId }),
   getBuildStatus: (siteId: string) => call<BuildStatus | null>("get_build_status", { siteId }),
+  siteSnapshotSchedule: (siteId: string) => call<SiteSnapshotSchedule>("site_snapshot_schedule", { siteId }),
+  setSiteSnapshotSchedule: (siteId: string, enabled: boolean, everyHours: 24 | 72 | 168) =>
+    call<SiteSnapshotSchedule>("set_site_snapshot_schedule", { siteId, enabled, everyHours }),
   createSiteSnapshot: (siteId: string) => call<SiteSnapshot>("create_site_snapshot", { siteId }),
   listSiteSnapshots: (siteId: string) => call<SiteSnapshot[]>("list_site_snapshots", { siteId }),
   verifySiteSnapshot: (siteId: string, snapshotId: string) => call<{ verified: boolean; snapshot: SiteSnapshot }>("verify_site_snapshot", { siteId, snapshotId }),

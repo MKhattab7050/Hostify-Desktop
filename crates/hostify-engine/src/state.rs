@@ -561,6 +561,7 @@ impl Engine {
             tasks.push(retry);
             if self.supervisor.is_some() {
                 tasks.push(crate::guardian::spawn(self));
+                tasks.push(crate::time_machine::spawn(self));
             }
         }
         for r in records {
@@ -803,6 +804,13 @@ impl Engine {
                 Ok(
                     json!({"restartRequired":changed && site.status!="stopped","rebuildRequired":rebuild}),
                 )
+            }
+            "site_snapshot_schedule" => {
+                Ok(json!(crate::time_machine::schedule(self,arg(&p,"siteId")?)?))
+            }
+            "set_site_snapshot_schedule" => {
+                crate::time_machine::configure_schedule(self,arg(&p,"siteId")?,
+                    boolean(&p,"enabled")?,number(&p,"everyHours",168)? as u32)
             }
             "create_site_snapshot" => {
                 crate::time_machine::create(self, arg(&p,"siteId")?).await
