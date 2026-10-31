@@ -154,7 +154,9 @@ async fn rejected_untrusted_start_does_not_patch_files_or_allocate_database() {
     let cfg = store.app_config(id).unwrap();
     let release = cfg.pending_release.clone().unwrap();
     let copied = store.root.join("sites").join(id).join("app").join(release);
-    let before_env = std::fs::read(copied.join(".env")).unwrap();
+    let before_env = std::fs::read(source.join(".env")).unwrap();
+    // Root .env files are deliberately excluded from imported releases.
+    assert!(!copied.join(".env").exists());
     let before_db = std::fs::read(copied.join("config/db.js")).unwrap();
 
     let preflight = engine.dispatch("publish_preflight", json!({"siteId":id})).await.unwrap();
@@ -166,7 +168,8 @@ async fn rejected_untrusted_start_does_not_patch_files_or_allocate_database() {
     let after = store.app_config(id).unwrap();
     assert!(after.trusted_release.is_none());
     assert!(after.built_release.is_none());
-    assert_eq!(std::fs::read(copied.join(".env")).unwrap(), before_env);
+    assert_eq!(std::fs::read(source.join(".env")).unwrap(), before_env);
+    assert!(!copied.join(".env").exists());
     assert_eq!(std::fs::read(copied.join("config/db.js")).unwrap(), before_db);
     assert!(store.db().unwrap().query_row(
         "SELECT COUNT(*) FROM managed_databases", [], |r| r.get::<_, i64>(0)

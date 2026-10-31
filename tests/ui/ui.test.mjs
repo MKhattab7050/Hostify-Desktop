@@ -215,7 +215,7 @@ await test("Fast Publish uses real project detection and requires DNS consent", 
   }
   await page.getByRole("checkbox", { name: /Authorize this domain/ }).check();
   await publish.click();
-  await page.getByText("The engine accepted the deployment. Public HTTPS must still be verified.").waitFor({ timeout: 15000 });
+  await page.getByText("Shared secure publishing engine").waitFor({ timeout: 15000 });
   await page.context().close();
 });
 

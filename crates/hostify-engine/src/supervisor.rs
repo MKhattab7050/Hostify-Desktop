@@ -1157,7 +1157,8 @@ impl Supervisor {
         // Only restart a database the user *already linked* to this site.
         if let Some(name) = self.mysql.linked_database(id).map_err(|e| e.to_string())? {
             self.mysql_start().await.map_err(|e| format!("Database {name} could not start: {e}"))?;
-            self.mysql.ensure_site_env(id, &name).map_err(|e| e.to_string())?;
+            // Never overwrite user environment settings during startup. Credentials are
+            // injected only after an explicit link action and updated on password rotation.
         }
         Ok(())
     }
