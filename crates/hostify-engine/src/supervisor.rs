@@ -2003,6 +2003,10 @@ impl Supervisor {
             .get(&key)
             .is_some_and(|w| !w.task.is_finished())
         {
+            // A deployment may add the public hostname after the local Node
+            // process is already running. Refresh Caddy, not the application.
+            let port = config.internal_port.ok_or("Running Node application has no assigned internal port.")?;
+            self.start_proxy(id, hostify_core::caddy::Backend::Proxy { port }).await?;
             return Ok(false);
         }
         if config.internal_port.is_none_or(|p| !port_available(p)) {
@@ -2164,6 +2168,16 @@ impl Supervisor {
             .iter()
             .any(|(k, w)| k.starts_with(&prefix) && !w.task.is_finished())
         {
+            // Keep already-running PHP workers; ensure Caddy knows the public
+            // Host added by the deployment journal.
+            let cwd = hostify_core::app_config::inside(root, &config.document_root)?;
+            if config.php_ports.is_empty() {
+                return Err("Running PHP application has no configured FastCGI ports.".into());
+            }
+            self.start_proxy(id, hostify_core::caddy::Backend::Php {
+                root: cwd,
+                upstreams: config.php_ports.clone(),
+            }).await?;
             return Ok(false);
         }
         let site = self.store.site(id).map_err(|e| e.to_string())?;
@@ -2465,6 +2479,12 @@ impl Supervisor {
                 Ok(started)
             }
             Err(error) => {
+                // If this is an already-running release, a routing refresh
+                // failure must not terminate the previously healthy app.
+                if !promoting && self.store.site(id).map(|site| site.status == "running").unwrap_or(false) {
+                    let _ = self.store.activity("error", Some(id), &format!("Website routing refresh failed; previous release preserved: {error}"));
+                    return Err(error);
+                }
                 self.stop_site(id).await?;
                 if promoting && let Some(previous) = old {
                     config.active_release = Some(previous.clone());
