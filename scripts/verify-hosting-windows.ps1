@@ -38,7 +38,11 @@ if (-not $HealthPath.StartsWith('/') -or $HealthPath.Contains([char]13) -or $Hea
 $hostnameLabels = $AllowedHostname.Split('.')
 $invalidLabels = @($hostnameLabels | Where-Object {
     $_.Length -lt 1 -or $_.Length -gt 63 -or
-    $_ -cnotmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?
+    $_ -cnotmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$'
+})
+if ($AllowedHostname.Length -gt 253 -or $hostnameLabels.Count -lt 2 -or $invalidLabels.Count -gt 0) {
+    throw 'AllowedHostname must be a valid DNS hostname.'
+}
 $binary = Join-Path $HostifyRoot 'bin/caddy.exe'
 if (Test-Path -LiteralPath $binary -PathType Leaf) {
     Add-Check 'caddy_binary' 'pass' 'The native Caddy executable is present.'
