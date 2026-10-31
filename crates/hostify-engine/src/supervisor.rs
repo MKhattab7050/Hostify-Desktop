@@ -1525,9 +1525,8 @@ mod recovery_tests {
         )
         .unwrap();
         let supervisor = Supervisor::new(store).unwrap();
-        // Windows may occupy ports in the dynamic 49k-60k range while
-        // the CI runner executes unrelated network tests in parallel.
-        // Choose a free metrics port; never terminate a foreign process.
+        // Windows may occupy ports in the dynamic range during parallel CI.
+        // Pick an unoccupied connector port without disturbing other processes.
         let id = (0..128)
             .map(|_| uuid::Uuid::new_v4().to_string())
             .find(|id| crate::port_available(metrics_port(id)))
