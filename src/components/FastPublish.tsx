@@ -43,16 +43,23 @@ async function readOnlyRetry<T>(task: () => Promise<T>, report: (text: string) =
 
 async function waitForBuild(siteId: string, report: (text: string) => void) {
   const deadline = Date.now() + 20 * 60_000;
+  let reportedDoneAt: number | undefined;
   while (Date.now() < deadline) {
     const status = await api.getBuildStatus(siteId);
     if (status?.state === "done") {
       const config = await api.getAppConfig(siteId);
       const release = config.builtRelease;
-      if (!release || release !== config.trustedRelease ||
-          (release !== config.pendingRelease && release !== config.activeRelease)) {
-        throw new Error("Build ended without a trusted, verified release. Publishing stopped.");
+      if (release && release === config.trustedRelease &&
+          (release === config.pendingRelease || release === config.activeRelease)) {
+        return;
       }
-      return;
+      // The engine can publish the build result slightly before its release
+      // metadata is committed. Wait briefly rather than falsely failing.
+      reportedDoneAt ??= Date.now();
+      if (Date.now() - reportedDoneAt > 15_000) {
+        throw new Error("Build finished without a trusted, committed release. Publishing stopped.");
+      }
+      report("Finalizing verified release metadata.");
     }
     if (status?.state === "failed" || status?.state === "cancelled") {
       throw new Error(status.detail || "Application build did not complete.");
