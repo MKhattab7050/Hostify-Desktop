@@ -209,18 +209,19 @@ impl Registry {
             id:Uuid::new_v4().to_string(),name:name.into(),
             max_devices:DEFAULT_DEVICES,max_hostnames:DEFAULT_HOSTNAMES
         };
-        self.db.execute(
+        let created_at=Utc::now().to_rfc3339();
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
             "INSERT INTO network_tenants(id,name,max_devices,max_hostnames,created_at)
                 VALUES(?1,?2,?3,?4,?5)",
-            params![tenant.id,tenant.name,tenant.max_devices,tenant.max_hostnames,Utc::now().to_rfc3339()]
+            params![tenant.id,tenant.name,tenant.max_devices,tenant.max_hostnames,&created_at]
         )?;
-        self.audit(&tenant.id,"tenant_created",&tenant.id)?;
+        // A tenant must not exist without its matching audit record.
+        tx.execute("INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+            VALUES(?1,?2,'tenant_created',?3)",
+            params![&tenant.id,&created_at,&tenant.id])?;
+        tx.commit()?;
         Ok(tenant)
-    }
-    fn audit(&self,tenant:&str,action:&str,subject:&str)->Result<()> {
-        self.db.execute("INSERT INTO network_audit(tenant_id,ts,action,subject_id)
-            VALUES(?1,?2,?3,?4)",params![tenant,Utc::now().to_rfc3339(),action,subject])?;
-        Ok(())
     }
     /// Call only from authenticated tenant-owner/administrator context.
     pub fn issue_invitation(&mut self, tenant:&str, ttl_seconds:i64)->Result<Invitation>{
@@ -230,11 +231,17 @@ impl Registry {
         // of unpredictable invitation material.
         let token=format!("{}{}",Uuid::new_v4().simple(),Uuid::new_v4().simple());
         let expires_unix=Utc::now().timestamp()+ttl_seconds;
-        self.db.execute("INSERT INTO network_invitations(id,tenant_id,token_hash,expires_unix,created_at)
+        let created_at=Utc::now().to_rfc3339();
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("INSERT INTO network_invitations(id,tenant_id,token_hash,expires_unix,created_at)
             VALUES(?1,?2,?3,?4,?5)",
-            params![Uuid::new_v4().to_string(),tenant,token_hash(&token),expires_unix,Utc::now().to_rfc3339()]
+            params![Uuid::new_v4().to_string(),tenant,token_hash(&token),expires_unix,&created_at]
         )?;
-        self.audit(tenant,"enrollment_invitation_issued","agent-pending")?;
+        // Audit insertion and invitation issuance succeed or roll back together.
+        tx.execute("INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+            VALUES(?1,?2,'enrollment_invitation_issued','agent-pending')",
+            params![tenant,&created_at])?;
+        tx.commit()?;
         Ok(Invitation{token,expires_unix})
     }
     /// The invitation proves temporary enrollment authorization only. Before
@@ -471,6 +478,32 @@ mod tests{
         assert!(challenge_text.contains("43"));
         assert!(!invite_text.contains(&enrollment.token));
         assert!(!challenge_text.contains(&challenge.value));
+    }
+    #[test]
+    fn audit_failure_cannot_leave_an_unlogged_tenant_or_device_invitation(){
+        let mut registry=Registry::memory("example.test").unwrap();
+        registry.db.execute_batch("
+            CREATE TRIGGER deny_tenant_audit BEFORE INSERT ON network_audit
+            WHEN NEW.action='tenant_created'
+            BEGIN SELECT RAISE(FAIL,'audit rejected'); END;
+        ").unwrap();
+        assert!(registry.create_tenant("Should Roll Back").is_err());
+        let tenants:i64=registry.db.query_row(
+            "SELECT COUNT(*) FROM network_tenants WHERE name='Should Roll Back'",
+            [],|r|r.get(0)).unwrap();
+        assert_eq!(tenants,0);
+        registry.db.execute_batch("DROP TRIGGER deny_tenant_audit;").unwrap();
+        let tenant=registry.create_tenant("Normal Tenant").unwrap();
+        registry.db.execute_batch("
+            CREATE TRIGGER deny_invite_audit BEFORE INSERT ON network_audit
+            WHEN NEW.action='enrollment_invitation_issued'
+            BEGIN SELECT RAISE(FAIL,'audit rejected'); END;
+        ").unwrap();
+        assert!(registry.issue_invitation(&tenant.id,120).is_err());
+        let invites:i64=registry.db.query_row(
+            "SELECT COUNT(*) FROM network_invitations WHERE tenant_id=?1",
+            [&tenant.id],|r|r.get(0)).unwrap();
+        assert_eq!(invites,0);
     }
     #[test]
     fn invitations_are_single_use_expiring_hashed_and_tenant_scoped(){
