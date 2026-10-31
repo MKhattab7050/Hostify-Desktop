@@ -29,6 +29,7 @@ All endpoints are JSON, have a 32 KiB body limit, disable caches, and return no 
 | `POST /v1/routes/reserve` | Admin Bearer | Reserves globally unique, **non-routable** hostname |
 | `POST /v1/agents/challenge` | Admin Bearer | Issues 30–300 second signed device challenge |
 | `POST /v1/agents/proof` | Signed Ed25519 challenge | Stores identity proof only, **not public routing** |
+| `POST /v1/accounts/provision` | Admin Bearer | Creates a tenant, its first owner, and the audit event in one atomic transaction |
 | `POST /v1/accounts/bootstrap` | Admin Bearer | Assigns first owner to an operator-created tenant, once only |
 | `POST /v1/auth/login` | Tenant ID + email + password | Creates a 12-hour hashed session; returns token only in response |
 | `POST /v1/auth/me` | Tenant session Bearer | Returns principal if session is active for the specified tenant |
