@@ -149,7 +149,7 @@ async fn request(port: u16, path: &str) -> String {
         socket
             .write_all(
                 format!(
-                    "GET {path} HTTP/1.1\r\nHost: foreign.example\r\nConnection: close\r\n\r\n"
+                    "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
                 )
                 .as_bytes(),
             )
@@ -224,7 +224,7 @@ async fn live_build_proxy_websocket_restart_updates_and_three_sites() {
         tokio::net::TcpStream::connect(("127.0.0.1", f.engine.store.site(&id).unwrap().local_port))
             .await
             .unwrap();
-    websocket.write_all(b"GET /socket HTTP/1.1\r\nHost: foreign.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").await.unwrap();
+    websocket.write_all(b"GET /socket HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").await.unwrap();
     let mut header = Vec::new();
     while !header.ends_with(b"\r\n\r\n") {
         let mut byte = [0];

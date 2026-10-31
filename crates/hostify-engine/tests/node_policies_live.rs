@@ -132,7 +132,7 @@ async fn get(port: u16, path: &str) -> String {
         socket
             .write_all(
                 format!(
-                    "GET {path} HTTP/1.1\r\nHost: foreign.example\r\nConnection: close\r\n\r\n"
+                    "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
                 )
                 .as_bytes(),
             )
