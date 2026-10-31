@@ -96,6 +96,36 @@ pub fn verify_push(event:&str,delivery_id:&str,signature:&str,body:&[u8],secret:
         branch:expected_branch.into(),commit_sha:sha.to_ascii_lowercase()})
 }
 
+
+/// A durable anti-replay claim for a push that has already passed HMAC and
+/// allowlist verification. Claiming is not authorization to fetch or execute
+/// code. Store the claim in the central controller's SQLite connection.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub enum DeliveryClaim { Fresh, Duplicate }
+
+pub fn claim_delivery(
+    db:&mut rusqlite::Connection,
+    push:&VerifiedPush,
+) -> std::result::Result<DeliveryClaim,rusqlite::Error> {
+    db.execute_batch("CREATE TABLE IF NOT EXISTS github_verified_deliveries (
+        delivery_id TEXT PRIMARY KEY,
+        repository TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        commit_sha TEXT NOT NULL,
+        accepted_at TEXT NOT NULL
+    );")?;
+    let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let inserted=tx.execute(
+        "INSERT OR IGNORE INTO github_verified_deliveries
+          (delivery_id,repository,branch,commit_sha,accepted_at)
+          VALUES (?1,?2,?3,?4,?5)",
+        rusqlite::params![push.delivery_id,push.repository,push.branch,push.commit_sha,
+            chrono::Utc::now().to_rfc3339()],
+    )?;
+    tx.commit()?;
+    Ok(if inserted==1 {DeliveryClaim::Fresh} else {DeliveryClaim::Duplicate})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +169,20 @@ mod tests {
             let sig=format!("sha256={}",hex::encode(hmac_sha256(&[42u8;32],&payload)));
             assert_eq!(verify(&payload,&sig,"company/project","main").unwrap_err(),WebhookError::Ignored);
         }
+    }
+    #[test]
+    fn same_delivery_can_be_claimed_only_once_and_survives_reopen() {
+        let dir=tempfile::tempdir().unwrap();
+        let database=dir.path().join("deliveries.db");
+        let (payload,sig)=fixture();
+        let push=verify(&payload,&sig,"company/project","main").unwrap();
+        {
+            let mut db=rusqlite::Connection::open(&database).unwrap();
+            assert_eq!(claim_delivery(&mut db,&push).unwrap(),DeliveryClaim::Fresh);
+            assert_eq!(claim_delivery(&mut db,&push).unwrap(),DeliveryClaim::Duplicate);
+        }
+        let mut db=rusqlite::Connection::open(&database).unwrap();
+        assert_eq!(claim_delivery(&mut db,&push).unwrap(),DeliveryClaim::Duplicate);
     }
     #[test]
     fn malformed_input_fails_closed(){
