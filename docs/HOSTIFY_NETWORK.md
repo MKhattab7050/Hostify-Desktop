@@ -1,6 +1,6 @@
 # Hostify Network: Commercial Multi-Tenant Hosting
 
-> **Status:** Domain and enrollment registry implemented in `hostify-core::network`. No public control plane, authenticated HTTP endpoints, device channel, billing, or production DNS provisioning is shipped yet. An enrolled device is **not** automatically routable.
+> **Status:** The domain/enrollment registry and a **loopback-only** development control plane (`hostify-control`) are implemented. Its administrator API listens only on `127.0.0.1`; it is **not** a public authenticated customer service. No production HTTPS gateway, tenant account integration/MFA, device channel, billing or live DNS provisioning is shipped. An enrolled device is **not** automatically routable. See [NETWORK_CONTROL_PLANE.md](NETWORK_CONTROL_PLANE.md).
 
 ## Product contract
 
