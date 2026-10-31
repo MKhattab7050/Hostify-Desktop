@@ -63,6 +63,11 @@ impl NetworkControlPlane{
     pub fn revoke_session(&mut self,token:&str,tenant:&str,session_id:&str)->Result<()>{
         Ok(self.accounts.revoke_session(token,tenant,session_id)?)
     }
+    /// Self-service sign-out across other devices or everywhere.
+    pub fn revoke_user_sessions(&mut self,token:&str,tenant:&str,
+        keep_current:bool)->Result<usize>{
+        Ok(self.accounts.revoke_user_sessions(token,tenant,keep_current)?)
+    }
     /// A successful rotation invalidates every existing session for this user.
     pub fn change_password(&mut self,token:&str,tenant:&str,
         current_password:&str,new_password:&str)->Result<()>{
