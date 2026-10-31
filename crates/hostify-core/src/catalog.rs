@@ -25,7 +25,7 @@ pub struct Template {
     pub requires_database: bool,
 }
 
-const PORTFOLIO: &str = r#"<!doctype html>
+const PORTFOLIO: &str = r##"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>My Portfolio</title><style>
 :root{color-scheme:dark;font-family:system-ui,sans-serif;background:#10161d;color:#eff5f6}
@@ -37,9 +37,9 @@ a{color:#84e2d1}nav{display:flex;gap:1.5rem;flex-wrap:wrap;margin-top:2rem}
 <p>Welcome to your self-hosted portfolio. Replace this introduction with your work, achievements, and contact details.</p>
 <nav><a href="mailto:hello@example.com">Contact me</a><a href="#projects">View projects</a></nav>
 <section id="projects"><h2>Selected work</h2><p>Add your projects here.</p></section>
-</main></body></html>"#;
+</main></body></html>"##;
 
-const RESTAURANT: &str = r#"<!doctype html><html lang="en">
+const RESTAURANT: &str = r##"<!doctype html><html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Corner Table | Local Kitchen</title><style>
 :root{font-family:Georgia,serif;background:#f7f3ea;color:#263326}
@@ -55,7 +55,7 @@ p{font-family:system-ui;line-height:1.7}a{color:#1c6e59}
 <a href="#menu">Explore the menu</a></section><section id="menu"><h2>Today's favorites</h2>
 <ul><li>Seasonal soup</li><li>Roasted vegetables</li><li>Freshly baked bread</li></ul>
 </section><section id="visit"><h2>Come by</h2><p>Replace this text with your address, hours and reservations.</p></section>
-</main><footer><p>© Corner Table. Make this website your own.</p></footer></body></html>"#;
+</main><footer><p>© Corner Table. Make this website your own.</p></footer></body></html>"##;
 
 const NODE_PACKAGE: &str = r#"{"name":"hostify-node-starter","private":true,"version":"1.0.0","scripts":{"start":"node server.cjs"},"engines":{"node":">=24 <27"}}"#;
 const NODE_SERVER: &str = r#"// Example API: no external packages, tokens or external network bindings.
