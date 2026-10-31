@@ -29,7 +29,8 @@ All endpoints are JSON, have a 32 KiB body limit, disable caches, and return no 
 | `POST /v1/routes/reserve` | Admin Bearer | Reserves globally unique, **non-routable** hostname |
 | `POST /v1/agents/challenge` | Admin Bearer | Issues 30–300 second signed device challenge |
 | `POST /v1/agents/proof` | Signed Ed25519 challenge | Stores identity proof only, **not public routing** |
-| `POST /v1/accounts/bootstrap` | Admin Bearer | Assigns first owner to an operator-created tenant, once only |
+| `POST /v1/accounts/provision` | Admin Bearer | Preferred developer onboarding: creates tenant, first owner and audit row atomically |
+| `POST /v1/accounts/bootstrap` | Admin Bearer | Legacy two-step developer flow: assigns first owner to an existing tenant, once only |
 | `POST /v1/auth/login` | Tenant ID + email + password | Creates a 12-hour hashed session; returns token only in response |
 | `POST /v1/auth/me` | Tenant session Bearer | Returns principal if session is active for the specified tenant |
 | `POST /v1/auth/logout` | Tenant session Bearer | Revokes session |
@@ -38,6 +39,8 @@ All endpoints are JSON, have a 32 KiB body limit, disable caches, and return no 
 | `POST /v1/tenant/invitations` | Tenant ManageDevices session | Issues one-use device enrollment invitation for own tenant |
 | `POST /v1/tenant/routes/reserve` | Tenant ManageSites session | Reserves a non-routable hostname for own tenant |
 | `POST /v1/tenant/agents/revoke` | Tenant ManageDevices session | Revokes own device and disables its reserved routes |
+
+For new operator-provisioned tenants, prefer `POST /v1/accounts/provision` with `name`, `email` and `password`. It rolls back the whole operation if owner creation or auditing fails. The old `POST /v1/tenants` plus `POST /v1/accounts/bootstrap` developer flow remains for compatibility but is not atomic across requests. **Neither is a public self-signup API.**
 
 Account login and single-use token redemption do not require an admin Bearer. All other account actions require either the operator secret or a tenant session with the appropriate role. A tenant session cannot reserve or revoke another tenant's resources.
 
