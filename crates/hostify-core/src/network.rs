@@ -44,18 +44,35 @@ pub struct Tenant {
     pub max_devices: i64,
     pub max_hostnames: i64,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Invitation {
     /// Display only once. Only the SHA-256 digest is stored in SQLite.
     pub token: String,
     pub expires_unix: i64,
 }
+/// Never reveal one-use credentials in panic contexts, error reports or logs.
+impl std::fmt::Debug for Invitation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Invitation")
+            .field("token", &"[REDACTED]")
+            .field("expires_unix", &self.expires_unix)
+            .finish()
+    }
+}
 /// Short-lived challenge returned once to the agent over an authenticated
 /// transport. Its raw value is never stored in the registry database.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DeviceChallenge {
     pub value: String,
     pub expires_unix: i64,
+}
+impl std::fmt::Debug for DeviceChallenge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceChallenge")
+            .field("value", &"[REDACTED]")
+            .field("expires_unix", &self.expires_unix)
+            .finish()
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -442,6 +459,19 @@ impl Registry {
 mod tests{
     use super::*;
     fn key(b:u8)->String {hex::encode([b;32])}
+    #[test]
+    fn debug_format_never_exposes_enrollment_or_proof_credentials(){
+        let enrollment=Invitation{token:"enrollment-only-secret".into(),expires_unix:42};
+        let challenge=DeviceChallenge{value:"proof-only-secret".into(),expires_unix:43};
+        let invite_text=format!("{enrollment:?}");
+        let challenge_text=format!("{challenge:?}");
+        assert!(invite_text.contains("[REDACTED]"));
+        assert!(challenge_text.contains("[REDACTED]"));
+        assert!(invite_text.contains("42"));
+        assert!(challenge_text.contains("43"));
+        assert!(!invite_text.contains(&enrollment.token));
+        assert!(!challenge_text.contains(&challenge.value));
+    }
     #[test]
     fn invitations_are_single_use_expiring_hashed_and_tenant_scoped(){
         let mut registry=Registry::memory("example.test").unwrap();
