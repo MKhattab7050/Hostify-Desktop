@@ -20,6 +20,8 @@ pub enum NetworkError {
     Unauthorized,
     #[error("enrollment invitation is expired or already consumed")]
     InvalidInvitation,
+    #[error("device challenge is invalid, expired, or already consumed")]
+    InvalidChallenge,
     #[error("tenant quota has been reached")]
     Quota,
     #[error("hostname already reserved")]
@@ -46,6 +48,13 @@ pub struct Tenant {
 pub struct Invitation {
     /// Display only once. Only the SHA-256 digest is stored in SQLite.
     pub token: String,
+    pub expires_unix: i64,
+}
+/// Short-lived challenge returned once to the agent over an authenticated
+/// transport. Its raw value is never stored in the registry database.
+#[derive(Clone, Debug)]
+pub struct DeviceChallenge {
+    pub value: String,
     pub expires_unix: i64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -141,6 +150,22 @@ impl Registry {
                 agent_id TEXT NOT NULL REFERENCES network_agents(id), site_id TEXT NOT NULL,
                 hostname TEXT NOT NULL UNIQUE, state TEXT NOT NULL DEFAULT 'reserved'
                     CHECK(state IN ('reserved','active','disabled')), created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS network_route_challenges(
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES network_tenants(id),
+                agent_id TEXT NOT NULL REFERENCES network_agents(id),
+                route_id TEXT NOT NULL REFERENCES network_routes(id),
+                challenge_hash TEXT NOT NULL UNIQUE,
+                expires_unix INTEGER NOT NULL,
+                consumed_at TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS network_agent_proofs(
+                route_id TEXT PRIMARY KEY REFERENCES network_routes(id),
+                tenant_id TEXT NOT NULL REFERENCES network_tenants(id),
+                agent_id TEXT NOT NULL REFERENCES network_agents(id),
+                verified_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS network_audit(
                 id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT NOT NULL,
@@ -272,6 +297,111 @@ impl Registry {
         tx.commit()?;
         Ok(Route{id,tenant_id:tenant.into(),agent_id:agent.into(),site_id:site.into(),hostname})
     }
+    /// This canonical challenge message binds the signature to a tenant,
+    /// exact device, reserved route and this network's DNS namespace.
+    /// No DNS or routing action follows from signing it.
+    pub fn challenge_message(&self,tenant:&str,agent:&str,route:&str,challenge:&str)->Result<Vec<u8>>{
+        for id in [tenant,agent,route] { require_uuid(id)?; }
+        if challenge.len()!=64 || !challenge.bytes().all(|b|b.is_ascii_hexdigit()) {
+            return Err(NetworkError::InvalidChallenge);
+        }
+        Ok(format!("HOSTIFY_DEVICE_ROUTE_PROOF_V1\n{}\n{}\n{}\n{}\n{}\n",
+            self.base_domain,tenant,agent,route,challenge).into_bytes())
+    }
+    /// Administrative action. A device with a valid enrollment token has no
+    /// privileges until it can prove possession of its Ed25519 private key.
+    pub fn issue_route_challenge(
+        &mut self,tenant:&str,agent:&str,route:&str,ttl_seconds:i64,
+    )->Result<DeviceChallenge>{
+        for id in [tenant,agent,route] {require_uuid(id)?;}
+        if !(30..=300).contains(&ttl_seconds){return Err(NetworkError::Invalid);}
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let eligible:i64=tx.query_row(
+            "SELECT COUNT(*) FROM network_routes r
+                JOIN network_agents a ON a.id=r.agent_id
+                JOIN network_tenants t ON t.id=r.tenant_id
+                WHERE r.id=?1 AND r.tenant_id=?2 AND r.agent_id=?3
+                AND r.state='reserved' AND a.revoked_at IS NULL AND t.state='active'",
+            params![route,tenant,agent],|r|r.get(0))?;
+        if eligible!=1{return Err(NetworkError::Ownership);}
+        let token=format!("{}{}",Uuid::new_v4().simple(),Uuid::new_v4().simple());
+        let now=Utc::now().timestamp();
+        let expires_unix=now+ttl_seconds;
+        tx.execute("INSERT INTO network_route_challenges
+            (id,tenant_id,agent_id,route_id,challenge_hash,expires_unix,created_at)
+            VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![Uuid::new_v4().to_string(),tenant,agent,route,token_hash(&token),
+                expires_unix,Utc::now().to_rfc3339()])?;
+        tx.commit()?;
+        Ok(DeviceChallenge{value:token,expires_unix})
+    }
+    /// Cryptographic identity check ONLY. A successful signature stores proof
+    /// for an authenticated gateway; it NEVER activates DNS or public routing.
+    pub fn verify_route_signature(
+        &mut self,tenant:&str,agent:&str,route:&str,challenge:&str,signature_hex:&str,
+    )->Result<()>{
+        let signed_message=self.challenge_message(tenant,agent,route,challenge)?;
+        let signature=hex::decode(signature_hex).map_err(|_|NetworkError::InvalidChallenge)?;
+        if signature.len()!=64{return Err(NetworkError::InvalidChallenge);}
+        let now=Utc::now().timestamp();
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let entry:Option<(String,String,String,String,i64,Option<String>)>=tx.query_row(
+            "SELECT id,tenant_id,agent_id,route_id,expires_unix,consumed_at
+                FROM network_route_challenges WHERE challenge_hash=?1",
+            [token_hash(challenge)],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,
+                r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
+        let (challenge_id,owner,device,target,expires,consumed)=
+            entry.ok_or(NetworkError::InvalidChallenge)?;
+        if owner!=tenant || device!=agent || target!=route ||
+            consumed.is_some() || expires<=now {
+            return Err(NetworkError::InvalidChallenge);
+        }
+        let public_key:Option<String>=tx.query_row(
+            "SELECT a.public_key_hex FROM network_agents a
+                JOIN network_routes r ON r.agent_id=a.id
+                JOIN network_tenants t ON t.id=a.tenant_id
+                WHERE a.id=?1 AND a.tenant_id=?2 AND r.id=?3
+                AND r.tenant_id=?2 AND r.state='reserved'
+                AND a.revoked_at IS NULL AND t.state='active'",
+            params![agent,tenant,route],|r|r.get(0)).optional()?;
+        let key=public_key.ok_or(NetworkError::Unauthorized)?;
+        let raw_key=hex::decode(key).map_err(|_|NetworkError::Invalid)?;
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519,&raw_key)
+            .verify(&signed_message,&signature).map_err(|_|NetworkError::Unauthorized)?;
+        let verified_at=Utc::now().to_rfc3339();
+        let affected=tx.execute(
+            "UPDATE network_route_challenges SET consumed_at=?1
+                WHERE id=?2 AND consumed_at IS NULL AND expires_unix>?3",
+            params![&verified_at,&challenge_id,now])?;
+        if affected!=1{return Err(NetworkError::InvalidChallenge);}
+        let inserted=tx.execute(
+            "INSERT OR IGNORE INTO network_agent_proofs(route_id,tenant_id,agent_id,verified_at)
+                VALUES(?1,?2,?3,?4)",
+            params![route,tenant,agent,&verified_at])?;
+        if inserted!=1{return Err(NetworkError::InvalidChallenge);}
+        tx.execute(
+            "INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+                VALUES(?1,?2,'device_identity_verified',?3)",
+            params![tenant,&verified_at,route])?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// This reads identity proof only; it is *not* a routable/public check.
+    /// A revoked device or disabled route invalidates the proof's usefulness.
+    pub fn has_verified_identity(&self,tenant:&str,agent:&str,route:&str)->Result<bool>{
+        for id in [tenant,agent,route]{require_uuid(id)?;}
+        let count:i64=self.db.query_row(
+            "SELECT COUNT(*) FROM network_agent_proofs p
+                JOIN network_agents a ON a.id=p.agent_id
+                JOIN network_routes r ON r.id=p.route_id
+                JOIN network_tenants t ON t.id=p.tenant_id
+                WHERE p.tenant_id=?1 AND p.agent_id=?2 AND p.route_id=?3
+                AND r.tenant_id=?1 AND r.agent_id=?2 AND r.state='reserved'
+                AND a.revoked_at IS NULL AND t.state='active'",
+            params![tenant,agent,route],|r|r.get(0))?;
+        Ok(count==1)
+    }
+
     /// Disabled/revoked agents must never appear as a routable destination.
     /// Only routes explicitly activated by a future mTLS/Ed25519 gateway
     /// may be returned here. Newly enrolled devices remain non-routable.
