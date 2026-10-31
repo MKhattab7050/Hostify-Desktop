@@ -19,7 +19,7 @@ The HTTP 421 foreign-host requirement, Windows ACLs, restricted OS user tokens, 
 ## Current limitations
 
 - The local site status is an in-memory process observation, not a fresh independent public health check.
-- Snapshot presence does not prove the content is restorable or copied off-device. Use the Time Machine checksum verification and separately test restoration.
+- Snapshot presence does not prove the content is restorable or copied off-device. The new snapshot writer stores ZIP members uncompressed so the importer's anti-compression-bomb policy does not reject valid repetitive content, and includes a real restore regression test. A file snapshot may still contain application-defined secrets even though the managed credential store and .env files are excluded. Use the Time Machine checksum verification and separately test restoration.
 - No independent authorization server, role separation, MFA, secret rotation or multi-tenant billing is implemented.
 - A malicious customer application is not sandboxed from another customer on the same Windows user identity.
 

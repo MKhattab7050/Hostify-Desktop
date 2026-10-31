@@ -108,7 +108,7 @@ export interface GuardianStatus {
 export interface SiteSnapshot {
   id: string; siteId: string; siteKind: string; release: string | null; createdAt: string;
   fileCount: number; sourceBytes: number; archiveBytes: number; sha256: string;
-  includesDatabase: false; includesSecrets: false;
+  includesDatabase: false; includesSecrets: false; mayContainSecrets: boolean;
 }
 
 /** Local file-only backup cadence; paused at five retained copies, never deleting automatically. */

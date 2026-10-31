@@ -75,7 +75,7 @@ export function TimeMachineCard({ sites }: { sites: Site[] }) {
         <Archive size={18} className="text-kelp" aria-hidden />
         <div>
           <h2 className="text-[16px] font-semibold">Time Machine · Website files</h2>
-          <p className="text-[12px] text-ink2">Versioned, checksum-verified local snapshots. MySQL databases, environment secrets and external storage are <strong>not included</strong>.</p>
+          <p className="text-[12px] text-ink2">Versioned, checksum-verified local snapshots. MySQL databases, managed credential-store secrets and external storage are <strong>not included</strong>. Other project files may contain secrets.</p>
         </div>
       </div>
       <p className="mb-3 flex items-start gap-2 rounded-ctl border border-lantern bg-lanternsoft p-3 text-[13px]">

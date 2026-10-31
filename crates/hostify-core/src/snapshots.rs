@@ -46,7 +46,12 @@ pub struct Manifest {
     pub sha256: String,
     pub includes_database: bool,
     pub includes_secrets: bool,
+    /// Raw source files may contain application-specific secrets. False is never
+    /// inferred from excluding known .env/credential-store entries.
+    #[serde(default = "default_true")]
+    pub may_contain_secrets: bool,
 }
+fn default_true() -> bool { true }
 
 fn identifier(id: &str) -> Result<(), Error> {
     Uuid::parse_str(id).map(|_| ()).map_err(|_| Error::InvalidId)
@@ -82,6 +87,9 @@ fn files(source: &Path, rel: &Path, output: &mut Vec<(PathBuf,String,u64)>, byte
             if *bytes > MAX_SOURCE_BYTES || output.len() as u64 >= MAX_FILES { return Err(Error::Limit); }
             let archive_name = child.components().map(|c| c.as_os_str().to_str().ok_or(Error::Path))
                 .collect::<Result<Vec<_>,_>>()?.join("/");
+            // Don't create backups whose filenames the existing safe importer
+            // would later reject during an attempted restore.
+            crate::import::safe_name(&archive_name).map_err(|_| Error::Path)?;
             output.push((child,archive_name,meta.len()));
         } else { return Err(Error::Link); }
     }
@@ -121,11 +129,21 @@ pub fn create(source: &Path, base: &Path, site_id: &str, site_kind: &str, releas
         let mut zip=ZipWriter::new(f);
         for (rel,name,size) in &list {
             let options=SimpleFileOptions::default()
-                .compression_method(CompressionMethod::Deflated)
+                // The importer refuses ZIP members with a compression ratio
+                // above 200:1. Store uncompressed bytes so legitimate highly
+                // repetitive files can always be restored from snapshots.
+                .compression_method(CompressionMethod::Stored)
                 .large_file(*size > u32::MAX as u64);
             zip.start_file(name,options)?;
-            let mut from=File::open(source.join(rel))?;
-            io::copy(&mut from,&mut zip)?;
+            let source_file=source.join(rel);
+            let scanned=safe_metadata(&source_file)?;
+            if scanned.len()!=*size { return Err(Error::Integrity); }
+            // Use the same hardened source-file open policy as the importer:
+            // reject leaf junction swaps and changed files before reading.
+            let mut from=crate::import::open_regular(&source_file,&scanned)
+                .map_err(|_| Error::Integrity)?;
+            let copied=io::copy(&mut from,&mut zip)?;
+            if copied!=*size { return Err(Error::Integrity); }
         }
         let f=zip.finish()?;
         f.sync_all()?;
@@ -135,7 +153,7 @@ pub fn create(source: &Path, base: &Path, site_id: &str, site_kind: &str, releas
             id:id.clone(),site_id:site_id.into(),site_kind:site_kind.into(),
             release:release.map(str::to_owned),created_at:Utc::now().to_rfc3339(),
             file_count:list.len() as u64,source_bytes:bytes,archive_bytes,sha256:hash,
-            includes_database:false,includes_secrets:false,
+            includes_database:false,includes_secrets:false,may_contain_secrets:true,
         };
         let metadata=dir.join(format!(".{id}.json.partial"));
         fs::write(&metadata,serde_json::to_vec_pretty(&manifest)?)?;
@@ -196,6 +214,7 @@ mod tests {
         let root=temp.path().join("backups");
         let record=create(&source,&root,&site_id,"static",None).unwrap();
         assert!(!record.includes_database && !record.includes_secrets);
+        assert!(record.may_contain_secrets);
         assert_eq!(record.file_count,2);
         assert_eq!(list(&root,&site_id).unwrap().len(),1);
         let p=archive(&root,&site_id,&record.id).unwrap();
@@ -205,6 +224,20 @@ mod tests {
         read(&root,&site_id,&record.id).unwrap();
         fs::write(&p,b"tampered").unwrap();
         assert!(matches!(read(&root,&site_id,&record.id),Err(Error::Integrity)));
+    }
+    #[test]
+    fn repetitive_content_snapshot_can_be_restored_by_the_real_importer() {
+        let temp=tempfile::tempdir().unwrap();
+        let source=temp.path().join("repetitive");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("index.html"),vec![b'A'; 1024*1024]).unwrap();
+        let site=Uuid::new_v4().to_string();
+        let record=create(&source,&temp.path().join("snapshots"),&site,"static",None).unwrap();
+        let archive=archive(&temp.path().join("snapshots"),&site,&record.id).unwrap();
+        let dest=temp.path().join("hosted");
+        let restored=crate::import::import(&archive,"zip",&dest).unwrap();
+        assert_eq!(restored.file_count,1);
+        assert_eq!(fs::metadata(dest.join("current/index.html")).unwrap().len(),1024*1024);
     }
     #[test]
     fn rejects_symlinks_limits_and_path_traversal() {
