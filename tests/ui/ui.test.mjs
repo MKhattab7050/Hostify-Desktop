@@ -221,7 +221,9 @@ await test("Fast Publish uses real project detection and requires DNS consent", 
 
 await test("Fast Publish never executes dynamic code without explicit trust", async () => {
   const page = await open();
-  await page.addInitScript(() => { window.__hostifyMockPath = "C:/hostify/node-express-project"; });
+  // The page is already loaded: addInitScript runs on the next navigation,
+  // so set the mock path immediately for this test.
+  await page.evaluate(() => { window.__hostifyMockPath = "C:/hostify/node-express-project"; });
   await page.getByRole("button", { name: "Add website" }).first().click();
   await page.getByRole("button", { name: /Fast Publish/ }).click();
   await page.getByRole("button", { name: "Choose folder" }).click();
