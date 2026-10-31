@@ -340,6 +340,51 @@ impl Accounts{
             params![Utc::now().to_rfc3339(),digest(token)])?;
         Ok(())
     }
+    /// Change the current member's password only after checking the existing
+    /// credential. Revoke every previous session and audit the action atomically.
+    /// The caller must sign in again; no password or token enters the audit log.
+    pub fn change_password(&mut self,token:&str,tenant:&str,
+        current_password:&str,new_password:&str)->Result<()>{
+        let principal=self.authorize(token,tenant,Capability::View)?;
+        validate_password(new_password)?;
+        let (new_salt,new_hash)=hash_password(new_password)?;
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Recheck the active session inside the write transaction so a
+        // concurrent administrator revocation cannot authorize this change.
+        let old:Option<(String,String)>=tx.query_row(
+            "SELECT u.salt,u.password_hash FROM network_users u
+             JOIN network_sessions s ON s.user_id=u.id AND s.tenant_id=u.tenant_id
+             JOIN network_tenants t ON t.id=u.tenant_id
+             WHERE u.id=?1 AND u.tenant_id=?2 AND s.token_hash=?3
+               AND s.revoked_at IS NULL AND s.expires_unix>?4
+               AND u.status='active' AND t.state='active'",
+            params![&principal.user_id,tenant,digest(token),Utc::now().timestamp()],
+            |r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let (old_salt,old_hash)=old.ok_or(AccountError::Authentication)?;
+        if !correct_password(current_password,&old_salt,&old_hash) {
+            return Err(AccountError::Authentication);
+        }
+        if correct_password(new_password,&old_salt,&old_hash) {
+            return Err(AccountError::Invalid);
+        }
+        let now=Utc::now().to_rfc3339();
+        let changed=tx.execute(
+            "UPDATE network_users SET salt=?1,password_hash=?2,
+                failed_attempts=0,locked_until_unix=0
+             WHERE id=?3 AND tenant_id=?4 AND status='active'",
+            params![new_salt,new_hash,&principal.user_id,tenant])?;
+        if changed!=1{return Err(AccountError::Authentication);}
+        tx.execute(
+            "UPDATE network_sessions SET revoked_at=?1
+             WHERE tenant_id=?2 AND user_id=?3 AND revoked_at IS NULL",
+            params![&now,tenant,&principal.user_id])?;
+        tx.execute(
+            "INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+             VALUES(?1,?2,'password_changed',?3)",
+            params![tenant,&now,&principal.user_id])?;
+        tx.commit()?;
+        Ok(())
+    }
     /// List members of exactly one tenant. A viewer cannot enumerate accounts,
     /// including disabled ones. Credentials and failure counters never leave
     /// the account store through this result.
@@ -735,5 +780,57 @@ mod tests {
         for key in ["passwordHash","salt","token","failedAttempts","lockedUntilUnix"] {
             assert!(item.get(key).is_none());
         }
+    }
+    #[test]
+    fn password_change_revokes_all_sessions_and_never_leaks_credentials(){
+        let (tmp,tenant,other,mut acc)=init();
+        acc.bootstrap_owner(&tenant,"owner@site.test","initial-owner-password").unwrap();
+        let session1=acc.sign_in(&tenant,"owner@site.test","initial-owner-password").unwrap();
+        let session2=acc.sign_in(&tenant,"owner@site.test","initial-owner-password").unwrap();
+        assert!(acc.change_password(&session1.token,&other,
+            "initial-owner-password","replacement-owner-password").is_err());
+        assert!(matches!(acc.change_password(&session1.token,&tenant,
+            "wrong-current-password","replacement-owner-password"),
+            Err(AccountError::Authentication)));
+        assert!(matches!(acc.change_password(&session1.token,&tenant,
+            "initial-owner-password","initial-owner-password"),
+            Err(AccountError::Invalid)));
+        assert!(acc.authorize(&session2.token,&tenant,Capability::View).is_ok());
+        acc.change_password(&session1.token,&tenant,
+            "initial-owner-password","replacement-owner-password").unwrap();
+        assert!(acc.authorize(&session1.token,&tenant,Capability::View).is_err());
+        assert!(acc.authorize(&session2.token,&tenant,Capability::View).is_err());
+        assert!(acc.sign_in(&tenant,"owner@site.test","initial-owner-password").is_err());
+        let new_session=acc.sign_in(&tenant,"owner@site.test","replacement-owner-password").unwrap();
+        assert!(acc.authorize(&new_session.token,&tenant,Capability::View).is_ok());
+        let subject:String=acc.db.query_row(
+            "SELECT subject_id FROM network_audit
+             WHERE tenant_id=?1 AND action='password_changed'",
+            [&tenant],|row|row.get(0)).unwrap();
+        assert_eq!(subject,session1.principal.user_id);
+        let file=std::fs::read(tmp.path().join("control-plane.db")).unwrap();
+        for secret in ["initial-owner-password","replacement-owner-password",
+            session1.token.as_str(),session2.token.as_str()] {
+            assert!(!file.windows(secret.len()).any(|window|window==secret.as_bytes()));
+        }
+    }
+    #[test]
+    fn password_change_audit_failure_rolls_back_password_and_session_revocation(){
+        let (_tmp,tenant,_other,mut acc)=init();
+        acc.bootstrap_owner(&tenant,"owner@site.test","initial-owner-password").unwrap();
+        let session=acc.sign_in(&tenant,"owner@site.test","initial-owner-password").unwrap();
+        acc.db.execute_batch(
+            "CREATE TRIGGER deny_password_audit BEFORE INSERT ON network_audit
+             WHEN NEW.action='password_changed'
+             BEGIN SELECT RAISE(FAIL,'simulated audit failure'); END;"
+        ).unwrap();
+        assert!(acc.change_password(&session.token,&tenant,
+            "initial-owner-password","replacement-owner-password").is_err());
+        assert!(acc.authorize(&session.token,&tenant,Capability::View).is_ok());
+        assert!(acc.sign_in(&tenant,"owner@site.test","replacement-owner-password").is_err());
+        assert!(acc.sign_in(&tenant,"owner@site.test","initial-owner-password").is_ok());
+        acc.db.execute_batch("DROP TRIGGER deny_password_audit").unwrap();
+        acc.change_password(&session.token,&tenant,
+            "initial-owner-password","replacement-owner-password").unwrap();
     }
 }
