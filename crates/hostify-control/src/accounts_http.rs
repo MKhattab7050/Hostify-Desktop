@@ -125,7 +125,7 @@ impl AccountApi{
                     let p:RoleUpdate=parse(body)?;
                     accounts.update_member_role(session_token(auth)?,&p.tenant_id,
                         &p.user_id,p.role).map_err(map_account_error)?;
-                    Ok(json!({"updated":true,"targetSessionsRevoked":true}))
+                    Ok(json!({"accepted":true}))
                 },
                 "/v1/members/disable"=>{
                     let p:Disable=parse(body)?;
@@ -364,7 +364,7 @@ mod tests {
             StatusCode::FORBIDDEN);
         let (status,changed)=post("/v1/members/role/update",Some(&owner_auth),false,payload);
         assert_eq!(status,StatusCode::OK);
-        assert_eq!(changed["targetSessionsRevoked"],true);
+        assert_eq!(changed["accepted"],true);
         assert_eq!(post("/v1/auth/me",Some(&admin_auth),false,
             json!({"tenantId":tenant.id})).0,StatusCode::UNAUTHORIZED);
         drop(post);drop(api);drop(registry);
