@@ -33,8 +33,9 @@ enum Decision { Skip, Observe, Cooldown, Recover }
 
 /// Restrict automatic intervention to opted-in, formerly-running services.
 /// A manually stopped or disabled site must never be restarted by Guardian.
+/// A previously authorized site that enters the error state may recover.
 fn decision(s: &GuardianSnapshot, site_status: &str, auto_start: bool, now: i64) -> Decision {
-    if !s.enabled || !auto_start || site_status != "running" { return Decision::Skip; }
+    if !s.enabled || !auto_start || !matches!(site_status, "running" | "error") { return Decision::Skip; }
     if s.consecutive_failures < FAILURE_THRESHOLD { return Decision::Observe; }
     if s.last_restart_unix.is_some_and(|previous| now.saturating_sub(previous) < RESTART_COOLDOWN) {
         return Decision::Cooldown;
@@ -72,7 +73,7 @@ pub async fn check(engine: &Arc<Engine>, id: &str) -> Result<Value> {
     let site = engine.store.site(id)?;
     let mut snapshot = load(engine, id)?;
     snapshot.last_checked_at = Some(Utc::now().to_rfc3339());
-    if !snapshot.enabled || !site.auto_start || site.status != "running" {
+    if !snapshot.enabled || !site.auto_start || !matches!(site.status.as_str(), "running" | "error") {
         snapshot.last_result = Some("Monitoring paused (disabled, manually stopped or not running)".into());
         snapshot.consecutive_failures = 0;
         engine.store.save(&key(id), &json!(snapshot))?;
@@ -157,6 +158,7 @@ mod tests {
         assert_eq!(decision(&s,"stopped",true,100), Decision::Skip);
         assert_eq!(decision(&s,"running",false,100), Decision::Skip);
         assert_eq!(decision(&s,"starting",true,100), Decision::Skip);
+        assert_eq!(decision(&s,"error",true,100), Decision::Recover);
     }
     #[test]
     fn requires_repeated_failures_and_cooldown() {
@@ -164,6 +166,7 @@ mod tests {
         assert_eq!(decision(&s,"running",true,1000), Decision::Observe);
         s.consecutive_failures = 3;
         assert_eq!(decision(&s,"running",true,1000), Decision::Recover);
+        assert_eq!(decision(&s,"error",true,1000), Decision::Recover);
         s.last_restart_unix = Some(1000);
         assert_eq!(decision(&s,"running",true,1001), Decision::Cooldown);
         assert_eq!(decision(&s,"running",true,1899), Decision::Cooldown);
