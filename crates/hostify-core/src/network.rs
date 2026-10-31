@@ -102,6 +102,20 @@ pub struct AuditEntry {
     pub subject_id: String,
 }
 
+/// Read-only quota snapshot. Counts represent reservations and enrollments,
+/// not public web traffic, subscriptions, billing or verified reachability.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TenantUsage {
+    pub tenant_id: String,
+    pub max_devices: i64,
+    pub active_devices: i64,
+    pub remaining_devices: i64,
+    pub max_hostnames: i64,
+    pub reserved_hostnames: i64,
+    pub remaining_hostnames: i64,
+    pub publicly_routable: bool,
+}
 /// Only the central server may instantiate this registry with its own DB.
 /// Never use this registry as a substitute for authenticated API authorization.
 pub struct Registry {
@@ -242,6 +256,31 @@ impl Registry {
             "SELECT state FROM network_tenants WHERE id=?1",[id],|r|r.get(0)).optional()?;
         if active.as_deref()!=Some("active") {return Err(NetworkError::Unauthorized);}
         Ok(())
+    }
+    /// Return effective quotas and reservation counts for one active tenant.
+    /// Outer service must authorize the tenant session. Keep count filters
+    /// identical to enrollment/reservation quota checks.
+    pub fn tenant_usage(&self,tenant:&str)->Result<TenantUsage>{
+        self.ensure_tenant(tenant)?;
+        let (max_devices,max_hostnames):(i64,i64)=self.db.query_row(
+            "SELECT max_devices,max_hostnames FROM network_tenants
+             WHERE id=?1 AND state='active'",[tenant],
+            |r|Ok((r.get(0)?,r.get(1)?)))?;
+        let active_devices:i64=self.db.query_row(
+            "SELECT COUNT(*) FROM network_agents
+             WHERE tenant_id=?1 AND revoked_at IS NULL",
+            [tenant],|r|r.get(0))?;
+        let reserved_hostnames:i64=self.db.query_row(
+            "SELECT COUNT(*) FROM network_routes
+             WHERE tenant_id=?1 AND state IN ('reserved','active')",
+            [tenant],|r|r.get(0))?;
+        Ok(TenantUsage{
+            tenant_id:tenant.to_owned(),max_devices,active_devices,
+            remaining_devices:max_devices.saturating_sub(active_devices).max(0),
+            max_hostnames,reserved_hostnames,
+            remaining_hostnames:max_hostnames.saturating_sub(reserved_hostnames).max(0),
+            publicly_routable:false,
+        })
     }
     /// Central-only security audit feed. This method enforces the tenant
     /// filter but NOT the calling user's role. The outer service must require
@@ -809,5 +848,38 @@ mod tests{
         assert!(r.lookup_active_route(&hostname).unwrap().is_none());
         r.revoke_agent(&tenant,&agent).unwrap();
         assert!(r.lookup_active_route(&hostname).unwrap().is_none());
+    }
+    #[test]
+    fn quota_usage_counts_active_devices_and_reserved_hostnames_per_tenant(){
+        let mut registry=Registry::memory("example.test").unwrap();
+        let a=registry.create_tenant("A").unwrap();
+        let b=registry.create_tenant("B").unwrap();
+        let initial=registry.tenant_usage(&a.id).unwrap();
+        assert_eq!(initial.max_devices,DEFAULT_DEVICES);
+        assert_eq!(initial.remaining_devices,DEFAULT_DEVICES);
+        assert_eq!(initial.max_hostnames,DEFAULT_HOSTNAMES);
+        assert_eq!(initial.remaining_hostnames,DEFAULT_HOSTNAMES);
+        assert!(!initial.publicly_routable);
+        let ia=registry.issue_invitation(&a.id,120).unwrap();
+        let ib=registry.issue_invitation(&b.id,120).unwrap();
+        let da=registry.enroll_agent(&ia.token,&key(41)).unwrap();
+        registry.enroll_agent(&ib.token,&key(42)).unwrap();
+        registry.reserve_hostname(&a.id,&da.id,&Uuid::new_v4().to_string(),"usage-one").unwrap();
+        let usage=registry.tenant_usage(&a.id).unwrap();
+        assert_eq!(usage.active_devices,1);
+        assert_eq!(usage.remaining_devices,DEFAULT_DEVICES-1);
+        assert_eq!(usage.reserved_hostnames,1);
+        assert_eq!(usage.remaining_hostnames,DEFAULT_HOSTNAMES-1);
+        assert_eq!(registry.tenant_usage(&b.id).unwrap().reserved_hostnames,0);
+        assert!(registry.tenant_usage("not-a-tenant").is_err());
+        registry.revoke_agent(&a.id,&da.id).unwrap();
+        let after=registry.tenant_usage(&a.id).unwrap();
+        assert_eq!(after.active_devices,0);
+        assert_eq!(after.reserved_hostnames,0);
+        assert_eq!(after.remaining_devices,DEFAULT_DEVICES);
+        assert_eq!(after.remaining_hostnames,DEFAULT_HOSTNAMES);
+        registry.db.execute(
+            "UPDATE network_tenants SET state='suspended' WHERE id=?1",[&a.id]).unwrap();
+        assert!(registry.tenant_usage(&a.id).is_err());
     }
 }
