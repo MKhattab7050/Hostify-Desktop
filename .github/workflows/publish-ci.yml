@@ -79,13 +79,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Tauri installer build failed' }
           $bundles = @(Get-ChildItem -LiteralPath 'target/release/bundle/nsis' -Filter '*.exe' -File -ErrorAction Stop)
           if ($bundles.Count -ne 1) { throw "Expected one NSIS installer, found $($bundles.Count)" }
-          Write-Host "Built unsigned candidate: $($bundles[0].Name)"
+          $sha256 = (Get-FileHash -LiteralPath $bundles[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $manifest = Join-Path 'target/release/bundle/nsis' 'SHA256SUMS.txt'
+          [System.IO.File]::WriteAllText($manifest, "$sha256  $($bundles[0].Name)`n", [System.Text.UTF8Encoding]::new($false))
+          Write-Host "Built unsigned candidate: $($bundles[0].Name) ($sha256)"
       - name: Upload unsigned Windows installer artifact
         if: github.event_name == 'push' && github.ref == 'refs/heads/release/v2-rc1'
         uses: actions/upload-artifact@v4
         with:
           name: Hostify-V2-RC-Windows-unsigned
-          path: target/release/bundle/nsis/*.exe
+          path: |
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/nsis/SHA256SUMS.txt
           retention-days: 7
           if-no-files-found: error
 
