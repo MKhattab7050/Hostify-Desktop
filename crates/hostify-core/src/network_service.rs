@@ -2,7 +2,7 @@
 //! registry. There is deliberately no HTTP listener, Cloudflare DNS mutation,
  //! or site execution API here. Operator provisioning is not publicly exposed.
 use crate::network::{Registry,NetworkError,Tenant,Invitation,Route,DeviceChallenge,Agent,AuditEntry};
-use crate::network_auth::{Accounts,AccountError,Principal,Session,Role,Capability,MemberInvitation};
+use crate::network_auth::{Accounts,AccountError,Principal,Session,Role,Capability,MemberInvitation,TenantMember};
 use std::path::Path;
 use thiserror::Error;
 
@@ -47,6 +47,10 @@ impl NetworkControlPlane{
     }
     pub fn accept_member_invitation(&mut self,token:&str,password:&str)->Result<Principal>{
         Ok(self.accounts.accept_invitation(token,password)?)
+    }
+    /// Management-only member roster with bounded, tenant-local pagination.
+    pub fn list_members(&self,token:&str,tenant:&str,limit:i64,offset:i64)->Result<Vec<TenantMember>>{
+        Ok(self.accounts.list_members(token,tenant,limit,offset)?)
     }
     /// Read-only inventory requires an active tenant session, including for
     /// viewers. Core Registry methods alone do not establish authorization.
