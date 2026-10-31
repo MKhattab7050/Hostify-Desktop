@@ -39,6 +39,10 @@ forward! {
     set_app_config(site_id: String => "siteId", config: Value => "config", node_version: Option<String> => "nodeVersion", php_version: Option<String> => "phpVersion");
     build_app(site_id: String => "siteId", trust_acknowledged: bool => "trustAcknowledged");
     cancel_build(site_id: String => "siteId"); get_build_status(site_id: String => "siteId");
+    create_site_snapshot(site_id: String => "siteId");
+    list_site_snapshots(site_id: String => "siteId");
+    verify_site_snapshot(site_id: String => "siteId", snapshot_id: String => "snapshotId");
+    restore_site_snapshot(site_id: String => "siteId", snapshot_id: String => "snapshotId", confirm_name: String => "confirmName");
     guardian_status(site_id: String => "siteId");
     guardian_enable(site_id: String => "siteId", enabled: bool => "enabled");
     guardian_check_now(site_id: String => "siteId");
@@ -193,6 +197,10 @@ pub fn run() {
             cancel_build,
             get_build_status,
             app_status,
+            create_site_snapshot,
+            list_site_snapshots,
+            verify_site_snapshot,
+            restore_site_snapshot,
             guardian_status,
             guardian_enable,
             guardian_check_now,

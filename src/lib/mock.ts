@@ -62,6 +62,9 @@ let mysql = { setUp: false, running: false } as { setUp: boolean; running: boole
 let databases: ManagedDatabase[] = [];
 const backups = new Map<string, { file: string; sizeBytes: number; createdAt: string }[]>();
 const guardian = new Map<string, { enabled: boolean; consecutiveFailures: number; recoveryAttempts: number; lastResult: string }>();
+const siteSnapshots = new Map<string, { id: string; siteId: string; siteKind: string; release: null; createdAt: string;
+  fileCount: number; sourceBytes: number; archiveBytes: number; sha256: string;
+  includesDatabase: false; includesSecrets: false; }[]>();
 function inspect(path: string): ProjectReport {
   const node = /node|express|socket/i.test(path); const php = /php|wordpress/i.test(path);
   return { siteKind: node ? "node" : php ? "php" : "static", framework: /socket/i.test(path) ? "socket.io" : /express|node/i.test(path) ? "express" : /wordpress/i.test(path) ? "wordpress" : null, name: null, engines: null,
@@ -95,6 +98,24 @@ export async function mock<T>(cmd: string, a: Record<string, any> = {}): Promise
     case "build_app": { if (a.trustAcknowledged !== true) throw new Error("Explicit trust is required before building an application."); const id = "b" + Date.now(); builds.set(a.siteId, { at: Date.now(), fail: /fail/i.test(sites.find((s) => s.id === a.siteId)?.sourcePath ?? ""), id }); return r({ buildId: id }); }
     case "cancel_build": builds.delete(a.siteId); return r(undefined);
     case "get_build_status": return r(buildStatus(a.siteId));
+    case "create_site_snapshot": {
+      const site = sites.find((s) => s.id === a.siteId);
+      if (!site) throw new Error("Website not found");
+      const snap = { id: "preview-" + Date.now(), siteId:site.id,siteKind:site.kind ?? "static",release:null,
+        createdAt:now(),fileCount:site.fileCount,sourceBytes:site.sizeBytes,
+        archiveBytes:Math.floor(site.sizeBytes * 0.7),sha256:"preview-not-a-real-sha256",
+        includesDatabase:false as const,includesSecrets:false as const };
+      siteSnapshots.set(site.id,[snap,...(siteSnapshots.get(site.id) ?? [])]);return r(snap);
+    }
+    case "list_site_snapshots": return r(siteSnapshots.get(a.siteId) ?? []);
+    case "verify_site_snapshot": return r({ verified:true,
+      snapshot:(siteSnapshots.get(a.siteId) ?? []).find(s => s.id===a.snapshotId) });
+    case "restore_site_snapshot": {
+      const site = sites.find(s => s.id===a.siteId);
+      if (!site || site.name !== a.confirmName || site.status !== "stopped") throw new Error("Stop the website and confirm its exact name.");
+      if (!(siteSnapshots.get(a.siteId) ?? []).some(s=>s.id===a.snapshotId)) throw new Error("Snapshot not found");
+      return r({restored:true,requiresBuild:site.kind==="node"||site.kind==="php",includesDatabase:false});
+    }
     case "guardian_status": return r(guardian.get(a.siteId) ?? { enabled: false, consecutiveFailures: 0, recoveryAttempts: 0, lastResult: "Monitoring disabled" });
     case "guardian_enable": {
       const status = { enabled: a.enabled, consecutiveFailures: 0, recoveryAttempts: guardian.get(a.siteId)?.recoveryAttempts ?? 0, lastResult: a.enabled ? "Monitoring enabled" : "Monitoring disabled" };

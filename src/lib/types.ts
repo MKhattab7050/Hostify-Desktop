@@ -103,3 +103,10 @@ export interface GuardianStatus {
   enabled: boolean; consecutiveFailures: number; recoveryAttempts: number;
   lastRestartUnix?: number | null; lastCheckedAt?: string | null; lastResult?: string | null;
 }
+
+/** Integrity-checked local code snapshot. MySQL, secrets and machine disaster recovery excluded. */
+export interface SiteSnapshot {
+  id: string; siteId: string; siteKind: string; release: string | null; createdAt: string;
+  fileCount: number; sourceBytes: number; archiveBytes: number; sha256: string;
+  includesDatabase: false; includesSecrets: false;
+}

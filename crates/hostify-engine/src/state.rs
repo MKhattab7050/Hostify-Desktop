@@ -804,6 +804,19 @@ impl Engine {
                     json!({"restartRequired":changed && site.status!="stopped","rebuildRequired":rebuild}),
                 )
             }
+            "create_site_snapshot" => {
+                crate::time_machine::create(self, arg(&p,"siteId")?).await
+            }
+            "list_site_snapshots" => {
+                crate::time_machine::list(self, arg(&p,"siteId")?).await
+            }
+            "verify_site_snapshot" => {
+                crate::time_machine::verify(self, arg(&p,"siteId")?,arg(&p,"snapshotId")?).await
+            }
+            "restore_site_snapshot" => {
+                crate::time_machine::restore(self, arg(&p,"siteId")?,arg(&p,"snapshotId")?,
+                    arg(&p,"confirmName")?).await
+            }
             "guardian_status" => {
                 Ok(json!(crate::guardian::load(self, arg(&p, "siteId")?)?))
             }
