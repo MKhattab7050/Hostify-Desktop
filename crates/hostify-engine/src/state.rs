@@ -863,8 +863,11 @@ impl Engine {
                     branch:arg(&p,"branch")?.to_owned(),
                     enabled:boolean(&p,"enabled")?,
                 };
-                let mut db=s.db()?;
-                hostify_core::github_webhooks::configure_source(&mut db,&policy)?;
+                {
+                    let mut db=s.db()?;
+                    hostify_core::github_webhooks::configure_source(&mut db,&policy)?;
+                }
+                // Activity writes also acquire Store's SQLite mutex.
                 s.activity("info",Some(id),if policy.enabled {
                     "GitHub source review enabled. Pushes require authenticated intake and explicit review; no code is automatically executed."
                 } else {
@@ -882,8 +885,10 @@ impl Engine {
                 let id=arg(&p,"siteId")?;
                 s.site(id)?;
                 let delivery=arg(&p,"deliveryId")?;
-                let mut db=s.db()?;
-                let rejected=hostify_core::github_webhooks::reject_pending_push(&mut db,id,delivery)?;
+                let rejected={
+                    let mut db=s.db()?;
+                    hostify_core::github_webhooks::reject_pending_push(&mut db,id,delivery)?
+                };
                 if rejected {
                     s.activity("info",Some(id),"A pending GitHub push was rejected without running code.")?;
                 }
