@@ -29,9 +29,13 @@ pub struct ProjectReport {
     pub warnings: Vec<String>,
 }
 fn wanted(p: &Path) -> bool {
-    ["package.json", "package-lock.json", ".env", "composer.json"]
-        .iter()
-        .any(|n| p == Path::new(n))
+    p.components().count() <= 2
+        && p.file_name().and_then(|s| s.to_str()).is_some_and(|n| {
+            matches!(
+                n,
+                "package.json" | "package-lock.json" | ".env" | "composer.json"
+            )
+        })
 }
 fn read_limited(mut f: impl Read, size: u64) -> Result<Vec<u8>, String> {
     if size > LIMIT {
@@ -223,12 +227,83 @@ fn php_satisfies(pin: &str, range: &str) -> bool {
     })
 }
 pub fn read_source_dotenv(path: &Path, kind: &str) -> Option<String> {
-    let (_, data) = files(path, kind).ok()?;
-    let bytes = data.get(Path::new(".env"))?;
+    let (names, data) = files(path, kind).ok()?;
+    if let Some(bytes) = data.get(Path::new(".env")) {
+        return String::from_utf8(bytes.clone()).ok();
+    }
+    let sub = best_nested_subdir(&names, &data)?;
+    let bytes = data.get(&Path::new(&sub).join(".env"))?;
     String::from_utf8(bytes.clone()).ok()
 }
+fn best_nested_subdir(
+    names: &BTreeSet<PathBuf>,
+    data: &BTreeMap<PathBuf, Vec<u8>>,
+) -> Option<String> {
+    if names.contains(Path::new("package.json"))
+        || names.contains(Path::new("index.php"))
+        || names.contains(Path::new("public/index.php"))
+        || names.contains(Path::new("composer.json"))
+        || names.contains(Path::new("index.html"))
+    {
+        return None;
+    }
+    let mut candidates = BTreeSet::new();
+    for p in names {
+        let mut comps = p.components();
+        if let (Some(first), Some(_)) = (comps.next(), comps.next()) {
+            if let Some(s) = first.as_os_str().to_str() {
+                candidates.insert(s.to_owned());
+            }
+        }
+    }
+    let mut best: Option<(i32, String)> = None;
+    for dir in candidates {
+        let base = Path::new(&dir);
+        let has_pkg = names.contains(&base.join("package.json"));
+        let has_php = names.contains(&base.join("index.php"))
+            || names.contains(&base.join("public/index.php"))
+            || names.contains(&base.join("composer.json"));
+        let has_html = names.contains(&base.join("index.html"));
+        if !has_pkg && !has_php && !has_html {
+            continue;
+        }
+        let mut score = 1;
+        if names.contains(&base.join("server.js")) || names.contains(&base.join("app.js")) {
+            score += 10;
+        }
+        if names.contains(&base.join(".env")) {
+            score += 5;
+        }
+        if let Some(raw) = data.get(&base.join("package.json"))
+            && let Ok(v) = serde_json::from_slice::<Value>(raw)
+            && v["scripts"]["start"].is_string()
+        {
+            score += 10;
+        }
+        if best.as_ref().is_none_or(|(b, _)| score > *b) {
+            best = Some((score, dir));
+        }
+    }
+    best.map(|(_, d)| d)
+}
 pub fn inspect(path: &Path, kind: &str) -> Result<ProjectReport, String> {
-    let (names, files) = files(path, kind)?;
+    let (raw_names, raw_files) = files(path, kind)?;
+    let nested_subdir = best_nested_subdir(&raw_names, &raw_files);
+    let (names, files) = if let Some(ref sub) = nested_subdir {
+        let prefix = Path::new(sub);
+        let n = raw_names
+            .into_iter()
+            .filter_map(|p| p.strip_prefix(prefix).ok().map(Path::to_path_buf))
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect::<BTreeSet<_>>();
+        let f = raw_files
+            .into_iter()
+            .filter_map(|(p, v)| p.strip_prefix(prefix).ok().map(|sp| (sp.to_path_buf(), v)))
+            .collect::<BTreeMap<_, _>>();
+        (n, f)
+    } else {
+        (raw_names, raw_files)
+    };
     let has = |s: &str| names.contains(Path::new(s));
     let parse = |s: &str| -> Result<Value, String> {
         match files.get(Path::new(s)) {
@@ -444,6 +519,14 @@ pub fn inspect(path: &Path, kind: &str) -> Result<ProjectReport, String> {
             args: vec![main.or(entry).unwrap_or("server.js").into()],
         }
     };
+    if let Some(sub) = nested_subdir {
+        r.suggested.working_dir = sub.clone();
+        if r.suggested.document_root == "." || r.suggested.document_root.is_empty() {
+            r.suggested.document_root = sub;
+        } else {
+            r.suggested.document_root = format!("{sub}/{}", r.suggested.document_root);
+        }
+    }
     Ok(r)
 }
 #[cfg(test)]

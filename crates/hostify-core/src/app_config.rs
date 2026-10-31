@@ -135,7 +135,15 @@ pub fn relative(text: &str) -> Result<PathBuf, String> {
     {
         return Err("Paths must be relative to the release and cannot contain parent traversal, drive prefixes, UNC prefixes or NUL.".into());
     }
-    Ok(text.split(['/', '\\']).collect())
+    let clean: PathBuf = text
+        .split(['/', '\\'])
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect();
+    if clean.as_os_str().is_empty() {
+        Ok(PathBuf::from("."))
+    } else {
+        Ok(clean)
+    }
 }
 pub fn inside(release: &Path, text: &str) -> Result<PathBuf, String> {
     let rel = relative(text)?;

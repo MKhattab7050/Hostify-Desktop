@@ -541,7 +541,12 @@ impl Manager {
             ("DB_USER".into(), user.into()),
             ("DB_USERNAME".into(), user.into()),
             ("DB_PASSWORD".into(), password.into()),
+            ("DB_PASS".into(), password.into()),
         ])
+    }
+    pub fn execute_sql_in_db(&self, db_name: &str, sql: &str) -> Result<String> {
+        validate_database(db_name)?;
+        self.run_sql("root", &self.root_password()?, Some(db_name), sql)
     }
     pub fn ensure_site_env(&self, site: &str, name: &str) -> Result<()> {
         let (user, password) = self.credentials(name)?;
@@ -602,7 +607,7 @@ impl Manager {
         let tx = db.transaction()?;
         self.check_env(&tx, site, values, replace)?;
         for (name, value) in values {
-            let secret = name == "DB_PASSWORD";
+            let secret = matches!(name.as_str(), "DB_PASSWORD" | "DB_PASS");
             let sealed = if secret {
                 Some(self.sealer.seal(value.as_bytes())?)
             } else {

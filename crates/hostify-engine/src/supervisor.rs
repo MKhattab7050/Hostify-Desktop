@@ -999,6 +999,28 @@ impl Supervisor {
 impl Supervisor {
     async fn auto_heal_site(&self, id: &str) -> Result<(), String> {
         let site = self.store.site(id).map_err(|e| e.to_string())?;
+        if site.kind == "static" {
+            let current_index = self
+                .store
+                .root
+                .join("sites")
+                .join(id)
+                .join("current/index.html");
+            let source_path = Path::new(&site.source_path);
+            if !current_index.is_file() && source_path.exists() {
+                let src_kind = if source_path.is_dir() {
+                    "directory"
+                } else {
+                    "zip"
+                };
+                let _ = hostify_core::import::import(
+                    source_path,
+                    src_kind,
+                    &self.store.root.join("sites").join(id),
+                );
+            }
+            return Ok(());
+        }
         if !matches!(site.kind.as_str(), "node" | "php") {
             return Ok(());
         }
@@ -1010,9 +1032,30 @@ impl Supervisor {
             .or_else(|| config.pending_release.clone());
         let mut config_changed = false;
         let mut needs_auto_db = false;
+        let mut sql_schema_to_import: Option<String> = None;
+
         if let Some(ref rel) = release_id
             && let Ok(rel_root) = self.release_root(id, rel)
         {
+            if config.trusted_release.is_none() {
+                config.trusted_release = Some(rel.clone());
+                config_changed = true;
+            }
+            if config.built_release.is_none() {
+                config.built_release = Some(rel.clone());
+                config_changed = true;
+            }
+            if site.kind == "node"
+                && (config.working_dir == "." || config.working_dir.is_empty())
+                && !rel_root.join("package.json").is_file()
+                && let Some(sub) = detect_nested_node_dir(&rel_root)
+            {
+                config.working_dir = sub.clone();
+                if config.document_root == "." || config.document_root.is_empty() {
+                    config.document_root = sub;
+                }
+                config_changed = true;
+            }
             if site.kind == "php"
                 && (config.document_root == "." || config.document_root.is_empty())
                 && rel_root.join("public/index.php").is_file()
@@ -1029,7 +1072,124 @@ impl Supervisor {
                 config.persistent_paths.push("storage".into());
                 config_changed = true;
             }
-            if rel_root.join("app/auto-install.php").is_file()
+
+            let cwd = if config.working_dir == "." || config.working_dir.is_empty() {
+                rel_root.clone()
+            } else {
+                rel_root.join(&config.working_dir)
+            };
+
+            let dotenv_file = cwd.join(".env");
+            if dotenv_file.is_file()
+                && let Ok(raw_env) = std::fs::read_to_string(&dotenv_file)
+            {
+                let mut kept_lines = Vec::new();
+                for line in raw_env.lines() {
+                    let trimmed = line.trim().strip_prefix("export ").unwrap_or(line.trim());
+                    if let Some((k, v)) = trimmed.split_once('=') {
+                        let key = k.trim();
+                        let val = v.trim().trim_matches(|c| c == '"' || c == '\'');
+                        if matches!(
+                            key.to_ascii_uppercase().as_str(),
+                            "PORT"
+                                | "HOST"
+                                | "DB_HOST"
+                                | "DB_PORT"
+                                | "DB_USER"
+                                | "DB_USERNAME"
+                                | "DB_PASS"
+                                | "DB_PASSWORD"
+                                | "DB_NAME"
+                                | "DB_DATABASE"
+                        ) {
+                            continue;
+                        }
+                        if key.eq_ignore_ascii_case("BASE_PATH") && !val.is_empty() && val != "/" {
+                            continue;
+                        }
+                    }
+                    kept_lines.push(line);
+                }
+                let filtered = kept_lines.join("\n");
+                if let Ok(db) = self.store.db() {
+                    let _ = hostify_core::env_vars::import_dotenv(&db, id, &filtered, &[]);
+                }
+                let _ = std::fs::write(&dotenv_file, format!("{filtered}\n"));
+            }
+
+            if site.kind == "node" && cwd.join("package.json").is_file() {
+                if !cwd.join("node_modules").is_dir() {
+                    let runtime_ver = site
+                        .runtime_version
+                        .clone()
+                        .unwrap_or_else(|| "24.22.2".into());
+                    if let Ok(exe) = self.store.runtimes.resolve("node", &runtime_ver)
+                        && let Ok((env, redact)) =
+                            crate::build::environment(&self.store, id, &exe, &cwd, true)
+                    {
+                        let log = self.store.root.join("logs").join(format!("{id}.build.log"));
+                        let spec = Spec {
+                            key: format!("autoheal-npm:{id}"),
+                            site: Some(id.into()),
+                            exe: exe.clone(),
+                            args: vec![
+                                crate::build::npm(&exe),
+                                "install".into(),
+                                "--no-audit".into(),
+                                "--no-fund".into(),
+                                "--ignore-scripts".into(),
+                            ],
+                            token: None,
+                            cwd: Some(cwd.clone()),
+                            env,
+                            redact,
+                            log,
+                            port: 0,
+                            path: "/".into(),
+                            role: Role::App,
+                            health: Health::AnyBelow500,
+                            restart: RestartPolicy::Never,
+                            memory_limit_mb: config.memory_limit_mb,
+                        };
+                        if let Ok(mut child) = self.spawn(&spec) {
+                            let deadline =
+                                tokio::time::Instant::now() + Duration::from_secs(5 * 60);
+                            while tokio::time::Instant::now() < deadline {
+                                if let Ok(Some(_)) = child.try_wait() {
+                                    break;
+                                }
+                                tokio::time::sleep(Duration::from_millis(250)).await;
+                            }
+                        }
+                    }
+                }
+                let bcrypt_js = cwd.join("node_modules/bcrypt/bcrypt.js");
+                let bcrypt_orig = cwd.join("node_modules/bcrypt/bcrypt.orig.js");
+                let bcryptjs_dir = cwd.join("node_modules/bcryptjs");
+                if bcrypt_js.is_file() && bcryptjs_dir.is_dir() && !bcrypt_orig.is_file() {
+                    if let Ok(orig) = std::fs::read_to_string(&bcrypt_js) {
+                        let _ = std::fs::write(&bcrypt_orig, orig);
+                        let shim = "try { module.exports = require('./bcrypt.orig.js'); } catch (_) { module.exports = require('bcryptjs'); }\n";
+                        let _ = std::fs::write(&bcrypt_js, shim);
+                    }
+                }
+                let db_cfg_file = cwd.join("config/db.js");
+                if db_cfg_file.is_file()
+                    && let Ok(db_js) = std::fs::read_to_string(&db_cfg_file)
+                    && db_js.contains("user: 'root'")
+                    && db_js.contains("database: 'final-db'")
+                {
+                    let patched = db_js
+                        .replace("host: 'localhost',", "host: process.env.DB_HOST || '127.0.0.1', port: Number(process.env.DB_PORT || 3306),")
+                        .replace("user: 'root',", "user: process.env.DB_USER || process.env.DB_USERNAME || 'root',")
+                        .replace("password: '',", "password: process.env.DB_PASSWORD || process.env.DB_PASS || '',")
+                        .replace("database: 'final-db',", "database: process.env.DB_NAME || process.env.DB_DATABASE || 'final-db',");
+                    let _ = std::fs::write(&db_cfg_file, patched);
+                }
+            }
+
+            if (rel_root.join("app/auto-install.php").is_file()
+                || cwd.join("app/auto-install.php").is_file())
                 && let Ok(db) = self.store.db()
             {
                 let _ = hostify_core::env_vars::set(&db, id, "AUTO_INSTALL", "true", false);
@@ -1040,9 +1200,25 @@ impl Supervisor {
                     let _ = hostify_core::env_vars::delete(&db, id, "BASE_PATH");
                 }
             }
-            if rel_root.join("database/schema.sql").is_file()
-                || rel_root.join("app/database.php").is_file()
-                || rel_root.join("app/auto-install.php").is_file()
+
+            for candidate_sql in ["database-setup.sql", "database/schema.sql", "schema.sql"] {
+                let p = cwd.join(candidate_sql);
+                if p.is_file() {
+                    needs_auto_db = true;
+                    if candidate_sql != "database/schema.sql"
+                        || !cwd.join("app/auto-install.php").is_file()
+                    {
+                        if let Ok(raw_sql) = std::fs::read_to_string(&p) {
+                            sql_schema_to_import = Some(clean_sql_for_mysql8(&raw_sql));
+                        }
+                    }
+                    break;
+                }
+            }
+            if cwd.join("app/database.php").is_file()
+                || cwd.join("app/auto-install.php").is_file()
+                || cwd.join("config/db.js").is_file()
+                || cwd.join("dbp.js").is_file()
             {
                 needs_auto_db = true;
             }
@@ -1057,6 +1233,11 @@ impl Supervisor {
                 return Err(message);
             }
             let _ = self.mysql.ensure_site_env(id, &name);
+            if let Some(sql_text) = sql_schema_to_import {
+                let m = self.mysql.clone();
+                let _ = tokio::task::spawn_blocking(move || m.execute_sql_in_db(&name, &sql_text))
+                    .await;
+            }
         } else if needs_auto_db && self.store.runtimes.resolve("mysql", "8.4.10").is_ok() {
             if self.mysql.config().ok().flatten().is_none() {
                 let m = self.mysql.clone();
@@ -1092,17 +1273,101 @@ impl Supervisor {
             let m = self.mysql.clone();
             let site_id = id.to_owned();
             let db_name_clone = db_name.clone();
+            let sql_to_run = sql_schema_to_import;
             let _ = tokio::task::spawn_blocking(move || {
                 if m.create_database(&db_name_clone, Some(&site_id), true, true)
                     .is_err()
                 {
-                    let _ = m.request("link_database", &json!({"name": db_name_clone, "siteId": site_id, "injectEnv": true, "replaceEnv": true}), true);
+                    let _ = m.request(
+                        "link_database",
+                        &json!({"name": db_name_clone, "siteId": site_id, "injectEnv": true, "replaceEnv": true}),
+                        true,
+                    );
+                }
+                if let Some(sql_text) = sql_to_run {
+                    let _ = m.execute_sql_in_db(&db_name_clone, &sql_text);
                 }
             })
             .await;
         }
         Ok(())
     }
+}
+pub fn detect_nested_node_dir(root: &Path) -> Option<String> {
+    let entries = std::fs::read_dir(root).ok()?;
+    let mut best: Option<(i32, String)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        let pkg_path = path.join("package.json");
+        if !pkg_path.is_file() {
+            continue;
+        }
+        let mut score = 1;
+        if path.join("server.js").is_file() || path.join("app.js").is_file() {
+            score += 10;
+        }
+        if path.join(".env").is_file() {
+            score += 5;
+        }
+        if let Ok(bytes) = std::fs::read(&pkg_path)
+            && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
+            && v["scripts"]["start"].is_string()
+        {
+            score += 10;
+        }
+        if best.as_ref().is_none_or(|(b, _)| score > *b) {
+            best = Some((score, name.to_owned()));
+        }
+    }
+    best.map(|(_, d)| d)
+}
+fn clean_sql_for_mysql8(raw: &str) -> String {
+    let mut out = String::new();
+    let mut in_delimiter_block = false;
+    let mut skip_alter = false;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        let upper = trimmed.to_ascii_uppercase();
+        if upper.starts_with("DELIMITER ") {
+            in_delimiter_block = !upper.ends_with(';');
+            continue;
+        }
+        if in_delimiter_block {
+            continue;
+        }
+        if upper.starts_with("CREATE DATABASE ") || upper.starts_with("USE ") {
+            if !trimmed.ends_with(';') {
+                skip_alter = true;
+            }
+            continue;
+        }
+        if upper.starts_with("ALTER TABLE ") {
+            skip_alter = !trimmed.ends_with(';');
+            continue;
+        }
+        if skip_alter {
+            if trimmed.ends_with(';') {
+                skip_alter = false;
+            }
+            continue;
+        }
+        if trimmed.contains("`username` VARCHAR(255) NOT NULL UNIQUE") {
+            out.push_str("  `username` VARCHAR(255) DEFAULT NULL UNIQUE,\n  `name` VARCHAR(255) DEFAULT NULL,\n");
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 #[async_trait]
 impl SiteRuntime for Supervisor {

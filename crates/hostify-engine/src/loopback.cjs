@@ -1,5 +1,9 @@
 // Patch only the host-less TCP overloads, preserving pipes, handles and explicit hosts.
 'use strict';
+const buffer = require('node:buffer');
+if (!buffer.SlowBuffer) {
+  buffer.SlowBuffer = buffer.Buffer;
+}
 const net = require('node:net');
 const original = net.Server.prototype.listen;
 const plain = (a) => {
