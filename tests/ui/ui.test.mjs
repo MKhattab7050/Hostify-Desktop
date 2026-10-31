@@ -278,6 +278,31 @@ await test("reduced motion stops the signal animation", async () => {
   await page.context().close();
 });
 
+await test("Guardian is opt-in, preserves stopped websites and exposes read-only health checks", async () => {
+  const page=await open();
+  const card=page.locator("section").filter({hasText:"Hostify Guardian"}).first();
+  await card.getByRole("button",{name:"Enable"}).first().click();
+  await card.getByText("Monitoring",{exact:true}).first().waitFor();
+  await card.getByRole("button",{name:"Check now"}).first().click();
+  await card.getByText("Healthy",{exact:false}).first().waitFor();
+  await card.getByRole("button",{name:"Disable"}).first().click();
+  await card.getByText("Monitoring disabled").first().waitFor();
+  await page.context().close();
+});
+
+await test("Time Machine makes explicit code-only snapshots with integrity checks", async () => {
+  const page=await open();
+  const card=page.locator("section").filter({hasText:"Time Machine · Website files"}).first();
+  await card.getByText(/MySQL databases, environment secrets and external storage are not included/).waitFor();
+  await card.getByRole("button",{name:"Create snapshot"}).first().click();
+  await card.getByRole("button",{name:"Snapshots (1)"}).first().click();
+  await card.getByRole("button",{name:"Verify"}).first().click();
+  await card.getByText(/SHA-256 integrity verified/).waitFor();
+  // A running website must not offer an unsafe restore.
+  assert.equal(await card.getByRole("button",{name:"Restore"}).first().isDisabled(),true);
+  await page.context().close();
+});
+
 await test("no uncaught errors in the browser console", async () => {
   const real = pageErrors.filter((e) => !/favicon/.test(e));
   assert.deepEqual(real, []);
