@@ -34,9 +34,14 @@ All endpoints are JSON, have a 32 KiB body limit, disable caches, and return no 
 | `POST /v1/auth/login` | Tenant ID + email + password | Creates a 12-hour hashed session; returns token only in response |
 | `POST /v1/auth/me` | Tenant session Bearer | Returns principal if session is active for the specified tenant |
 | `POST /v1/auth/logout` | Tenant session Bearer | Revokes session |
+| `POST /v1/auth/password/change` | Tenant session + current password | Changes own password, revokes **all** old sessions and writes audit atomically; must log in again |
+| `POST /v1/auth/sessions/list` | Tenant session Bearer | Lists only the caller's active sessions, identifies the current one, never exposes tokens or hashes |
+| `POST /v1/auth/sessions/revoke` | Tenant session Bearer | Revokes one of caller's own sessions by session UUID and audits atomically (can revoke current session) |
 | `POST /v1/members/invite` | Tenant owner/admin session | Issues role-scoped, single-use member invitation |
 | `POST /v1/members/accept` | Single-use member invitation | Creates invited account without exposing admin credentials |
 | `POST /v1/members/disable` | Tenant Owner/Admin session | Disables an eligible member, invalidates all sessions and writes a security audit event; never disables an owner or caller |
+| `POST /v1/members/list` | Tenant Owner/Admin session | Bounded, paginated list of own tenant's users (including disabled) with only ID, email, role, status and creation date |
+| `POST /v1/members/role/update` | Tenant **Owner** session | Promotes/demotes only non-owner active members between Admin and Viewer, revokes all target sessions, audits atomically |
 | `POST /v1/tenant/invitations` | Tenant ManageDevices session | Issues one-use device enrollment invitation for own tenant |
 | `POST /v1/tenant/routes/reserve` | Tenant ManageSites session | Reserves a non-routable hostname for own tenant |
 | `POST /v1/tenant/agents/revoke` | Tenant ManageDevices session | Revokes own device and disables its reserved routes |
@@ -51,6 +56,8 @@ Account login and single-use token redemption do not require an admin Bearer. Al
 `/v1/tenant/audit/list` accepts the same page bounds but requires **Owner or Admin**, not Viewer. It returns only the caller's tenant audit entries, with internal event IDs and non-secret subjects. It remains loopback-only and must not be published by Cloudflare.
 
 Both inventory endpoints require a valid scoped tenant session and strict `tenantId`, `limit` (1–100), and `offset` (0–1,000,000). They return `items`, `limit`, and `offset` (plus `publiclyRoutable: false` for routes). Results never include another tenant's rows or revoked devices. Inventory does not prove public HTTPS reachability.
+
+New member and session inventory calls accept `tenantId`, `limit` (1–100), and `offset` (0–100,000), and return `items`, `limit`, and `offset`. Member inventory requires Owner or Admin; Viewer cannot enumerate users. Session inventory is restricted to **the authenticated user's own** active sessions and returns `sessionId`, `createdAt`, `expiresUnix` and `isCurrent`. Session revocation accepts `tenantId` and `sessionId`. Member role updates accept `tenantId`, `userId` and `role` (admin/viewer). Only the owner may change roles, never the owner role; a real change invalidates all target member sessions and requires fresh sign-in. Password rotation accepts `tenantId`, `currentPassword` and `newPassword` (12–256 bytes and control-character restrictions). On success, existing sessions including the caller's are revoked. Transaction rollback prevents changing a credential or revoking a session without its audit event. These endpoints remain **local development facilities**, not a production self-service gateway.
 
 The hostname returned by `routes/reserve` or `tenant/routes/reserve` does **not** create public DNS, a Cloudflare tunnel, or a valid customer web route.
 

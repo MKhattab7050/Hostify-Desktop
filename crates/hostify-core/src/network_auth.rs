@@ -66,6 +66,27 @@ pub struct Principal {
     pub email:String,
     pub role:Role,
 }
+/// Public member inventory intentionally excludes password hashes, session tokens
+/// and password lockout counters.
+#[derive(Debug,Clone,Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct TenantMember {
+    pub user_id:String,
+    pub tenant_id:String,
+    pub email:String,
+    pub role:Role,
+    pub status:String,
+    pub created_at:String,
+}
+/// A user's own active session inventory. No bearer token or digest is returned.
+#[derive(Debug,Clone,Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct ActiveSession {
+    pub session_id:String,
+    pub created_at:String,
+    pub expires_unix:i64,
+    pub is_current:bool,
+}
 /// A token returned exactly once. Only the SHA-256 digest is persisted.
 pub struct Session {
     pub token:String,
@@ -326,6 +347,165 @@ impl Accounts{
         self.db.execute("UPDATE network_sessions SET revoked_at=?1
             WHERE token_hash=?2 AND revoked_at IS NULL",
             params![Utc::now().to_rfc3339(),digest(token)])?;
+        Ok(())
+    }
+    /// A user can inspect only their own active sessions. Session token hashes
+    /// are read solely to mark the current session and never serialized.
+    pub fn list_sessions(&self,token:&str,tenant:&str,limit:i64,offset:i64)->Result<Vec<ActiveSession>>{
+        let actor=self.authorize(token,tenant,Capability::View)?;
+        if !(1..=100).contains(&limit)||!(0..=100_000).contains(&offset){
+            return Err(AccountError::Invalid);
+        }
+        let current_hash=digest(token);
+        let mut stmt=self.db.prepare(
+            "SELECT id,created_at,expires_unix,token_hash FROM network_sessions
+             WHERE tenant_id=?1 AND user_id=?2
+             AND revoked_at IS NULL AND expires_unix>?3
+             ORDER BY created_at DESC,id DESC LIMIT ?4 OFFSET ?5")?;
+        let rows=stmt.query_map(
+            params![tenant,&actor.user_id,Utc::now().timestamp(),limit,offset],
+            |r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+                r.get::<_,i64>(2)?,r.get::<_,String>(3)?)))?;
+        let mut items=Vec::new();
+        for row in rows{
+            let (session_id,created_at,expires_unix,hash)=row?;
+            items.push(ActiveSession{
+                session_id,created_at,expires_unix,is_current:hash==current_hash,
+            });
+        }
+        Ok(items)
+    }
+    /// A member may revoke any of their own active sessions, including the
+    /// current one. Revocation and audit event must commit together.
+    pub fn revoke_session(&mut self,token:&str,tenant:&str,session_id:&str)->Result<()>{
+        let actor=self.authorize(token,tenant,Capability::View)?;
+        require_uuid(session_id)?;
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let active:i64=tx.query_row(
+            "SELECT COUNT(*) FROM network_sessions
+             WHERE user_id=?1 AND tenant_id=?2 AND token_hash=?3
+               AND revoked_at IS NULL AND expires_unix>?4",
+            params![&actor.user_id,tenant,digest(token),Utc::now().timestamp()],
+            |r|r.get(0))?;
+        if active!=1{return Err(AccountError::Authentication);}
+        let now=Utc::now().to_rfc3339();
+        let changed=tx.execute(
+            "UPDATE network_sessions SET revoked_at=?1
+             WHERE id=?2 AND user_id=?3 AND tenant_id=?4
+               AND revoked_at IS NULL AND expires_unix>?5",
+            params![&now,session_id,&actor.user_id,tenant,Utc::now().timestamp()])?;
+        if changed!=1{return Err(AccountError::Unavailable);}
+        tx.execute(
+            "INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+             VALUES(?1,?2,'session_revoked',?3)",
+            params![tenant,&now,session_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// Change the current member's password only after checking the existing
+    /// credential. Revoke every previous session and audit the action atomically.
+    /// The caller must sign in again; no password or token enters the audit log.
+    pub fn change_password(&mut self,token:&str,tenant:&str,
+        current_password:&str,new_password:&str)->Result<()>{
+        let principal=self.authorize(token,tenant,Capability::View)?;
+        validate_password(new_password)?;
+        let (new_salt,new_hash)=hash_password(new_password)?;
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Recheck the active session inside the write transaction so a
+        // concurrent administrator revocation cannot authorize this change.
+        let old:Option<(String,String)>=tx.query_row(
+            "SELECT u.salt,u.password_hash FROM network_users u
+             JOIN network_sessions s ON s.user_id=u.id AND s.tenant_id=u.tenant_id
+             JOIN network_tenants t ON t.id=u.tenant_id
+             WHERE u.id=?1 AND u.tenant_id=?2 AND s.token_hash=?3
+               AND s.revoked_at IS NULL AND s.expires_unix>?4
+               AND u.status='active' AND t.state='active'",
+            params![&principal.user_id,tenant,digest(token),Utc::now().timestamp()],
+            |r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let (old_salt,old_hash)=old.ok_or(AccountError::Authentication)?;
+        if !correct_password(current_password,&old_salt,&old_hash) {
+            return Err(AccountError::Authentication);
+        }
+        if correct_password(new_password,&old_salt,&old_hash) {
+            return Err(AccountError::Invalid);
+        }
+        let now=Utc::now().to_rfc3339();
+        let changed=tx.execute(
+            "UPDATE network_users SET salt=?1,password_hash=?2,
+                failed_attempts=0,locked_until_unix=0
+             WHERE id=?3 AND tenant_id=?4 AND status='active'",
+            params![new_salt,new_hash,&principal.user_id,tenant])?;
+        if changed!=1{return Err(AccountError::Authentication);}
+        tx.execute(
+            "UPDATE network_sessions SET revoked_at=?1
+             WHERE tenant_id=?2 AND user_id=?3 AND revoked_at IS NULL",
+            params![&now,tenant,&principal.user_id])?;
+        tx.execute(
+            "INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+             VALUES(?1,?2,'password_changed',?3)",
+            params![tenant,&now,&principal.user_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// List members of exactly one tenant. A viewer cannot enumerate accounts,
+    /// including disabled ones. Credentials and failure counters never leave
+    /// the account store through this result.
+    pub fn list_members(&self,token:&str,tenant:&str,limit:i64,offset:i64)->Result<Vec<TenantMember>>{
+        self.authorize(token,tenant,Capability::ManageUsers)?;
+        if !(1..=100).contains(&limit) || !(0..=100_000).contains(&offset){
+            return Err(AccountError::Invalid);
+        }
+        let mut stmt=self.db.prepare(
+            "SELECT id,tenant_id,email,role,status,created_at FROM network_users
+             WHERE tenant_id=?1 ORDER BY created_at DESC,id DESC LIMIT ?2 OFFSET ?3")?;
+        let rows=stmt.query_map(params![tenant,limit,offset],|r|{
+            Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+                r.get::<_,String>(2)?,r.get::<_,String>(3)?,
+                r.get::<_,String>(4)?,r.get::<_,String>(5)?))
+        })?;
+        let mut items=Vec::new();
+        for row in rows {
+            let (user_id,tenant_id,email,role,status,created_at)=row?;
+            items.push(TenantMember{
+                user_id,tenant_id,email,role:Role::parse(&role)?,status,created_at,
+            });
+        }
+        Ok(items)
+    }
+    /// Only the tenant owner may promote/demote non-owner members.
+    /// Every existing session for the target is revoked before the role
+    /// change becomes visible, preventing old tokens retaining privileges.
+    pub fn update_member_role(&mut self,token:&str,tenant:&str,
+        user_id:&str,new_role:Role)->Result<()>{
+        let actor=self.authorize(token,tenant,Capability::ManageUsers)?;
+        if actor.role!=Role::Owner || new_role==Role::Owner {
+            return Err(AccountError::Forbidden);
+        }
+        require_uuid(user_id)?;
+        if actor.user_id==user_id{return Err(AccountError::Forbidden);}
+        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let target:Option<(String,String)>=tx.query_row(
+            "SELECT role,status FROM network_users WHERE tenant_id=?1 AND id=?2",
+            params![tenant,user_id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let (old_role,status)=target.ok_or(AccountError::Unavailable)?;
+        if old_role=="owner"{return Err(AccountError::Forbidden);}
+        if status!="active"{return Err(AccountError::Unavailable);}
+        if old_role==new_role.db(){return Ok(());}
+        let now=Utc::now().to_rfc3339();
+        let changed=tx.execute(
+            "UPDATE network_users SET role=?1
+             WHERE id=?2 AND tenant_id=?3 AND status='active' AND role!='owner'",
+            params![new_role.db(),user_id,tenant])?;
+        if changed!=1{return Err(AccountError::Unavailable);}
+        tx.execute(
+            "UPDATE network_sessions SET revoked_at=?1
+             WHERE user_id=?2 AND tenant_id=?3 AND revoked_at IS NULL",
+            params![&now,user_id,tenant])?;
+        tx.execute(
+            "INSERT INTO network_audit(tenant_id,ts,action,subject_id)
+             VALUES(?1,?2,'member_role_changed',?3)",
+            params![tenant,&now,user_id])?;
+        tx.commit()?;
         Ok(())
     }
     /// Disable a tenant member, revoke existing sessions and record a
@@ -664,5 +844,192 @@ mod tests {
             assert!(matches!(acc.sign_in(&a,"owner@example.com","incorrect-password"),Err(AccountError::Authentication)));
         }
         assert!(matches!(acc.sign_in(&a,"owner@example.com","correct-long-password"),Err(AccountError::Locked)));
+    }
+    #[test]
+    fn tenant_member_inventory_enforces_roles_scoping_pagination_and_minimal_fields(){
+        let (_tmp,tenant,other,mut acc)=init();
+        acc.bootstrap_owner(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        acc.bootstrap_owner(&other,"other@site.test","valid-other-password").unwrap();
+        let owner=acc.sign_in(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        let invitation=acc.invite_member(&owner.token,&tenant,
+            "viewer@site.test",Role::Viewer,600).unwrap();
+        let viewer_principal=acc.accept_invitation(&invitation.token,
+            "valid-viewer-password").unwrap();
+        let viewer=acc.sign_in(&tenant,"viewer@site.test","valid-viewer-password").unwrap();
+        let members=acc.list_members(&owner.token,&tenant,100,0).unwrap();
+        assert_eq!(members.len(),2);
+        assert!(members.iter().all(|m|m.tenant_id==tenant));
+        assert!(members.iter().any(|m|m.role==Role::Owner));
+        assert!(members.iter().any(|m|m.user_id==viewer_principal.user_id));
+        assert!(acc.list_members(&viewer.token,&tenant,10,0).is_err());
+        assert!(acc.list_members(&owner.token,&other,10,0).is_err());
+        assert!(matches!(acc.list_members(&owner.token,&tenant,101,0),Err(AccountError::Invalid)));
+        assert!(matches!(acc.list_members(&owner.token,&tenant,1,-1),Err(AccountError::Invalid)));
+        let page0=acc.list_members(&owner.token,&tenant,1,0).unwrap();
+        let page1=acc.list_members(&owner.token,&tenant,1,1).unwrap();
+        assert_ne!(page0[0].user_id,page1[0].user_id);
+        assert!(acc.list_members(&owner.token,&tenant,1,2).unwrap().is_empty());
+        acc.disable_member(&owner.token,&tenant,&viewer_principal.user_id).unwrap();
+        let disabled=acc.list_members(&owner.token,&tenant,10,0).unwrap();
+        assert_eq!(disabled.iter().find(|m|m.user_id==viewer_principal.user_id)
+            .unwrap().status,"disabled");
+        let item=serde_json::to_value(&disabled[0]).unwrap();
+        assert_eq!(item.as_object().unwrap().len(),6);
+        for key in ["passwordHash","salt","token","failedAttempts","lockedUntilUnix"] {
+            assert!(item.get(key).is_none());
+        }
+    }
+    #[test]
+    fn password_change_revokes_all_sessions_and_never_leaks_credentials(){
+        let (tmp,tenant,other,mut acc)=init();
+        acc.bootstrap_owner(&tenant,"owner@site.test","initial-owner-password").unwrap();
+        let session1=acc.sign_in(&tenant,"owner@site.test","initial-owner-password").unwrap();
+        let session2=acc.sign_in(&tenant,"owner@site.test","initial-owner-password").unwrap();
+        assert!(acc.change_password(&session1.token,&other,
+            "initial-owner-password","replacement-owner-password").is_err());
+        assert!(matches!(acc.change_password(&session1.token,&tenant,
+            "wrong-current-password","replacement-owner-password"),
+            Err(AccountError::Authentication)));
+        assert!(matches!(acc.change_password(&session1.token,&tenant,
+            "initial-owner-password","initial-owner-password"),
+            Err(AccountError::Invalid)));
+        assert!(acc.authorize(&session2.token,&tenant,Capability::View).is_ok());
+        acc.change_password(&session1.token,&tenant,
+            "initial-owner-password","replacement-owner-password").unwrap();
+        assert!(acc.authorize(&session1.token,&tenant,Capability::View).is_err());
+        assert!(acc.authorize(&session2.token,&tenant,Capability::View).is_err());
+        assert!(acc.sign_in(&tenant,"owner@site.test","initial-owner-password").is_err());
+        let new_session=acc.sign_in(&tenant,"owner@site.test","replacement-owner-password").unwrap();
+        assert!(acc.authorize(&new_session.token,&tenant,Capability::View).is_ok());
+        let subject:String=acc.db.query_row(
+            "SELECT subject_id FROM network_audit
+             WHERE tenant_id=?1 AND action='password_changed'",
+            [&tenant],|row|row.get(0)).unwrap();
+        assert_eq!(subject,session1.principal.user_id);
+        let file=std::fs::read(tmp.path().join("control-plane.db")).unwrap();
+        for secret in ["initial-owner-password","replacement-owner-password",
+            session1.token.as_str(),session2.token.as_str()] {
+            assert!(!file.windows(secret.len()).any(|window|window==secret.as_bytes()));
+        }
+    }
+    #[test]
+    fn password_change_audit_failure_rolls_back_password_and_session_revocation(){
+        let (_tmp,tenant,_other,mut acc)=init();
+        acc.bootstrap_owner(&tenant,"owner@site.test","initial-owner-password").unwrap();
+        let session=acc.sign_in(&tenant,"owner@site.test","initial-owner-password").unwrap();
+        acc.db.execute_batch(
+            "CREATE TRIGGER deny_password_audit BEFORE INSERT ON network_audit
+             WHEN NEW.action='password_changed'
+             BEGIN SELECT RAISE(FAIL,'simulated audit failure'); END;"
+        ).unwrap();
+        assert!(acc.change_password(&session.token,&tenant,
+            "initial-owner-password","replacement-owner-password").is_err());
+        assert!(acc.authorize(&session.token,&tenant,Capability::View).is_ok());
+        assert!(acc.sign_in(&tenant,"owner@site.test","replacement-owner-password").is_err());
+        assert!(acc.sign_in(&tenant,"owner@site.test","initial-owner-password").is_ok());
+        acc.db.execute_batch("DROP TRIGGER deny_password_audit").unwrap();
+        acc.change_password(&session.token,&tenant,
+            "initial-owner-password","replacement-owner-password").unwrap();
+    }
+    #[test]
+    fn active_session_inventory_and_revocation_are_self_scoped_and_secret_free(){
+        let (_tmp,tenant,other,mut acc)=init();
+        acc.bootstrap_owner(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        acc.bootstrap_owner(&other,"other@site.test","valid-other-password").unwrap();
+        let first=acc.sign_in(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        let second=acc.sign_in(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        let foreign=acc.sign_in(&other,"other@site.test","valid-other-password").unwrap();
+        let rows=acc.list_sessions(&first.token,&tenant,10,0).unwrap();
+        assert_eq!(rows.len(),2);
+        assert_eq!(rows.iter().filter(|s|s.is_current).count(),1);
+        assert!(acc.list_sessions(&first.token,&other,10,0).is_err());
+        assert!(matches!(acc.list_sessions(&first.token,&tenant,101,0),Err(AccountError::Invalid)));
+        assert_eq!(acc.list_sessions(&first.token,&tenant,1,0).unwrap().len(),1);
+        assert_eq!(acc.list_sessions(&first.token,&tenant,1,1).unwrap().len(),1);
+        let serialized=serde_json::to_string(&rows).unwrap();
+        assert!(!serialized.contains(&first.token));
+        assert!(!serialized.contains(&second.token));
+        assert!(!serialized.contains("tokenHash"));
+        let foreign_session=acc.list_sessions(&foreign.token,&other,10,0).unwrap();
+        assert!(acc.revoke_session(&first.token,&tenant,&foreign_session[0].session_id).is_err());
+        let other_id=rows.iter().find(|s|!s.is_current).unwrap().session_id.clone();
+        acc.revoke_session(&first.token,&tenant,&other_id).unwrap();
+        assert!(acc.authorize(&second.token,&tenant,Capability::View).is_err());
+        assert!(acc.authorize(&first.token,&tenant,Capability::View).is_ok());
+        assert_eq!(acc.list_sessions(&first.token,&tenant,10,0).unwrap().len(),1);
+        let current_id=acc.list_sessions(&first.token,&tenant,10,0).unwrap()[0].session_id.clone();
+        acc.revoke_session(&first.token,&tenant,&current_id).unwrap();
+        assert!(acc.authorize(&first.token,&tenant,Capability::View).is_err());
+        assert!(acc.authorize(&foreign.token,&other,Capability::View).is_ok());
+        let audits:i64=acc.db.query_row(
+            "SELECT COUNT(*) FROM network_audit
+             WHERE tenant_id=?1 AND action='session_revoked'",
+            [&tenant],|r|r.get(0)).unwrap();
+        assert_eq!(audits,2);
+    }
+    #[test]
+    fn session_revoke_audit_failure_leaves_session_valid(){
+        let (_tmp,tenant,_other,mut acc)=init();
+        acc.bootstrap_owner(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        let actor=acc.sign_in(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        let session_id=acc.list_sessions(&actor.token,&tenant,10,0).unwrap()[0].session_id.clone();
+        acc.db.execute_batch(
+            "CREATE TRIGGER deny_revoke_audit BEFORE INSERT ON network_audit
+             WHEN NEW.action='session_revoked'
+             BEGIN SELECT RAISE(FAIL,'audit failed'); END;"
+        ).unwrap();
+        assert!(acc.revoke_session(&actor.token,&tenant,&session_id).is_err());
+        assert!(acc.authorize(&actor.token,&tenant,Capability::View).is_ok());
+        acc.db.execute_batch("DROP TRIGGER deny_revoke_audit").unwrap();
+        acc.revoke_session(&actor.token,&tenant,&session_id).unwrap();
+        assert!(acc.authorize(&actor.token,&tenant,Capability::View).is_err());
+    }
+    #[test]
+    fn role_changes_require_owner_revoke_target_sessions_and_are_audited(){
+        let (_tmp,tenant,other,mut acc)=init();
+        acc.bootstrap_owner(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        acc.bootstrap_owner(&other,"other@site.test","valid-other-password").unwrap();
+        let owner=acc.sign_in(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        let invitation=acc.invite_member(&owner.token,&tenant,
+            "member@site.test",Role::Admin,600).unwrap();
+        let member=acc.accept_invitation(&invitation.token,"valid-member-password").unwrap();
+        let admin=acc.sign_in(&tenant,"member@site.test","valid-member-password").unwrap();
+        assert!(acc.update_member_role(&admin.token,&tenant,&member.user_id,Role::Viewer).is_err());
+        assert!(acc.update_member_role(&owner.token,&other,&member.user_id,Role::Viewer).is_err());
+        assert!(acc.update_member_role(&owner.token,&tenant,&member.user_id,Role::Owner).is_err());
+        assert!(acc.update_member_role(&owner.token,&tenant,&owner.principal.user_id,Role::Viewer).is_err());
+        acc.update_member_role(&owner.token,&tenant,&member.user_id,Role::Viewer).unwrap();
+        assert!(acc.authorize(&admin.token,&tenant,Capability::View).is_err());
+        let viewer=acc.sign_in(&tenant,"member@site.test","valid-member-password").unwrap();
+        assert_eq!(viewer.principal.role,Role::Viewer);
+        assert!(acc.authorize(&viewer.token,&tenant,Capability::ManageDevices).is_err());
+        acc.update_member_role(&owner.token,&tenant,&member.user_id,Role::Viewer).unwrap();
+        assert!(acc.authorize(&viewer.token,&tenant,Capability::View).is_ok(),
+            "idempotent role request must not revoke fresh sessions");
+        let events:i64=acc.db.query_row(
+            "SELECT COUNT(*) FROM network_audit
+             WHERE tenant_id=?1 AND action='member_role_changed'",
+            [&tenant],|r|r.get(0)).unwrap();
+        assert_eq!(events,1);
+    }
+    #[test]
+    fn role_change_audit_failure_rolls_back_role_and_session(){
+        let (_tmp,tenant,_other,mut acc)=init();
+        acc.bootstrap_owner(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        let owner=acc.sign_in(&tenant,"owner@site.test","valid-owner-password").unwrap();
+        let invitation=acc.invite_member(&owner.token,&tenant,
+            "member@site.test",Role::Admin,600).unwrap();
+        let member=acc.accept_invitation(&invitation.token,"valid-member-password").unwrap();
+        let admin=acc.sign_in(&tenant,"member@site.test","valid-member-password").unwrap();
+        acc.db.execute_batch(
+            "CREATE TRIGGER deny_role_audit BEFORE INSERT ON network_audit
+             WHEN NEW.action='member_role_changed'
+             BEGIN SELECT RAISE(FAIL,'audit failed'); END;"
+        ).unwrap();
+        assert!(acc.update_member_role(&owner.token,&tenant,&member.user_id,Role::Viewer).is_err());
+        assert!(acc.authorize(&admin.token,&tenant,Capability::ManageDevices).is_ok());
+        acc.db.execute_batch("DROP TRIGGER deny_role_audit").unwrap();
+        acc.update_member_role(&owner.token,&tenant,&member.user_id,Role::Viewer).unwrap();
+        assert!(acc.authorize(&admin.token,&tenant,Capability::View).is_err());
     }
 }
