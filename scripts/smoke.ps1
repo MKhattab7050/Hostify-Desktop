@@ -63,6 +63,8 @@ try {
     if ($stopped.status -ne 'stopped') { throw 'stop_site did not return stopped status' }
     & curl.exe --silent --output NUL --max-time 3 $url
     if ($LASTEXITCODE -eq 0) { throw 'Preview still responds after stop_site' }
+    $null = Invoke-Engine 'remove_site' @{id=$siteId;deleteFiles=$true}
+    if (@(Invoke-Engine 'list_sites' | Where-Object { $_.id -eq $siteId }).Count -ne 0) { throw 'Removed site is still listed' }
     $siteId = $null
     $passed = $true
 } catch {
@@ -80,5 +82,5 @@ try {
     Pop-Location
     Write-Host "Smoke artifacts: $dataDir"
 }
-if ($passed) { Write-Host 'PASS: offline build, engine ping, add/start, real HTTP preview, stop' -ForegroundColor Green; exit 0 }
+if ($passed) { Write-Host 'PASS: offline build, engine ping, add/start, real HTTP preview, stop and remove' -ForegroundColor Green; exit 0 }
 exit 1

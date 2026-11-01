@@ -258,6 +258,32 @@ impl Store {
                     .ok()
                     .and_then(|v| v["hostname"].as_str().map(str::to_owned));
             }
+            if site
+                .publish_state
+                .as_deref()
+                .is_none_or(|state| state == "failed")
+            {
+                let mut st = db.prepare("SELECT id,snapshot_json,created_resources_json FROM deployments WHERE site_id=?1 AND state IN ('failed','rolled_back') ORDER BY rowid DESC")?;
+                let journals = st
+                    .query_map([&site.id], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                if let Some((id, snapshot, _)) = journals
+                    .into_iter()
+                    .find(|(_, _, raw)| hostify_core::db::resources_needed(raw))
+                {
+                    site.publish_state = Some("recovery_required".into());
+                    site.publish_deployment_id = Some(id);
+                    site.publish_hostname = serde_json::from_str::<Value>(&snapshot)
+                        .ok()
+                        .and_then(|v| v["hostname"].as_str().map(str::to_owned));
+                }
+            }
             if let Some((status, detail)) = statuses.get(&site.id) {
                 site.status = status.clone();
                 site.status_detail = detail.clone();
@@ -1788,9 +1814,29 @@ impl Engine {
                     .map_err(|_| anyhow!("Wait for the current deployment to finish"))?;
                 let rows = {
                     let db = s.db()?;
-                    let mut st=db.prepare("SELECT id FROM deployments WHERE site_id=?1 AND state IN ('waiting_dns','waiting_tls','verifying_public','recovery_required','published')")?;
-                    st.query_map([id], |r| r.get::<_, String>(0))?
-                        .collect::<rusqlite::Result<Vec<_>>>()?
+                    let mut st=db.prepare("SELECT id,state,created_resources_json FROM deployments WHERE site_id=?1 ORDER BY rowid")?;
+                    st.query_map([id], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                    .into_iter()
+                    .filter(|(_, state, resources)| {
+                        matches!(
+                            state.as_str(),
+                            "waiting_dns"
+                                | "waiting_tls"
+                                | "verifying_public"
+                                | "recovery_required"
+                                | "published"
+                        ) || matches!(state.as_str(), "failed" | "rolled_back")
+                            && hostify_core::db::resources_needed(resources)
+                    })
+                    .map(|(id, _, _)| id)
+                    .collect::<Vec<_>>()
                 };
                 for dep in &rows {
                     self.stop_verifier(dep).await?;
@@ -2328,6 +2374,14 @@ mod path_safety_tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("data")).unwrap();
         super::publishing_tests::seed(&store, "s", "failed", false);
+        store
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE deployments SET created_resources_json='{}' WHERE site_id='s'",
+                [],
+            )
+            .unwrap();
         assert_eq!(
             store.site("s").unwrap().publish_state.as_deref(),
             Some("failed")
@@ -2336,11 +2390,16 @@ mod path_safety_tests {
             .db()
             .unwrap()
             .execute(
-                "INSERT INTO deployments(id,site_id,state,snapshot_json,started_at) VALUES('new','s','rolled_back','{}','now')",
+                "INSERT INTO deployments(id,site_id,state,snapshot_json,created_resources_json,started_at) VALUES('new','s','rolled_back','{}','{}','now')",
                 [],
             )
             .unwrap();
         assert_eq!(store.site("s").unwrap().publish_state, None);
+        store.db().unwrap().execute("UPDATE deployments SET created_resources_json='{\"rollback_pending\":true}' WHERE id='new'", []).unwrap();
+        assert_eq!(
+            store.site("s").unwrap().publish_state.as_deref(),
+            Some("recovery_required")
+        );
     }
     #[tokio::test]
     async fn unpublish_during_provisioning_leaves_rows_unchanged() {
