@@ -1,724 +1,1230 @@
 //! Hostify Network control plane: localhost-only administration and agent
 //! enrollment gateway. No public networking, DNS changes or workload execution.
 mod accounts_http;
-use accounts_http::{AccountApi,is_account_path};
+use accounts_http::{AccountApi, is_account_path};
 use bytes::Bytes;
-use hostify_core::network::{NetworkError,Registry};
-use hostify_core::network_auth::{Accounts,Capability};
-use http_body_util::{Full,BodyExt};
-use hyper::{Method,Request,Response,StatusCode,body::Incoming,header};
+use hostify_core::network::{NetworkError, Registry};
+use hostify_core::network_auth::{Accounts, Capability};
+use http_body_util::{BodyExt, Full};
+use hyper::{Method, Request, Response, StatusCode, body::Incoming, header};
 use ring::constant_time::verify_slices_are_equal;
 use serde::Deserialize;
-use serde_json::{json,Value};
-use std::sync::{Arc,Mutex};
+use serde_json::{Value, json};
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
-const MAX_BODY:usize=32*1024;
+const MAX_BODY: usize = 32 * 1024;
 pub struct Controller {
-    registry:Mutex<Registry>,
-    admin_secret:Vec<u8>,
-    accounts:Option<AccountApi>,
+    registry: Mutex<Registry>,
+    admin_secret: Vec<u8>,
+    accounts: Option<AccountApi>,
 }
 impl Controller {
-    pub fn new(registry:Registry,admin_secret:Vec<u8>)->Result<Self,&'static str>{
-        if admin_secret.len()<32 || admin_secret.len()>4096 ||
-            admin_secret.iter().any(|b| !b.is_ascii_graphic()) {
-            return Err("Configure a random administrator secret of 32-4096 printable ASCII bytes.");
+    pub fn new(registry: Registry, admin_secret: Vec<u8>) -> Result<Self, &'static str> {
+        if admin_secret.len() < 32
+            || admin_secret.len() > 4096
+            || admin_secret.iter().any(|b| !b.is_ascii_graphic())
+        {
+            return Err(
+                "Configure a random administrator secret of 32-4096 printable ASCII bytes.",
+            );
         }
-        Ok(Self{registry:Mutex::new(registry),admin_secret,accounts:None})
+        Ok(Self {
+            registry: Mutex::new(registry),
+            admin_secret,
+            accounts: None,
+        })
     }
     /// Attach only an already-initialized central account database. This
     /// changes no localhost-only transport or public readiness state.
-    pub fn with_accounts(mut self,accounts:Accounts)->Self{
-        self.accounts=Some(AccountApi::new(accounts));
+    pub fn with_accounts(mut self, accounts: Accounts) -> Self {
+        self.accounts = Some(AccountApi::new(accounts));
         self
     }
-    fn authorized(&self,header_value:Option<&str>)->bool{
-        let Some(token)=header_value.and_then(|h|h.strip_prefix("Bearer ")) else{return false;};
-        token.len()==self.admin_secret.len() &&
-            verify_slices_are_equal(token.as_bytes(),&self.admin_secret).is_ok()
+    fn authorized(&self, header_value: Option<&str>) -> bool {
+        let Some(token) = header_value.and_then(|h| h.strip_prefix("Bearer ")) else {
+            return false;
+        };
+        token.len() == self.admin_secret.len()
+            && verify_slices_are_equal(token.as_bytes(), &self.admin_secret).is_ok()
     }
-    pub fn dispatch(&self,method:&Method,path:&str,auth:Option<&str>,body:&[u8])
-        ->(StatusCode,Value){
-        if body.len()>MAX_BODY {
-            return (StatusCode::PAYLOAD_TOO_LARGE,json!({"error":"payload_too_large"}));
+    pub fn dispatch(
+        &self,
+        method: &Method,
+        path: &str,
+        auth: Option<&str>,
+        body: &[u8],
+    ) -> (StatusCode, Value) {
+        if body.len() > MAX_BODY {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                json!({"error":"payload_too_large"}),
+            );
         }
-        if method==Method::GET && path=="/healthz" {
-            return (StatusCode::OK,json!({"alive":true,"publicReady":false,
-                "gateway":"loopback-only","dnsConfigured":false}));
+        if method == Method::GET && path == "/healthz" {
+            return (
+                StatusCode::OK,
+                json!({"alive":true,"publicReady":false,
+                "gateway":"loopback-only","dnsConfigured":false}),
+            );
         }
         if is_account_path(path) {
-            if method!=Method::POST {
-                return (StatusCode::METHOD_NOT_ALLOWED,json!({"error":"method_not_allowed"}));
+            if method != Method::POST {
+                return (
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    json!({"error":"method_not_allowed"}),
+                );
             }
-            return match &self.accounts{
-                Some(accounts)=>accounts.dispatch(path,auth,self.authorized(auth),body),
-                None=>(StatusCode::SERVICE_UNAVAILABLE,json!({"error":"unavailable"})),
+            return match &self.accounts {
+                Some(accounts) => accounts.dispatch(path, auth, self.authorized(auth), body),
+                None => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"error":"unavailable"}),
+                ),
             };
         }
         // Operator endpoints still require the process-local admin secret.
         // Tenant endpoints instead require a scoped account session and RBAC.
-        let public_action=method==Method::POST &&
-            matches!(path,"/v1/agents/enroll"|"/v1/agents/proof");
-        let tenant_action=method==Method::POST &&
-            matches!(path,"/v1/tenant/invitations"|"/v1/tenant/routes/reserve"|
-                "/v1/tenant/agents/revoke"|"/v1/tenant/agents/list"|
-                "/v1/tenant/routes/list"|"/v1/tenant/audit/list"|
-                "/v1/tenant/usage"|"/v1/tenant/agents/rename"|
-                "/v1/tenant/invitations/list"|"/v1/tenant/invitations/revoke"|
-                "/v1/tenant/routes/reservations/list"|
-                "/v1/tenant/routes/disable"|"/v1/tenant/routes/restore"|
-                "/v1/tenant/routes/reassign");
+        let public_action =
+            method == Method::POST && matches!(path, "/v1/agents/enroll" | "/v1/agents/proof");
+        let tenant_action = method == Method::POST
+            && matches!(
+                path,
+                "/v1/tenant/invitations"
+                    | "/v1/tenant/routes/reserve"
+                    | "/v1/tenant/agents/revoke"
+                    | "/v1/tenant/agents/list"
+                    | "/v1/tenant/routes/list"
+                    | "/v1/tenant/audit/list"
+                    | "/v1/tenant/usage"
+                    | "/v1/tenant/agents/rename"
+                    | "/v1/tenant/invitations/list"
+                    | "/v1/tenant/invitations/revoke"
+                    | "/v1/tenant/routes/reservations/list"
+                    | "/v1/tenant/routes/disable"
+                    | "/v1/tenant/routes/restore"
+                    | "/v1/tenant/routes/reassign"
+            );
         if !public_action && !tenant_action && !self.authorized(auth) {
-            return (StatusCode::UNAUTHORIZED,json!({"error":"unauthorized"}));
+            return (StatusCode::UNAUTHORIZED, json!({"error":"unauthorized"}));
         }
-        if method!=Method::POST {
-            return (StatusCode::METHOD_NOT_ALLOWED,json!({"error":"method_not_allowed"}));
+        if method != Method::POST {
+            return (
+                StatusCode::METHOD_NOT_ALLOWED,
+                json!({"error":"method_not_allowed"}),
+            );
         }
-        let mut registry=match self.registry.lock() {
-            Ok(registry)=>registry,
-            Err(_)=>return (StatusCode::SERVICE_UNAVAILABLE,json!({"error":"unavailable"})),
+        let mut registry = match self.registry.lock() {
+            Ok(registry) => registry,
+            Err(_) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"error":"unavailable"}),
+                );
+            }
         };
-        fn parse<T:serde::de::DeserializeOwned>(body:&[u8])
-            ->Result<T,serde_json::Error>{
+        fn parse<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, serde_json::Error> {
             serde_json::from_slice(body)
         }
-        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
-        struct TenantInput {name:String}
-        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
-        struct InvitationInput {tenant_id:String,ttl_seconds:i64}
-        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
-        struct EnrollInput {invitation:String,public_key_hex:String}
-        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
-        struct RouteInput {tenant_id:String,agent_id:String,site_id:String,label:String}
-        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
-        struct ChallengeInput {tenant_id:String,agent_id:String,route_id:String,ttl_seconds:i64}
-        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
-        struct ProofInput {
-            tenant_id:String,agent_id:String,route_id:String,
-            challenge:String,signature_hex:String
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct TenantInput {
+            name: String,
         }
-        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
-        struct RevokeInput {tenant_id:String,agent_id:String}
-        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
-        struct RenameInput {tenant_id:String,agent_id:String,display_name:String}
-        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
-        struct InventoryInput {tenant_id:String,limit:i64,offset:i64}
-        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
-        struct UsageInput {tenant_id:String}
-        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
-        struct DeviceInviteRevoke {tenant_id:String,invitation_id:String}
-        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
-        struct ReservationAction {tenant_id:String,route_id:String}
-        #[derive(Deserialize)]#[serde(rename_all="camelCase",deny_unknown_fields)]
-        struct RouteReassign {tenant_id:String,route_id:String,agent_id:String,site_id:String}
-        let response:Result<Value,(StatusCode,&'static str)>=match path {
-            "/v1/tenants"=>parse::<TenantInput>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p| registry.create_tenant(&p.name)
-                    .map(|t|json!(t)).map_err(map_network_error)),
-            "/v1/invitations"=>parse::<InvitationInput>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|registry.issue_invitation(&p.tenant_id,p.ttl_seconds)
-                    .map(|t|json!({"invitation":t.token,"invitationId":t.id,
-                            "expiresUnix":t.expires_unix}))
-                    .map_err(map_network_error)),
-            "/v1/agents/enroll"=>parse::<EnrollInput>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|registry.enroll_agent(&p.invitation,&p.public_key_hex)
-                    .map(|a|json!(a)).map_err(map_network_error)),
-            "/v1/routes/reserve"=>parse::<RouteInput>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|registry.reserve_hostname(&p.tenant_id,&p.agent_id,&p.site_id,&p.label)
-                    .map(|r|json!({"route":r,"publiclyRoutable":false}))
-                    .map_err(map_network_error)),
-            "/v1/agents/challenge"=>parse::<ChallengeInput>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|registry.issue_route_challenge(&p.tenant_id,
-                    &p.agent_id,&p.route_id,p.ttl_seconds)
-                    .map(|c|json!({"challenge":c.value,"expiresUnix":c.expires_unix}))
-                    .map_err(map_network_error)),
-            "/v1/agents/proof"=>parse::<ProofInput>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|registry.verify_route_signature(&p.tenant_id,
-                    &p.agent_id,&p.route_id,&p.challenge,&p.signature_hex)
-                    .map(|_|json!({"identityVerified":true,"publiclyRoutable":false}))
-                    .map_err(map_network_error)),
-            "/v1/tenant/invitations"=>parse::<InvitationInput>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|{
-                    let accounts=self.accounts.as_ref().ok_or(
-                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
-                    accounts.authorize(auth,&p.tenant_id,Capability::ManageDevices)?;
-                    registry.issue_invitation(&p.tenant_id,p.ttl_seconds)
-                        .map(|t|json!({"invitation":t.token,"invitationId":t.id,
-                            "expiresUnix":t.expires_unix}))
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct InvitationInput {
+            tenant_id: String,
+            ttl_seconds: i64,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct EnrollInput {
+            invitation: String,
+            public_key_hex: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RouteInput {
+            tenant_id: String,
+            agent_id: String,
+            site_id: String,
+            label: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct ChallengeInput {
+            tenant_id: String,
+            agent_id: String,
+            route_id: String,
+            ttl_seconds: i64,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct ProofInput {
+            tenant_id: String,
+            agent_id: String,
+            route_id: String,
+            challenge: String,
+            signature_hex: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RevokeInput {
+            tenant_id: String,
+            agent_id: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RenameInput {
+            tenant_id: String,
+            agent_id: String,
+            display_name: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct InventoryInput {
+            tenant_id: String,
+            limit: i64,
+            offset: i64,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct UsageInput {
+            tenant_id: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct DeviceInviteRevoke {
+            tenant_id: String,
+            invitation_id: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct ReservationAction {
+            tenant_id: String,
+            route_id: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RouteReassign {
+            tenant_id: String,
+            route_id: String,
+            agent_id: String,
+            site_id: String,
+        }
+        let response: Result<Value, (StatusCode, &'static str)> = match path {
+            "/v1/tenants" => parse::<TenantInput>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    registry
+                        .create_tenant(&p.name)
+                        .map(|t| json!(t))
                         .map_err(map_network_error)
                 }),
-            "/v1/tenant/invitations/list"=>parse::<InventoryInput>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|{
-                    let accounts=self.accounts.as_ref().ok_or(
-                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
-                    accounts.authorize(auth,&p.tenant_id,Capability::ManageDevices)?;
-                    registry.list_pending_device_invitations(&p.tenant_id,p.limit,p.offset)
-                        .map(|items|json!({"items":items,"limit":p.limit,"offset":p.offset}))
+            "/v1/invitations" => parse::<InvitationInput>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    registry
+                        .issue_invitation(&p.tenant_id, p.ttl_seconds)
+                        .map(|t| {
+                            json!({"invitation":t.token,"invitationId":t.id,
+                            "expiresUnix":t.expires_unix})
+                        })
                         .map_err(map_network_error)
                 }),
-            "/v1/tenant/invitations/revoke"=>parse::<DeviceInviteRevoke>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|{
-                    let accounts=self.accounts.as_ref().ok_or(
-                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
-                    accounts.authorize(auth,&p.tenant_id,Capability::ManageDevices)?;
-                    registry.revoke_device_invitation(&p.tenant_id,&p.invitation_id)
-                        .map(|_|json!({"revoked":true})).map_err(map_network_error)
-                }),
-            "/v1/tenant/routes/reserve"=>parse::<RouteInput>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|{
-                    let accounts=self.accounts.as_ref().ok_or(
-                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
-                    accounts.authorize(auth,&p.tenant_id,Capability::ManageSites)?;
-                    registry.reserve_hostname(&p.tenant_id,&p.agent_id,&p.site_id,&p.label)
-                        .map(|route|json!({"route":route,"publiclyRoutable":false}))
+            "/v1/agents/enroll" => parse::<EnrollInput>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    registry
+                        .enroll_agent(&p.invitation, &p.public_key_hex)
+                        .map(|a| json!(a))
                         .map_err(map_network_error)
                 }),
-            "/v1/tenant/agents/list"=>parse::<InventoryInput>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|{
-                    let accounts=self.accounts.as_ref().ok_or(
-                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
-                    accounts.authorize(auth,&p.tenant_id,Capability::View)?;
-                    registry.list_tenant_agents(&p.tenant_id,p.limit,p.offset)
-                        .map(|items|json!({"items":items,"limit":p.limit,"offset":p.offset}))
+            "/v1/routes/reserve" => parse::<RouteInput>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    registry
+                        .reserve_hostname(&p.tenant_id, &p.agent_id, &p.site_id, &p.label)
+                        .map(|r| json!({"route":r,"publiclyRoutable":false}))
                         .map_err(map_network_error)
                 }),
-            "/v1/tenant/routes/list"=>parse::<InventoryInput>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|{
-                    let accounts=self.accounts.as_ref().ok_or(
-                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
-                    accounts.authorize(auth,&p.tenant_id,Capability::View)?;
-                    registry.list_tenant_routes(&p.tenant_id,p.limit,p.offset)
-                        .map(|items|json!({"items":items,"limit":p.limit,
-                            "offset":p.offset,"publiclyRoutable":false}))
+            "/v1/agents/challenge" => parse::<ChallengeInput>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    registry
+                        .issue_route_challenge(
+                            &p.tenant_id,
+                            &p.agent_id,
+                            &p.route_id,
+                            p.ttl_seconds,
+                        )
+                        .map(|c| json!({"challenge":c.value,"expiresUnix":c.expires_unix}))
                         .map_err(map_network_error)
                 }),
-            "/v1/tenant/routes/reservations/list"=>parse::<InventoryInput>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|{
-                    let accounts=self.accounts.as_ref().ok_or(
-                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
-                    accounts.authorize(auth,&p.tenant_id,Capability::View)?;
-                    registry.list_tenant_reservations(&p.tenant_id,p.limit,p.offset)
-                        .map(|items|json!({"items":items,"limit":p.limit,
-                            "offset":p.offset,"publiclyRoutable":false}))
+            "/v1/agents/proof" => parse::<ProofInput>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    registry
+                        .verify_route_signature(
+                            &p.tenant_id,
+                            &p.agent_id,
+                            &p.route_id,
+                            &p.challenge,
+                            &p.signature_hex,
+                        )
+                        .map(|_| json!({"identityVerified":true,"publiclyRoutable":false}))
                         .map_err(map_network_error)
                 }),
-            "/v1/tenant/routes/reassign"=>parse::<RouteReassign>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|{
-                    let accounts=self.accounts.as_ref().ok_or(
-                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
-                    accounts.authorize(auth,&p.tenant_id,Capability::ManageSites)?;
-                    registry.reassign_reserved_route(&p.tenant_id,&p.route_id,
-                        &p.agent_id,&p.site_id)
-                        .map(|route|json!({"route":route,"publiclyRoutable":false,
-                            "freshDeviceProofRequired":true}))
+            "/v1/tenant/invitations" => parse::<InvitationInput>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    let accounts = self
+                        .accounts
+                        .as_ref()
+                        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))?;
+                    accounts.authorize(auth, &p.tenant_id, Capability::ManageDevices)?;
+                    registry
+                        .issue_invitation(&p.tenant_id, p.ttl_seconds)
+                        .map(|t| {
+                            json!({"invitation":t.token,"invitationId":t.id,
+                            "expiresUnix":t.expires_unix})
+                        })
                         .map_err(map_network_error)
                 }),
-            "/v1/tenant/routes/disable"=>parse::<ReservationAction>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|{
-                    let accounts=self.accounts.as_ref().ok_or(
-                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
-                    accounts.authorize(auth,&p.tenant_id,Capability::ManageSites)?;
-                    registry.disable_reserved_route(&p.tenant_id,&p.route_id)
-                        .map(|_|json!({"disabled":true,"publiclyRoutable":false}))
+            "/v1/tenant/invitations/list" => parse::<InventoryInput>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    let accounts = self
+                        .accounts
+                        .as_ref()
+                        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))?;
+                    accounts.authorize(auth, &p.tenant_id, Capability::ManageDevices)?;
+                    registry
+                        .list_pending_device_invitations(&p.tenant_id, p.limit, p.offset)
+                        .map(|items| json!({"items":items,"limit":p.limit,"offset":p.offset}))
                         .map_err(map_network_error)
                 }),
-            "/v1/tenant/routes/restore"=>parse::<ReservationAction>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|{
-                    let accounts=self.accounts.as_ref().ok_or(
-                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
-                    accounts.authorize(auth,&p.tenant_id,Capability::ManageSites)?;
-                    registry.restore_disabled_route(&p.tenant_id,&p.route_id)
-                        .map(|_|json!({"reserved":true,"publiclyRoutable":false}))
+            "/v1/tenant/invitations/revoke" => parse::<DeviceInviteRevoke>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    let accounts = self
+                        .accounts
+                        .as_ref()
+                        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))?;
+                    accounts.authorize(auth, &p.tenant_id, Capability::ManageDevices)?;
+                    registry
+                        .revoke_device_invitation(&p.tenant_id, &p.invitation_id)
+                        .map(|_| json!({"revoked":true}))
                         .map_err(map_network_error)
                 }),
-            "/v1/tenant/usage"=>parse::<UsageInput>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|{
-                    let accounts=self.accounts.as_ref().ok_or(
-                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
-                    accounts.authorize(auth,&p.tenant_id,Capability::View)?;
-                    registry.tenant_usage(&p.tenant_id)
-                        .map(|usage|json!({"usage":usage,"publicReady":false}))
+            "/v1/tenant/routes/reserve" => parse::<RouteInput>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    let accounts = self
+                        .accounts
+                        .as_ref()
+                        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))?;
+                    accounts.authorize(auth, &p.tenant_id, Capability::ManageSites)?;
+                    registry
+                        .reserve_hostname(&p.tenant_id, &p.agent_id, &p.site_id, &p.label)
+                        .map(|route| json!({"route":route,"publiclyRoutable":false}))
                         .map_err(map_network_error)
                 }),
-            "/v1/tenant/audit/list"=>parse::<InventoryInput>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|{
-                    let accounts=self.accounts.as_ref().ok_or(
-                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
+            "/v1/tenant/agents/list" => parse::<InventoryInput>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    let accounts = self
+                        .accounts
+                        .as_ref()
+                        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))?;
+                    accounts.authorize(auth, &p.tenant_id, Capability::View)?;
+                    registry
+                        .list_tenant_agents(&p.tenant_id, p.limit, p.offset)
+                        .map(|items| json!({"items":items,"limit":p.limit,"offset":p.offset}))
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/routes/list" => parse::<InventoryInput>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    let accounts = self
+                        .accounts
+                        .as_ref()
+                        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))?;
+                    accounts.authorize(auth, &p.tenant_id, Capability::View)?;
+                    registry
+                        .list_tenant_routes(&p.tenant_id, p.limit, p.offset)
+                        .map(|items| {
+                            json!({"items":items,"limit":p.limit,
+                            "offset":p.offset,"publiclyRoutable":false})
+                        })
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/routes/reservations/list" => parse::<InventoryInput>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    let accounts = self
+                        .accounts
+                        .as_ref()
+                        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))?;
+                    accounts.authorize(auth, &p.tenant_id, Capability::View)?;
+                    registry
+                        .list_tenant_reservations(&p.tenant_id, p.limit, p.offset)
+                        .map(|items| {
+                            json!({"items":items,"limit":p.limit,
+                            "offset":p.offset,"publiclyRoutable":false})
+                        })
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/routes/reassign" => parse::<RouteReassign>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    let accounts = self
+                        .accounts
+                        .as_ref()
+                        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))?;
+                    accounts.authorize(auth, &p.tenant_id, Capability::ManageSites)?;
+                    registry
+                        .reassign_reserved_route(&p.tenant_id, &p.route_id, &p.agent_id, &p.site_id)
+                        .map(|route| {
+                            json!({"route":route,"publiclyRoutable":false,
+                            "freshDeviceProofRequired":true})
+                        })
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/routes/disable" => parse::<ReservationAction>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    let accounts = self
+                        .accounts
+                        .as_ref()
+                        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))?;
+                    accounts.authorize(auth, &p.tenant_id, Capability::ManageSites)?;
+                    registry
+                        .disable_reserved_route(&p.tenant_id, &p.route_id)
+                        .map(|_| json!({"disabled":true,"publiclyRoutable":false}))
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/routes/restore" => parse::<ReservationAction>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    let accounts = self
+                        .accounts
+                        .as_ref()
+                        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))?;
+                    accounts.authorize(auth, &p.tenant_id, Capability::ManageSites)?;
+                    registry
+                        .restore_disabled_route(&p.tenant_id, &p.route_id)
+                        .map(|_| json!({"reserved":true,"publiclyRoutable":false}))
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/usage" => parse::<UsageInput>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    let accounts = self
+                        .accounts
+                        .as_ref()
+                        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))?;
+                    accounts.authorize(auth, &p.tenant_id, Capability::View)?;
+                    registry
+                        .tenant_usage(&p.tenant_id)
+                        .map(|usage| json!({"usage":usage,"publicReady":false}))
+                        .map_err(map_network_error)
+                }),
+            "/v1/tenant/audit/list" => parse::<InventoryInput>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    let accounts = self
+                        .accounts
+                        .as_ref()
+                        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))?;
                     // Viewing security history requires management permission.
                     // Read-only viewers must never get tenant audit access.
-                    accounts.authorize(auth,&p.tenant_id,Capability::ManageUsers)?;
-                    registry.list_tenant_audit(&p.tenant_id,p.limit,p.offset)
-                        .map(|items|json!({"items":items,"limit":p.limit,"offset":p.offset}))
+                    accounts.authorize(auth, &p.tenant_id, Capability::ManageUsers)?;
+                    registry
+                        .list_tenant_audit(&p.tenant_id, p.limit, p.offset)
+                        .map(|items| json!({"items":items,"limit":p.limit,"offset":p.offset}))
                         .map_err(map_network_error)
                 }),
-            "/v1/tenant/agents/rename"=>parse::<RenameInput>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|{
-                    let accounts=self.accounts.as_ref().ok_or(
-                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
-                    accounts.authorize(auth,&p.tenant_id,Capability::ManageDevices)?;
-                    registry.rename_agent(&p.tenant_id,&p.agent_id,&p.display_name)
-                        .map(|_|json!({"renamed":true})).map_err(map_network_error)
-                }),
-            "/v1/tenant/agents/revoke"=>parse::<RevokeInput>(body)
-                .map_err(|_|(StatusCode::BAD_REQUEST,"invalid_json"))
-                .and_then(|p|{
-                    let accounts=self.accounts.as_ref().ok_or(
-                        (StatusCode::SERVICE_UNAVAILABLE,"unavailable"))?;
-                    accounts.authorize(auth,&p.tenant_id,Capability::ManageDevices)?;
-                    registry.revoke_agent(&p.tenant_id,&p.agent_id)
-                        .map(|_|json!({"revoked":true}))
+            "/v1/tenant/agents/rename" => parse::<RenameInput>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    let accounts = self
+                        .accounts
+                        .as_ref()
+                        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))?;
+                    accounts.authorize(auth, &p.tenant_id, Capability::ManageDevices)?;
+                    registry
+                        .rename_agent(&p.tenant_id, &p.agent_id, &p.display_name)
+                        .map(|_| json!({"renamed":true}))
                         .map_err(map_network_error)
                 }),
-            _=>Err((StatusCode::NOT_FOUND,"not_found")),
+            "/v1/tenant/agents/revoke" => parse::<RevokeInput>(body)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_json"))
+                .and_then(|p| {
+                    let accounts = self
+                        .accounts
+                        .as_ref()
+                        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))?;
+                    accounts.authorize(auth, &p.tenant_id, Capability::ManageDevices)?;
+                    registry
+                        .revoke_agent(&p.tenant_id, &p.agent_id)
+                        .map(|_| json!({"revoked":true}))
+                        .map_err(map_network_error)
+                }),
+            _ => Err((StatusCode::NOT_FOUND, "not_found")),
         };
-        match response{
-            Ok(value)=>(StatusCode::OK,value),
-            Err((status,message))=>(status,json!({"error":message})),
+        match response {
+            Ok(value) => (StatusCode::OK, value),
+            Err((status, message)) => (status, json!({"error":message})),
         }
     }
 }
-fn map_network_error(error:NetworkError)->(StatusCode,&'static str){
-    match error{
-        NetworkError::Invalid|NetworkError::InvalidInvitation|
-            NetworkError::InvalidChallenge=>(StatusCode::BAD_REQUEST,"invalid_request"),
-        NetworkError::Unauthorized|NetworkError::Ownership=>
-            (StatusCode::FORBIDDEN,"not_authorized"),
-        NetworkError::Quota=>(StatusCode::CONFLICT,"quota_exceeded"),
-        NetworkError::HostnameTaken=>(StatusCode::CONFLICT,"hostname_reserved"),
-        NetworkError::Storage(_)=>(StatusCode::SERVICE_UNAVAILABLE,"temporarily_unavailable"),
+fn map_network_error(error: NetworkError) -> (StatusCode, &'static str) {
+    match error {
+        NetworkError::Invalid
+        | NetworkError::InvalidInvitation
+        | NetworkError::InvalidChallenge => (StatusCode::BAD_REQUEST, "invalid_request"),
+        NetworkError::Unauthorized | NetworkError::Ownership => {
+            (StatusCode::FORBIDDEN, "not_authorized")
+        }
+        NetworkError::Quota => (StatusCode::CONFLICT, "quota_exceeded"),
+        NetworkError::HostnameTaken => (StatusCode::CONFLICT, "hostname_reserved"),
+        NetworkError::Storage(_) => (StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
     }
 }
-fn response(status:StatusCode,value:Value)->Response<Full<Bytes>>{
-    let bytes=Bytes::from(value.to_string());
-    Response::builder().status(status)
-        .header(header::CONTENT_TYPE,"application/json; charset=utf-8")
-        .header(header::CACHE_CONTROL,"no-store")
-        .header(header::X_CONTENT_TYPE_OPTIONS,"nosniff")
+fn response(status: StatusCode, value: Value) -> Response<Full<Bytes>> {
+    let bytes = Bytes::from(value.to_string());
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         // No CORS grants, including Origin: null. Local browser sandboxes
         // must not receive administrator read permission.
-        .body(Full::new(bytes)).expect("static response headers")
+        .body(Full::new(bytes))
+        .expect("static response headers")
 }
-pub async fn serve_request(req:Request<Incoming>,controller:Arc<Controller>)
-    ->Result<Response<Full<Bytes>>,std::convert::Infallible>{
-    let (head,mut body)=req.into_parts();
+pub async fn serve_request(
+    req: Request<Incoming>,
+    controller: Arc<Controller>,
+) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
+    let (head, mut body) = req.into_parts();
     // Reject browser-origin requests and DNS rebinding attempts to localhost.
     // Even signed enrollment requests must not be served through a page
     // loaded from an unrelated origin.
-    let host=head.headers.get(header::HOST).and_then(|v|v.to_str().ok());
-    let allowed_host=host.is_some_and(|host| {
-        let host=host.to_ascii_lowercase();
-        host=="localhost" || host=="127.0.0.1" ||
-            host.strip_prefix("localhost:").is_some_and(|p|p.parse::<u16>().is_ok()) ||
-            host.strip_prefix("127.0.0.1:").is_some_and(|p|p.parse::<u16>().is_ok())
+    let host = head.headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    let allowed_host = host.is_some_and(|host| {
+        let host = host.to_ascii_lowercase();
+        host == "localhost"
+            || host == "127.0.0.1"
+            || host
+                .strip_prefix("localhost:")
+                .is_some_and(|p| p.parse::<u16>().is_ok())
+            || host
+                .strip_prefix("127.0.0.1:")
+                .is_some_and(|p| p.parse::<u16>().is_ok())
     });
     if !allowed_host || head.headers.contains_key(header::ORIGIN) {
-        return Ok(response(StatusCode::FORBIDDEN,json!({"error":"local_requests_only"})));
+        return Ok(response(
+            StatusCode::FORBIDDEN,
+            json!({"error":"local_requests_only"}),
+        ));
     }
-    let auth=head.headers.get(header::AUTHORIZATION)
-        .and_then(|h|h.to_str().ok()).map(str::to_owned);
-    let path=head.uri.path().to_owned();
-    if head.headers.get(header::CONTENT_LENGTH)
-        .and_then(|v|v.to_str().ok()).and_then(|s|s.parse::<usize>().ok())
-        .is_some_and(|n|n>MAX_BODY){
-        return Ok(response(StatusCode::PAYLOAD_TOO_LARGE,json!({"error":"payload_too_large"})));
+    let auth = head
+        .headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .map(str::to_owned);
+    let path = head.uri.path().to_owned();
+    if head
+        .headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<usize>().ok())
+        .is_some_and(|n| n > MAX_BODY)
+    {
+        return Ok(response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            json!({"error":"payload_too_large"}),
+        ));
     }
-    let mut content=Vec::new();
-    while let Some(frame_result)=body.frame().await{
-        match frame_result{
-            Ok(frame)=>{
-                if let Some(chunk)=frame.data_ref(){
-                    if content.len().saturating_add(chunk.len())>MAX_BODY{
-                        return Ok(response(StatusCode::PAYLOAD_TOO_LARGE,
-                            json!({"error":"payload_too_large"})));
+    let mut content = Vec::new();
+    while let Some(frame_result) = body.frame().await {
+        match frame_result {
+            Ok(frame) => {
+                if let Some(chunk) = frame.data_ref() {
+                    if content.len().saturating_add(chunk.len()) > MAX_BODY {
+                        return Ok(response(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            json!({"error":"payload_too_large"}),
+                        ));
                     }
                     content.extend_from_slice(chunk);
                 }
             }
-            Err(_)=>return Ok(response(StatusCode::BAD_REQUEST,json!({"error":"invalid_body"}))),
+            Err(_) => {
+                return Ok(response(
+                    StatusCode::BAD_REQUEST,
+                    json!({"error":"invalid_body"}),
+                ));
+            }
         }
     }
-    let (status,value)=controller.dispatch(&head.method,&path,auth.as_deref(),&content);
-    Ok(response(status,value))
+    let (status, value) = controller.dispatch(&head.method, &path, auth.as_deref(), &content);
+    Ok(response(status, value))
 }
 #[cfg(test)]
-mod tests{
+mod tests {
     use super::*;
-    fn api()->Controller{
-        Controller::new(Registry::memory("example.test").unwrap(),
-            b"0123456789abcdef0123456789abcdef".to_vec()).unwrap()
+    fn api() -> Controller {
+        Controller::new(
+            Registry::memory("example.test").unwrap(),
+            b"0123456789abcdef0123456789abcdef".to_vec(),
+        )
+        .unwrap()
     }
-    fn command(api:&Controller,path:&str,admin:bool,input:Value)->(StatusCode,Value){
-        api.dispatch(&Method::POST,path,
+    fn command(api: &Controller, path: &str, admin: bool, input: Value) -> (StatusCode, Value) {
+        api.dispatch(
+            &Method::POST,
+            path,
             admin.then_some("Bearer 0123456789abcdef0123456789abcdef"),
-            input.to_string().as_bytes())
+            input.to_string().as_bytes(),
+        )
     }
     #[test]
-    fn rejects_admin_operations_without_authorization_and_never_mints_routes(){
-        let api=api();
-        let (status,_)=command(&api,"/v1/tenants",false,json!({"name":"Tenant"}));
-        assert_eq!(status,StatusCode::UNAUTHORIZED);
-        let (status,tenant)=command(&api,"/v1/tenants",true,json!({"name":"Tenant"}));
-        assert_eq!(status,StatusCode::OK);
-        let id=tenant["id"].as_str().unwrap();
-        let (status,invitation)=command(&api,"/v1/invitations",true,
-            json!({"tenantId":id,"ttlSeconds":120}));
-        assert_eq!(status,StatusCode::OK);
-        let (status,agent)=command(&api,"/v1/agents/enroll",false,
-            json!({"invitation":invitation["invitation"],"publicKeyHex":"42".repeat(32)}));
-        assert_eq!(status,StatusCode::OK);
-        let (status,route)=command(&api,"/v1/routes/reserve",true,
+    fn rejects_admin_operations_without_authorization_and_never_mints_routes() {
+        let api = api();
+        let (status, _) = command(&api, "/v1/tenants", false, json!({"name":"Tenant"}));
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, tenant) = command(&api, "/v1/tenants", true, json!({"name":"Tenant"}));
+        assert_eq!(status, StatusCode::OK);
+        let id = tenant["id"].as_str().unwrap();
+        let (status, invitation) = command(
+            &api,
+            "/v1/invitations",
+            true,
+            json!({"tenantId":id,"ttlSeconds":120}),
+        );
+        assert_eq!(status, StatusCode::OK);
+        let (status, agent) = command(
+            &api,
+            "/v1/agents/enroll",
+            false,
+            json!({"invitation":invitation["invitation"],"publicKeyHex":"42".repeat(32)}),
+        );
+        assert_eq!(status, StatusCode::OK);
+        let (status, route) = command(
+            &api,
+            "/v1/routes/reserve",
+            true,
             json!({"tenantId":id,"agentId":agent["id"],
-                "siteId":Uuid::new_v4().to_string(),"label":"first-host"}));
-        assert_eq!(status,StatusCode::OK);
-        assert_eq!(route["publiclyRoutable"],false);
-        let (status,_) = command(&api,"/v1/tenants",false,json!({"name":"NotAllowed"}));
-        assert_eq!(status,StatusCode::UNAUTHORIZED);
+                "siteId":Uuid::new_v4().to_string(),"label":"first-host"}),
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(route["publiclyRoutable"], false);
+        let (status, _) = command(&api, "/v1/tenants", false, json!({"name":"NotAllowed"}));
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
     #[tokio::test]
-    async fn real_http_listener_is_loopback_only_and_has_no_public_readiness(){
-        use hyper::{service::service_fn,server::conn::http1};
+    async fn real_http_listener_is_loopback_only_and_has_no_public_readiness() {
+        use hyper::{server::conn::http1, service::service_fn};
         use hyper_util::rt::TokioIo;
-        use tokio::{net::{TcpListener,TcpStream},io::{AsyncReadExt,AsyncWriteExt}};
-        let listener=TcpListener::bind(("127.0.0.1",0)).await.unwrap();
-        let port=listener.local_addr().unwrap().port();
-        let control=Arc::new(api());
-        let task=tokio::spawn(async move{
-            let (socket,_)=listener.accept().await.unwrap();
-            let service=service_fn(move |request|serve_request(request,control.clone()));
-            http1::Builder::new().serve_connection(TokioIo::new(socket),service)
-                .await.unwrap();
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::{TcpListener, TcpStream},
+        };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let control = Arc::new(api());
+        let task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let service = service_fn(move |request| serve_request(request, control.clone()));
+            http1::Builder::new()
+                .serve_connection(TokioIo::new(socket), service)
+                .await
+                .unwrap();
         });
-        let mut client=TcpStream::connect(("127.0.0.1",port)).await.unwrap();
-        client.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-            .await.unwrap();
-        let mut response=Vec::new();
-        tokio::time::timeout(std::time::Duration::from_secs(5),
-            client.read_to_end(&mut response)).await.unwrap().unwrap();
-        let text=String::from_utf8(response).unwrap();
-        assert!(text.starts_with("HTTP/1.1 200"),"{text}");
-        assert!(text.contains("\"publicReady\":false"),"{text}");
+        let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        client
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.read_to_end(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let text = String::from_utf8(response).unwrap();
+        assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+        assert!(text.contains("\"publicReady\":false"), "{text}");
         assert!(!text.contains("access-control-allow-origin:"));
         task.await.unwrap();
     }
     #[tokio::test]
     async fn http_server_rejects_foreign_host_and_browser_origin() {
-        use hyper::{service::service_fn,server::conn::http1};
+        use hyper::{server::conn::http1, service::service_fn};
         use hyper_util::rt::TokioIo;
-        use tokio::{net::{TcpListener,TcpStream},io::{AsyncReadExt,AsyncWriteExt}};
-        for headers in ["Host: evil.example.test\r\n",
-                        "Host: localhost\r\nOrigin: https://evil.example.test\r\n"] {
-            let listener=TcpListener::bind(("127.0.0.1",0)).await.unwrap();
-            let port=listener.local_addr().unwrap().port();
-            let control=Arc::new(api());
-            let server=tokio::spawn(async move {
-                let (stream,_)=listener.accept().await.unwrap();
-                let service=service_fn(move |request|serve_request(request,control.clone()));
-                http1::Builder::new().serve_connection(TokioIo::new(stream),service).await.unwrap();
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::{TcpListener, TcpStream},
+        };
+        for headers in [
+            "Host: evil.example.test\r\n",
+            "Host: localhost\r\nOrigin: https://evil.example.test\r\n",
+        ] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let control = Arc::new(api());
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let service = service_fn(move |request| serve_request(request, control.clone()));
+                http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await
+                    .unwrap();
             });
-            let mut client=TcpStream::connect(("127.0.0.1",port)).await.unwrap();
-            let request=format!("GET /healthz HTTP/1.1\r\n{headers}Connection: close\r\n\r\n");
+            let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            let request = format!("GET /healthz HTTP/1.1\r\n{headers}Connection: close\r\n\r\n");
             client.write_all(request.as_bytes()).await.unwrap();
-            let mut response=Vec::new();
-            tokio::time::timeout(std::time::Duration::from_secs(5),
-                client.read_to_end(&mut response)).await.unwrap().unwrap();
+            let mut response = Vec::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                client.read_to_end(&mut response),
+            )
+            .await
+            .unwrap()
+            .unwrap();
             assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 403"));
             server.await.unwrap();
         }
     }
     #[test]
-    fn local_liveness_is_not_public_readiness_and_invalid_json_fails_closed(){
-        let api=api();
-        let (s,health)=api.dispatch(&Method::GET,"/healthz",None,&[]);
-        assert_eq!(s,StatusCode::OK);
-        assert_eq!(health["publicReady"],false);
-        let (s,_) = api.dispatch(&Method::POST,"/v1/tenants",
-            Some("Bearer incorrect"),b"{\"name\":\"a\"}");
-        assert_eq!(s,StatusCode::UNAUTHORIZED);
-        let (s,_) = api.dispatch(&Method::POST,"/v1/tenants",
-            Some("Bearer 0123456789abcdef0123456789abcdef"),b"{oops");
-        assert_eq!(s,StatusCode::BAD_REQUEST);
-        let (s,_) = api.dispatch(&Method::POST,"/v1/tenants",
+    fn local_liveness_is_not_public_readiness_and_invalid_json_fails_closed() {
+        let api = api();
+        let (s, health) = api.dispatch(&Method::GET, "/healthz", None, &[]);
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(health["publicReady"], false);
+        let (s, _) = api.dispatch(
+            &Method::POST,
+            "/v1/tenants",
+            Some("Bearer incorrect"),
+            b"{\"name\":\"a\"}",
+        );
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        let (s, _) = api.dispatch(
+            &Method::POST,
+            "/v1/tenants",
             Some("Bearer 0123456789abcdef0123456789abcdef"),
-            &vec![b'X';MAX_BODY+1]);
-        assert_eq!(s,StatusCode::PAYLOAD_TOO_LARGE);
+            b"{oops",
+        );
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (s, _) = api.dispatch(
+            &Method::POST,
+            "/v1/tenants",
+            Some("Bearer 0123456789abcdef0123456789abcdef"),
+            &vec![b'X'; MAX_BODY + 1],
+        );
+        assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE);
     }
     #[test]
-    fn localhost_account_sessions_enforce_tenant_roles_and_revoke_tokens(){
-        let path=std::env::temp_dir().join(format!("hostify-tenant-http-{}.db",Uuid::new_v4()));
-        let mut registry=Registry::open(&path,"example.test").unwrap();
-        let first=registry.create_tenant("First").unwrap();
-        let second=registry.create_tenant("Second").unwrap();
-        let accounts=Accounts::open(&path).unwrap();
-        let api=Controller::new(registry,
-            b"0123456789abcdef0123456789abcdef".to_vec()).unwrap().with_accounts(accounts);
-        let (status,_) = command(&api,"/v1/accounts/bootstrap",false,json!({
-            "tenantId":first.id,"email":"owner@site.test","password":"valid-owner-password"
-        }));
-        assert_eq!(status,StatusCode::UNAUTHORIZED);
-        let (status,created) = command(&api,"/v1/accounts/bootstrap",true,json!({
-            "tenantId":first.id,"email":"owner@site.test","password":"valid-owner-password"
-        }));
-        assert_eq!(status,StatusCode::OK);
-        assert_eq!(created["owner"]["tenantId"],first.id);
-        let (status,_) = command(&api,"/v1/accounts/bootstrap",true,json!({
-            "tenantId":first.id,"email":"other@site.test","password":"valid-other-password"
-        }));
-        assert_eq!(status,StatusCode::FORBIDDEN);
-        let (status,logged) = command(&api,"/v1/auth/login",false,json!({
-            "tenantId":first.id,"email":"owner@site.test","password":"valid-owner-password"
-        }));
-        assert_eq!(status,StatusCode::OK);
-        let token=logged["token"].as_str().unwrap().to_owned();
-        assert_eq!(token.len(),64);
-        let owner_auth=format!("Bearer {token}");
-        let call=|path:&str,auth:&str,input:Value|{
-            api.dispatch(&Method::POST,path,Some(auth),input.to_string().as_bytes())
+    fn localhost_account_sessions_enforce_tenant_roles_and_revoke_tokens() {
+        let path = std::env::temp_dir().join(format!("hostify-tenant-http-{}.db", Uuid::new_v4()));
+        let mut registry = Registry::open(&path, "example.test").unwrap();
+        let first = registry.create_tenant("First").unwrap();
+        let second = registry.create_tenant("Second").unwrap();
+        let accounts = Accounts::open(&path).unwrap();
+        let api = Controller::new(registry, b"0123456789abcdef0123456789abcdef".to_vec())
+            .unwrap()
+            .with_accounts(accounts);
+        let (status, _) = command(
+            &api,
+            "/v1/accounts/bootstrap",
+            false,
+            json!({
+                "tenantId":first.id,"email":"owner@site.test","password":"valid-owner-password"
+            }),
+        );
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, created) = command(
+            &api,
+            "/v1/accounts/bootstrap",
+            true,
+            json!({
+                "tenantId":first.id,"email":"owner@site.test","password":"valid-owner-password"
+            }),
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(created["owner"]["tenantId"], first.id);
+        let (status, _) = command(
+            &api,
+            "/v1/accounts/bootstrap",
+            true,
+            json!({
+                "tenantId":first.id,"email":"other@site.test","password":"valid-other-password"
+            }),
+        );
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, logged) = command(
+            &api,
+            "/v1/auth/login",
+            false,
+            json!({
+                "tenantId":first.id,"email":"owner@site.test","password":"valid-owner-password"
+            }),
+        );
+        assert_eq!(status, StatusCode::OK);
+        let token = logged["token"].as_str().unwrap().to_owned();
+        assert_eq!(token.len(), 64);
+        let owner_auth = format!("Bearer {token}");
+        let call = |path: &str, auth: &str, input: Value| {
+            api.dispatch(
+                &Method::POST,
+                path,
+                Some(auth),
+                input.to_string().as_bytes(),
+            )
         };
-        let (status,me)=call("/v1/auth/me",&owner_auth,json!({"tenantId":first.id}));
-        assert_eq!(status,StatusCode::OK);
-        assert_eq!(me["user"]["role"],"owner");
-        let (status,_) = call("/v1/auth/me",&owner_auth,json!({"tenantId":second.id}));
-        assert_eq!(status,StatusCode::UNAUTHORIZED);
-        let (status,invite)=call("/v1/members/invite",&owner_auth,json!({
-            "tenantId":first.id,"email":"viewer@site.test","role":"viewer","ttlSeconds":600
-        }));
-        assert_eq!(status,StatusCode::OK);
-        let (status,member)=command(&api,"/v1/members/accept",false,json!({
-            "invitation":invite["invitation"],"password":"valid-viewer-password"
-        }));
-        assert_eq!(status,StatusCode::OK);
-        assert_eq!(member["member"]["role"],"viewer");
-        let (status,viewer)=command(&api,"/v1/auth/login",false,json!({
-            "tenantId":first.id,"email":"viewer@site.test","password":"valid-viewer-password"
-        }));
-        assert_eq!(status,StatusCode::OK);
-        let viewer_auth=format!("Bearer {}",viewer["token"].as_str().unwrap());
-        let page=json!({"tenantId":first.id,"limit":10,"offset":0});
-        let (status,audit)=call("/v1/tenant/audit/list",&owner_auth,page.clone());
-        assert_eq!(status,StatusCode::OK);
+        let (status, me) = call("/v1/auth/me", &owner_auth, json!({"tenantId":first.id}));
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(me["user"]["role"], "owner");
+        let (status, _) = call("/v1/auth/me", &owner_auth, json!({"tenantId":second.id}));
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, invite) = call(
+            "/v1/members/invite",
+            &owner_auth,
+            json!({
+                "tenantId":first.id,"email":"viewer@site.test","role":"viewer","ttlSeconds":600
+            }),
+        );
+        assert_eq!(status, StatusCode::OK);
+        let (status, member) = command(
+            &api,
+            "/v1/members/accept",
+            false,
+            json!({
+                "invitation":invite["invitation"],"password":"valid-viewer-password"
+            }),
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(member["member"]["role"], "viewer");
+        let (status, viewer) = command(
+            &api,
+            "/v1/auth/login",
+            false,
+            json!({
+                "tenantId":first.id,"email":"viewer@site.test","password":"valid-viewer-password"
+            }),
+        );
+        assert_eq!(status, StatusCode::OK);
+        let viewer_auth = format!("Bearer {}", viewer["token"].as_str().unwrap());
+        let page = json!({"tenantId":first.id,"limit":10,"offset":0});
+        let (status, audit) = call("/v1/tenant/audit/list", &owner_auth, page.clone());
+        assert_eq!(status, StatusCode::OK);
         assert!(!audit["items"].as_array().unwrap().is_empty());
-        assert_eq!(audit["items"][0]["tenantId"],first.id);
-        assert!(!audit.to_string().contains(owner_auth.strip_prefix("Bearer ").unwrap()));
+        assert_eq!(audit["items"][0]["tenantId"], first.id);
+        assert!(
+            !audit
+                .to_string()
+                .contains(owner_auth.strip_prefix("Bearer ").unwrap())
+        );
         assert!(!audit.to_string().contains("owner@site.test"));
-        let (status,_) = call("/v1/tenant/audit/list",&viewer_auth,page.clone());
-        assert_eq!(status,StatusCode::FORBIDDEN);
-        let (status,_) = call("/v1/tenant/audit/list",&owner_auth,
-            json!({"tenantId":second.id,"limit":10,"offset":0}));
-        assert_eq!(status,StatusCode::UNAUTHORIZED);
-        let (status,_) = call("/v1/tenant/audit/list",&owner_auth,
-            json!({"tenantId":first.id,"limit":101,"offset":0}));
-        assert_eq!(status,StatusCode::BAD_REQUEST);
-        let (status,_)=call("/v1/tenant/invitations",&viewer_auth,json!({
-            "tenantId":first.id,"ttlSeconds":120
-        }));
-        assert_eq!(status,StatusCode::FORBIDDEN);
-        let (status,cancel_me)=call("/v1/tenant/invitations",&owner_auth,json!({
-            "tenantId":first.id,"ttlSeconds":120
-        }));
-        assert_eq!(status,StatusCode::OK);
-        assert_eq!(call("/v1/tenant/invitations/list",&viewer_auth,page.clone()).0,
-            StatusCode::FORBIDDEN);
-        let (status,found)=call("/v1/tenant/invitations/list",&owner_auth,page.clone());
-        assert_eq!(status,StatusCode::OK);
-        assert_eq!(found["items"][0]["id"],cancel_me["invitationId"]);
-        assert!(!found.to_string().contains(cancel_me["invitation"].as_str().unwrap()));
-        assert_eq!(call("/v1/tenant/invitations/revoke",&viewer_auth,json!({
-            "tenantId":first.id,"invitationId":cancel_me["invitationId"]
-        })).0,StatusCode::FORBIDDEN);
-        assert_eq!(call("/v1/tenant/invitations/revoke",&owner_auth,json!({
-            "tenantId":second.id,"invitationId":cancel_me["invitationId"]
-        })).0,StatusCode::UNAUTHORIZED);
-        assert_eq!(call("/v1/tenant/invitations/revoke",&owner_auth,json!({
-            "tenantId":first.id,"invitationId":cancel_me["invitationId"]
-        })).0,StatusCode::OK);
-        assert_eq!(command(&api,"/v1/agents/enroll",false,json!({
-            "invitation":cancel_me["invitation"],"publicKeyHex":"22".repeat(32)
-        })).0,StatusCode::BAD_REQUEST);
-        let (status,device_invite)=call("/v1/tenant/invitations",&owner_auth,json!({
-            "tenantId":first.id,"ttlSeconds":120
-        }));
-        assert_eq!(status,StatusCode::OK);
-        let (status,agent)=command(&api,"/v1/agents/enroll",false,json!({
-            "invitation":device_invite["invitation"],"publicKeyHex":"11".repeat(32)
-        }));
-        assert_eq!(status,StatusCode::OK);
-        let route=json!({"tenantId":first.id,"agentId":agent["id"],
+        let (status, _) = call("/v1/tenant/audit/list", &viewer_auth, page.clone());
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = call(
+            "/v1/tenant/audit/list",
+            &owner_auth,
+            json!({"tenantId":second.id,"limit":10,"offset":0}),
+        );
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = call(
+            "/v1/tenant/audit/list",
+            &owner_auth,
+            json!({"tenantId":first.id,"limit":101,"offset":0}),
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = call(
+            "/v1/tenant/invitations",
+            &viewer_auth,
+            json!({
+                "tenantId":first.id,"ttlSeconds":120
+            }),
+        );
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, cancel_me) = call(
+            "/v1/tenant/invitations",
+            &owner_auth,
+            json!({
+                "tenantId":first.id,"ttlSeconds":120
+            }),
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            call("/v1/tenant/invitations/list", &viewer_auth, page.clone()).0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, found) = call("/v1/tenant/invitations/list", &owner_auth, page.clone());
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(found["items"][0]["id"], cancel_me["invitationId"]);
+        assert!(
+            !found
+                .to_string()
+                .contains(cancel_me["invitation"].as_str().unwrap())
+        );
+        assert_eq!(
+            call(
+                "/v1/tenant/invitations/revoke",
+                &viewer_auth,
+                json!({
+                    "tenantId":first.id,"invitationId":cancel_me["invitationId"]
+                })
+            )
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                "/v1/tenant/invitations/revoke",
+                &owner_auth,
+                json!({
+                    "tenantId":second.id,"invitationId":cancel_me["invitationId"]
+                })
+            )
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                "/v1/tenant/invitations/revoke",
+                &owner_auth,
+                json!({
+                    "tenantId":first.id,"invitationId":cancel_me["invitationId"]
+                })
+            )
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            command(
+                &api,
+                "/v1/agents/enroll",
+                false,
+                json!({
+                    "invitation":cancel_me["invitation"],"publicKeyHex":"22".repeat(32)
+                })
+            )
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        let (status, device_invite) = call(
+            "/v1/tenant/invitations",
+            &owner_auth,
+            json!({
+                "tenantId":first.id,"ttlSeconds":120
+            }),
+        );
+        assert_eq!(status, StatusCode::OK);
+        let (status, agent) = command(
+            &api,
+            "/v1/agents/enroll",
+            false,
+            json!({
+                "invitation":device_invite["invitation"],"publicKeyHex":"11".repeat(32)
+            }),
+        );
+        assert_eq!(status, StatusCode::OK);
+        let route = json!({"tenantId":first.id,"agentId":agent["id"],
             "siteId":Uuid::new_v4().to_string(),"label":"team-home"});
-        let (status,_) = call("/v1/tenant/routes/reserve",&viewer_auth,route.clone());
-        assert_eq!(status,StatusCode::FORBIDDEN);
-        let (status,_) = call("/v1/tenant/routes/reserve",&owner_auth,json!({
-            "tenantId":second.id,"agentId":agent["id"],
-            "siteId":Uuid::new_v4().to_string(),"label":"foreign-home"
-        }));
-        assert_eq!(status,StatusCode::UNAUTHORIZED);
-        let (status,reserved)=call("/v1/tenant/routes/reserve",&owner_auth,route);
-        assert_eq!(status,StatusCode::OK);
-        assert_eq!(reserved["publiclyRoutable"],false);
-        assert_eq!(reserved["route"]["hostname"],"team-home.example.test");
-        let inventory=json!({"tenantId":first.id,"limit":10,"offset":0});
-        let (status,agents)=call("/v1/tenant/agents/list",&viewer_auth,inventory.clone());
-        assert_eq!(status,StatusCode::OK);
-        assert_eq!(agents["items"].as_array().unwrap().len(),1);
-        assert_eq!(agents["items"][0]["id"],agent["id"]);
-        assert_eq!(call("/v1/tenant/agents/rename",&viewer_auth,json!({
-            "tenantId":first.id,"agentId":agent["id"],"displayName":"Not allowed"
-        })).0,StatusCode::FORBIDDEN);
-        assert_eq!(call("/v1/tenant/agents/rename",&owner_auth,json!({
-            "tenantId":second.id,"agentId":agent["id"],"displayName":"Not mine"
-        })).0,StatusCode::UNAUTHORIZED);
-        assert_eq!(call("/v1/tenant/agents/rename",&owner_auth,json!({
-            "tenantId":first.id,"agentId":agent["id"],"displayName":"Office PC"
-        })).0,StatusCode::OK);
-        let (status,updated_agents)=call("/v1/tenant/agents/list",&viewer_auth,inventory.clone());
-        assert_eq!(status,StatusCode::OK);
-        assert_eq!(updated_agents["items"][0]["displayName"],"Office PC");
-        let (status,routes)=call("/v1/tenant/routes/list",&viewer_auth,inventory.clone());
-        assert_eq!(status,StatusCode::OK);
-        assert_eq!(routes["publiclyRoutable"],false);
-        assert_eq!(routes["items"].as_array().unwrap().len(),1);
-        assert_eq!(routes["items"][0]["hostname"],"team-home.example.test");
-        let (status,second_page)=call("/v1/tenant/routes/list",&viewer_auth,json!({
-            "tenantId":first.id,"limit":1,"offset":1
-        }));
-        assert_eq!(status,StatusCode::OK);
+        let (status, _) = call("/v1/tenant/routes/reserve", &viewer_auth, route.clone());
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = call(
+            "/v1/tenant/routes/reserve",
+            &owner_auth,
+            json!({
+                "tenantId":second.id,"agentId":agent["id"],
+                "siteId":Uuid::new_v4().to_string(),"label":"foreign-home"
+            }),
+        );
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, reserved) = call("/v1/tenant/routes/reserve", &owner_auth, route);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reserved["publiclyRoutable"], false);
+        assert_eq!(reserved["route"]["hostname"], "team-home.example.test");
+        let inventory = json!({"tenantId":first.id,"limit":10,"offset":0});
+        let (status, agents) = call("/v1/tenant/agents/list", &viewer_auth, inventory.clone());
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(agents["items"].as_array().unwrap().len(), 1);
+        assert_eq!(agents["items"][0]["id"], agent["id"]);
+        assert_eq!(
+            call(
+                "/v1/tenant/agents/rename",
+                &viewer_auth,
+                json!({
+                    "tenantId":first.id,"agentId":agent["id"],"displayName":"Not allowed"
+                })
+            )
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                "/v1/tenant/agents/rename",
+                &owner_auth,
+                json!({
+                    "tenantId":second.id,"agentId":agent["id"],"displayName":"Not mine"
+                })
+            )
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                "/v1/tenant/agents/rename",
+                &owner_auth,
+                json!({
+                    "tenantId":first.id,"agentId":agent["id"],"displayName":"Office PC"
+                })
+            )
+            .0,
+            StatusCode::OK
+        );
+        let (status, updated_agents) =
+            call("/v1/tenant/agents/list", &viewer_auth, inventory.clone());
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated_agents["items"][0]["displayName"], "Office PC");
+        let (status, routes) = call("/v1/tenant/routes/list", &viewer_auth, inventory.clone());
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(routes["publiclyRoutable"], false);
+        assert_eq!(routes["items"].as_array().unwrap().len(), 1);
+        assert_eq!(routes["items"][0]["hostname"], "team-home.example.test");
+        let (status, second_page) = call(
+            "/v1/tenant/routes/list",
+            &viewer_auth,
+            json!({
+                "tenantId":first.id,"limit":1,"offset":1
+            }),
+        );
+        assert_eq!(status, StatusCode::OK);
         assert!(second_page["items"].as_array().unwrap().is_empty());
-        let (status,_) = call("/v1/tenant/routes/list",&viewer_auth,json!({
-            "tenantId":second.id,"limit":10,"offset":0
-        }));
-        assert_eq!(status,StatusCode::UNAUTHORIZED);
-        let (status,_) = call("/v1/tenant/agents/list",&viewer_auth,json!({
-            "tenantId":first.id,"limit":101,"offset":0
-        }));
-        assert_eq!(status,StatusCode::BAD_REQUEST);
-        let reservation_action=json!({"tenantId":first.id,"routeId":reserved["route"]["id"]});
-        assert_eq!(call("/v1/tenant/routes/disable",&viewer_auth,
-            reservation_action.clone()).0,StatusCode::FORBIDDEN);
-        assert_eq!(call("/v1/tenant/routes/disable",&owner_auth,json!({
-            "tenantId":second.id,"routeId":reserved["route"]["id"]
-        })).0,StatusCode::UNAUTHORIZED);
-        let (status,disabled)=call("/v1/tenant/routes/disable",&owner_auth,
-            reservation_action.clone());
-        assert_eq!(status,StatusCode::OK);
-        assert_eq!(disabled["publiclyRoutable"],false);
-        let (status,managed)=call("/v1/tenant/routes/reservations/list",&viewer_auth,
-            inventory.clone());
-        assert_eq!(status,StatusCode::OK);
-        assert_eq!(managed["items"][0]["state"],"disabled");
-        assert_eq!(call("/v1/tenant/routes/list",&viewer_auth,inventory.clone())
-            .1["items"].as_array().unwrap().len(),0);
-        let (status,restored)=call("/v1/tenant/routes/restore",&owner_auth,
-            reservation_action.clone());
-        assert_eq!(status,StatusCode::OK);
-        assert_eq!(restored["reserved"],true);
-        assert_eq!(restored["publiclyRoutable"],false);
-        assert_eq!(call("/v1/tenant/routes/reservations/list",&viewer_auth,
-            inventory.clone()).1["items"][0]["state"],"reserved");
-        let move_payload=json!({"tenantId":first.id,"routeId":reserved["route"]["id"],
+        let (status, _) = call(
+            "/v1/tenant/routes/list",
+            &viewer_auth,
+            json!({
+                "tenantId":second.id,"limit":10,"offset":0
+            }),
+        );
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = call(
+            "/v1/tenant/agents/list",
+            &viewer_auth,
+            json!({
+                "tenantId":first.id,"limit":101,"offset":0
+            }),
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let reservation_action = json!({"tenantId":first.id,"routeId":reserved["route"]["id"]});
+        assert_eq!(
+            call(
+                "/v1/tenant/routes/disable",
+                &viewer_auth,
+                reservation_action.clone()
+            )
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                "/v1/tenant/routes/disable",
+                &owner_auth,
+                json!({
+                    "tenantId":second.id,"routeId":reserved["route"]["id"]
+                })
+            )
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, disabled) = call(
+            "/v1/tenant/routes/disable",
+            &owner_auth,
+            reservation_action.clone(),
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(disabled["publiclyRoutable"], false);
+        let (status, managed) = call(
+            "/v1/tenant/routes/reservations/list",
+            &viewer_auth,
+            inventory.clone(),
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(managed["items"][0]["state"], "disabled");
+        assert_eq!(
+            call("/v1/tenant/routes/list", &viewer_auth, inventory.clone()).1["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        let (status, restored) = call(
+            "/v1/tenant/routes/restore",
+            &owner_auth,
+            reservation_action.clone(),
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(restored["reserved"], true);
+        assert_eq!(restored["publiclyRoutable"], false);
+        assert_eq!(
+            call(
+                "/v1/tenant/routes/reservations/list",
+                &viewer_auth,
+                inventory.clone()
+            )
+            .1["items"][0]["state"],
+            "reserved"
+        );
+        let move_payload = json!({"tenantId":first.id,"routeId":reserved["route"]["id"],
             "agentId":agent["id"],"siteId":Uuid::new_v4().to_string()});
-        assert_eq!(call("/v1/tenant/routes/reassign",&viewer_auth,
-            move_payload.clone()).0,StatusCode::FORBIDDEN);
-        assert_eq!(call("/v1/tenant/routes/reassign",&owner_auth,json!({
-            "tenantId":second.id,"routeId":reserved["route"]["id"],
-            "agentId":agent["id"],"siteId":Uuid::new_v4().to_string()
-        })).0,StatusCode::UNAUTHORIZED);
-        let (status,moved)=call("/v1/tenant/routes/reassign",&owner_auth,move_payload);
-        assert_eq!(status,StatusCode::OK);
-        assert_eq!(moved["route"]["hostname"],"team-home.example.test");
-        assert_eq!(moved["freshDeviceProofRequired"],true);
-        assert_eq!(moved["publiclyRoutable"],false);
-        let (status,usage)=call("/v1/tenant/usage",&viewer_auth,
-            json!({"tenantId":first.id}));
-        assert_eq!(status,StatusCode::OK);
-        assert_eq!(usage["usage"]["activeDevices"],1);
-        assert_eq!(usage["usage"]["reservedHostnames"],1);
-        assert_eq!(usage["usage"]["remainingDevices"],2);
-        assert_eq!(usage["usage"]["remainingHostnames"],9);
-        assert_eq!(usage["usage"]["publiclyRoutable"],false);
-        assert_eq!(usage["publicReady"],false);
-        assert_eq!(call("/v1/tenant/usage",&owner_auth,
-            json!({"tenantId":second.id})).0,StatusCode::UNAUTHORIZED);
-        assert_eq!(command(&api,"/v1/tenant/usage",false,
-            json!({"tenantId":first.id})).0,StatusCode::UNAUTHORIZED);
-        let (status,revoke)=call("/v1/tenant/agents/revoke",&owner_auth,json!({
-            "tenantId":first.id,"agentId":agent["id"]
-        }));
-        assert_eq!(status,StatusCode::OK);
-        assert_eq!(revoke["revoked"],true);
-        let (status,agents)=call("/v1/tenant/agents/list",&viewer_auth,inventory.clone());
-        assert_eq!(status,StatusCode::OK);
+        assert_eq!(
+            call(
+                "/v1/tenant/routes/reassign",
+                &viewer_auth,
+                move_payload.clone()
+            )
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                "/v1/tenant/routes/reassign",
+                &owner_auth,
+                json!({
+                    "tenantId":second.id,"routeId":reserved["route"]["id"],
+                    "agentId":agent["id"],"siteId":Uuid::new_v4().to_string()
+                })
+            )
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, moved) = call("/v1/tenant/routes/reassign", &owner_auth, move_payload);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(moved["route"]["hostname"], "team-home.example.test");
+        assert_eq!(moved["freshDeviceProofRequired"], true);
+        assert_eq!(moved["publiclyRoutable"], false);
+        let (status, usage) = call(
+            "/v1/tenant/usage",
+            &viewer_auth,
+            json!({"tenantId":first.id}),
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(usage["usage"]["activeDevices"], 1);
+        assert_eq!(usage["usage"]["reservedHostnames"], 1);
+        assert_eq!(usage["usage"]["remainingDevices"], 2);
+        assert_eq!(usage["usage"]["remainingHostnames"], 9);
+        assert_eq!(usage["usage"]["publiclyRoutable"], false);
+        assert_eq!(usage["publicReady"], false);
+        assert_eq!(
+            call(
+                "/v1/tenant/usage",
+                &owner_auth,
+                json!({"tenantId":second.id})
+            )
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            command(
+                &api,
+                "/v1/tenant/usage",
+                false,
+                json!({"tenantId":first.id})
+            )
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, revoke) = call(
+            "/v1/tenant/agents/revoke",
+            &owner_auth,
+            json!({
+                "tenantId":first.id,"agentId":agent["id"]
+            }),
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(revoke["revoked"], true);
+        let (status, agents) = call("/v1/tenant/agents/list", &viewer_auth, inventory.clone());
+        assert_eq!(status, StatusCode::OK);
         assert!(agents["items"].as_array().unwrap().is_empty());
-        let (status,after_usage)=call("/v1/tenant/usage",&viewer_auth,
-            json!({"tenantId":first.id}));
-        assert_eq!(status,StatusCode::OK);
-        assert_eq!(after_usage["usage"]["activeDevices"],0);
-        assert_eq!(after_usage["usage"]["reservedHostnames"],0);
-        let (status,routes)=call("/v1/tenant/routes/list",&viewer_auth,inventory);
-        assert_eq!(status,StatusCode::OK);
+        let (status, after_usage) = call(
+            "/v1/tenant/usage",
+            &viewer_auth,
+            json!({"tenantId":first.id}),
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(after_usage["usage"]["activeDevices"], 0);
+        assert_eq!(after_usage["usage"]["reservedHostnames"], 0);
+        let (status, routes) = call("/v1/tenant/routes/list", &viewer_auth, inventory);
+        assert_eq!(status, StatusCode::OK);
         assert!(routes["items"].as_array().unwrap().is_empty());
-        let (status,_)=call("/v1/auth/logout",&owner_auth,json!({}));
-        assert_eq!(status,StatusCode::OK);
-        let (status,_)=call("/v1/auth/me",&owner_auth,json!({"tenantId":first.id}));
-        assert_eq!(status,StatusCode::UNAUTHORIZED);
+        let (status, _) = call("/v1/auth/logout", &owner_auth, json!({}));
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = call("/v1/auth/me", &owner_auth, json!({"tenantId":first.id}));
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
         drop(api);
         std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
-    fn operator_atomic_provision_refuses_bad_input_and_creates_working_owner(){
-        let path=std::env::temp_dir().join(format!("hostify-atomic-http-{}.db",Uuid::new_v4()));
-        let registry=Registry::open(&path,"example.test").unwrap();
-        let accounts=Accounts::open(&path).unwrap();
-        let api=Controller::new(registry,
-            b"0123456789abcdef0123456789abcdef".to_vec()).unwrap().with_accounts(accounts);
-        let valid=json!({"name":"Tenant Zero","email":"owner@site.test",
+    fn operator_atomic_provision_refuses_bad_input_and_creates_working_owner() {
+        let path = std::env::temp_dir().join(format!("hostify-atomic-http-{}.db", Uuid::new_v4()));
+        let registry = Registry::open(&path, "example.test").unwrap();
+        let accounts = Accounts::open(&path).unwrap();
+        let api = Controller::new(registry, b"0123456789abcdef0123456789abcdef".to_vec())
+            .unwrap()
+            .with_accounts(accounts);
+        let valid = json!({"name":"Tenant Zero","email":"owner@site.test",
             "password":"secure-owner-password-123"});
-        let (status,_) = command(&api,"/v1/accounts/provision",false,valid.clone());
-        assert_eq!(status,StatusCode::UNAUTHORIZED);
-        let (status,_) = command(&api,"/v1/accounts/provision",true,json!({
-            "name":"Orphan Must Not Exist","email":"owner@site.test","password":"short"
-        }));
-        assert_eq!(status,StatusCode::BAD_REQUEST);
-        let db=rusqlite::Connection::open(&path).unwrap();
-        let count:i64=db.query_row("SELECT COUNT(*) FROM network_tenants",
-            [],|row|row.get(0)).unwrap();
-        assert_eq!(count,0);
-        let (status,created)=command(&api,"/v1/accounts/provision",true,valid);
-        assert_eq!(status,StatusCode::OK);
-        let tenant_id=created["tenant"]["id"].as_str().unwrap();
-        assert_eq!(created["owner"]["tenantId"],tenant_id);
-        let (status,session)=command(&api,"/v1/auth/login",false,json!({
-            "tenantId":tenant_id,"email":"owner@site.test",
-            "password":"secure-owner-password-123"
-        }));
-        assert_eq!(status,StatusCode::OK);
-        assert_eq!(session["user"]["role"],"owner");
-        let audit:i64=db.query_row(
-            "SELECT COUNT(*) FROM network_audit WHERE tenant_id=?1 AND action='tenant_created'",
-            [tenant_id],|row|row.get(0)).unwrap();
-        assert_eq!(audit,1);
+        let (status, _) = command(&api, "/v1/accounts/provision", false, valid.clone());
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = command(
+            &api,
+            "/v1/accounts/provision",
+            true,
+            json!({
+                "name":"Orphan Must Not Exist","email":"owner@site.test","password":"short"
+            }),
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM network_tenants", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        let (status, created) = command(&api, "/v1/accounts/provision", true, valid);
+        assert_eq!(status, StatusCode::OK);
+        let tenant_id = created["tenant"]["id"].as_str().unwrap();
+        assert_eq!(created["owner"]["tenantId"], tenant_id);
+        let (status, session) = command(
+            &api,
+            "/v1/auth/login",
+            false,
+            json!({
+                "tenantId":tenant_id,"email":"owner@site.test",
+                "password":"secure-owner-password-123"
+            }),
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(session["user"]["role"], "owner");
+        let audit: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM network_audit WHERE tenant_id=?1 AND action='tenant_created'",
+                [tenant_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit, 1);
         drop(db);
         drop(api);
         std::fs::remove_file(&path).unwrap();
     }
-
 }

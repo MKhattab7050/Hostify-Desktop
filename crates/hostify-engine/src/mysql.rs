@@ -1067,7 +1067,9 @@ impl Manager {
 fn ensure_same_site_owner(owner: Option<&str>, target: &str) -> Result<()> {
     if let Some(owner) = owner {
         if owner != target {
-            bail!("This database belongs to another website. Unlink it explicitly before linking it elsewhere.");
+            bail!(
+                "This database belongs to another website. Unlink it explicitly before linking it elsewhere."
+            );
         }
     }
     Ok(())
@@ -1477,15 +1479,21 @@ mod tests {
             let mut expected_sd = std::ptr::null_mut();
             assert_ne!(
                 ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                    expected_sddl.as_ptr(), 1, &mut expected_sd, std::ptr::null_mut()
+                    expected_sddl.as_ptr(),
+                    1,
+                    &mut expected_sd,
+                    std::ptr::null_mut()
                 ),
                 0
             );
             let mut expected_text = std::ptr::null_mut();
             assert_ne!(
                 ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                    expected_sd, 1, DACL_SECURITY_INFORMATION,
-                    &mut expected_text, std::ptr::null_mut()
+                    expected_sd,
+                    1,
+                    DACL_SECURITY_INFORMATION,
+                    &mut expected_text,
+                    std::ptr::null_mut()
                 ),
                 0
             );
@@ -1493,14 +1501,16 @@ mod tests {
             while *expected_text.add(expected_len) != 0 {
                 expected_len += 1;
             }
-            let expected = String::from_utf16_lossy(
-                std::slice::from_raw_parts(expected_text, expected_len)
-            );
+            let expected =
+                String::from_utf16_lossy(std::slice::from_raw_parts(expected_text, expected_len));
             // SetNamedSecurityInfoW may annotate the installed ACL with AI
             // (auto-inherited) even though the DACL is protected. This marker
             // is metadata, not an additional permission grant.
             let normalized = actual.replacen("D:PAI(", "D:P(", 1);
-            assert_eq!(normalized, expected, "The MySQL ACL must have exactly the expected owner+SYSTEM grants");
+            assert_eq!(
+                normalized, expected,
+                "The MySQL ACL must have exactly the expected owner+SYSTEM grants"
+            );
             assert!(actual.contains(";;;SY)"));
             assert_eq!(actual.matches("(A;").count(), 2);
             LocalFree(expected_text.cast());

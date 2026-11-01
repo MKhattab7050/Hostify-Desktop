@@ -128,14 +128,19 @@ async fn pick_path(app: tauri::AppHandle, kind: String) -> Result<Option<String>
 #[tauri::command]
 async fn pick_snapshot_destination(app: tauri::AppHandle) -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        app.dialog().file()
+        app.dialog()
+            .file()
             .add_filter("ZIP archive", &["zip"])
             .blocking_save_file()
-            .map(|p| p.into_path()
-                .map(|p| p.to_string_lossy().into_owned())
-                .map_err(|e| e.to_string()))
+            .map(|p| {
+                p.into_path()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .map_err(|e| e.to_string())
+            })
             .transpose()
-    }).await.map_err(|e|e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

@@ -131,10 +131,8 @@ async fn get(port: u16, path: &str) -> String {
             .unwrap();
         socket
             .write_all(
-                format!(
-                    "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-                )
-                .as_bytes(),
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
             )
             .await
             .unwrap();

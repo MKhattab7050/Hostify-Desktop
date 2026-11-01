@@ -346,9 +346,14 @@ mod compatibility_tests {
     #[test]
     fn unpublished_sites_are_host_restricted_and_still_serve_local_preview() {
         for backend in [
-            Backend::Static { root: "site".into() },
+            Backend::Static {
+                root: "site".into(),
+            },
             Backend::Proxy { port: 9001 },
-            Backend::Php { root: "site".into(), upstreams: vec![9002] },
+            Backend::Php {
+                root: "site".into(),
+                upstreams: vec![9002],
+            },
         ] {
             let config = generate(&[Site {
                 verify_root: "verify".into(),
@@ -356,7 +361,8 @@ mod compatibility_tests {
                 backend,
                 log: "log".into(),
                 hosts: vec![],
-            }]).unwrap();
+            }])
+            .unwrap();
             assert!(config.contains("@foreign not host localhost 127.0.0.1"));
             assert!(config.contains("respond @foreign \"Host not allowed\" 421"));
             assert!(config.contains("bind 127.0.0.1"));
@@ -391,12 +397,17 @@ mod php_tests {
     #[test]
     fn real_caddy_validates_php_pool_and_guards() {
         let Some(local) = std::env::var_os("LOCALAPPDATA") else {
-            eprintln!("SKIP real Caddy PHP validation: LOCALAPPDATA unavailable; run live tests on a prepared Windows host.");
+            eprintln!(
+                "SKIP real Caddy PHP validation: LOCALAPPDATA unavailable; run live tests on a prepared Windows host."
+            );
             return;
         };
         let binary = PathBuf::from(local).join("Hostify/bin/caddy.exe");
         if !binary.is_file() {
-            eprintln!("SKIP real Caddy PHP validation: {} missing; run live tests with Caddy installed.", binary.display());
+            eprintln!(
+                "SKIP real Caddy PHP validation: {} missing; run live tests with Caddy installed.",
+                binary.display()
+            );
             return;
         }
         let d = tempfile::tempdir().unwrap();
