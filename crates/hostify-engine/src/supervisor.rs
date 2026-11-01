@@ -2660,7 +2660,10 @@ impl Supervisor {
                 site: None,
                 exe,
                 args: vec![
-                    format!("--defaults-file={}", self.store.root.join("mysql/my.ini").display()),
+                    format!(
+                        "--defaults-file={}",
+                        self.store.root.join("mysql/my.ini").display()
+                    ),
                     // Old Hostify configurations used enable-named-pipe=OFF,
                     // which MySQL treats as enabling the legacy switch.
                     "--named-pipe=OFF".into(),
