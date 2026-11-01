@@ -4,8 +4,11 @@ use crate::state::Engine;
 use anyhow::{Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::{sync::{Arc, Weak}, time::Duration};
+use serde_json::{Value, json};
+use std::{
+    sync::{Arc, Weak},
+    time::Duration,
+};
 
 const CHECK_EVERY: u64 = 30;
 const FAILURE_THRESHOLD: u32 = 3;
@@ -29,20 +32,33 @@ pub struct GuardianSnapshot {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Decision { Skip, Observe, Cooldown, Recover }
+enum Decision {
+    Skip,
+    Observe,
+    Cooldown,
+    Recover,
+}
 
 /// Restrict automatic intervention to opted-in, formerly-running services.
 /// A manually stopped or disabled site must never be restarted by Guardian.
 fn decision(s: &GuardianSnapshot, site_status: &str, auto_start: bool, now: i64) -> Decision {
-    if !s.enabled || !auto_start || !matches!(site_status,"running"|"error") { return Decision::Skip; }
-    if s.consecutive_failures < FAILURE_THRESHOLD { return Decision::Observe; }
-    if s.last_restart_unix.is_some_and(|previous| now.saturating_sub(previous) < RESTART_COOLDOWN) {
+    if !s.enabled || !auto_start || !matches!(site_status, "running" | "error") {
+        return Decision::Skip;
+    }
+    if s.consecutive_failures < FAILURE_THRESHOLD {
+        return Decision::Observe;
+    }
+    if s.last_restart_unix
+        .is_some_and(|previous| now.saturating_sub(previous) < RESTART_COOLDOWN)
+    {
         return Decision::Cooldown;
     }
     Decision::Recover
 }
 
-fn key(id: &str) -> String { format!("guardian:{id}") }
+fn key(id: &str) -> String {
+    format!("guardian:{id}")
+}
 
 pub fn load(engine: &Engine, id: &str) -> Result<GuardianSnapshot> {
     engine.store.site(id)?;
@@ -60,7 +76,14 @@ pub fn enable(engine: &Engine, id: &str, enabled: bool) -> Result<Value> {
     let mut snapshot = load(engine, id)?;
     snapshot.enabled = enabled;
     snapshot.consecutive_failures = 0;
-    snapshot.last_result = Some(if enabled { "Monitoring enabled" } else { "Monitoring disabled" }.into());
+    snapshot.last_result = Some(
+        if enabled {
+            "Monitoring enabled"
+        } else {
+            "Monitoring disabled"
+        }
+        .into(),
+    );
     engine.store.save(&key(id), &json!(snapshot))?;
     engine.store.activity("info", Some(id), if enabled {
         "Guardian monitoring enabled; site recovery waits for three failing checks and enforces a cooldown."
@@ -72,15 +95,21 @@ pub async fn check(engine: &Arc<Engine>, id: &str) -> Result<Value> {
     let site = engine.store.site(id)?;
     let mut snapshot = load(engine, id)?;
     snapshot.last_checked_at = Some(Utc::now().to_rfc3339());
-    if !snapshot.enabled || !site.auto_start || !matches!(site.status.as_str(),"running"|"error") {
-        snapshot.last_result = Some("Monitoring paused (disabled, manually stopped or not running)".into());
+    if !snapshot.enabled || !site.auto_start || !matches!(site.status.as_str(), "running" | "error")
+    {
+        snapshot.last_result =
+            Some("Monitoring paused (disabled, manually stopped or not running)".into());
         snapshot.consecutive_failures = 0;
         engine.store.save(&key(id), &json!(snapshot))?;
         return Ok(json!(snapshot));
     }
     // The site runtime already checks the real HTTP path and Caddy Host routing;
     // a TCP-open listener alone is not considered healthy for dynamic websites.
-    let healthy = engine.runtime.site_responds(site.local_port).await.unwrap_or(false);
+    let healthy = engine
+        .runtime
+        .site_responds(site.local_port)
+        .await
+        .unwrap_or(false);
     if healthy {
         snapshot.consecutive_failures = 0;
         snapshot.last_result = Some("Healthy".into());
@@ -101,7 +130,11 @@ pub async fn check(engine: &Arc<Engine>, id: &str) -> Result<Value> {
                     snapshot.recovery_attempts = snapshot.recovery_attempts.saturating_add(1);
                     snapshot.last_result = Some("Safe local restart requested".into());
                     engine.store.save(&key(id), &json!(snapshot))?;
-                    let _ = engine.store.activity("warn", Some(id), "Guardian: three failed HTTP health checks; attempting one local restart.");
+                    let _ = engine.store.activity(
+                        "warn",
+                        Some(id),
+                        "Guardian: three failed HTTP health checks; attempting one local restart.",
+                    );
                     let result = match engine.runtime.stop_site(id).await {
                         Ok(()) => engine.runtime.start_site(id).await.map(|_| ()),
                         Err(e) => Err(e),
@@ -109,18 +142,25 @@ pub async fn check(engine: &Arc<Engine>, id: &str) -> Result<Value> {
                     match result {
                         Ok(()) => {
                             snapshot.consecutive_failures = 0;
-                            snapshot.last_result = Some("Local restart completed; awaiting next health check".into());
-                            let _ = engine.store.activity("info", Some(id), "Guardian: local restart completed; health will be rechecked.");
+                            snapshot.last_result =
+                                Some("Local restart completed; awaiting next health check".into());
+                            let _ = engine.store.activity(
+                                "info",
+                                Some(id),
+                                "Guardian: local restart completed; health will be rechecked.",
+                            );
                         }
                         Err(_) => {
-                            snapshot.last_result = Some("Local restart failed; manual diagnosis required".into());
+                            snapshot.last_result =
+                                Some("Local restart failed; manual diagnosis required".into());
                             let _ = engine.store.activity("error", Some(id), "Guardian: local restart failed; cooldown active. Review application logs.");
                         }
                     }
                 }
             }
         } else if decision(&snapshot, &site.status, site.auto_start, now) == Decision::Cooldown {
-            snapshot.last_result = Some("Local health failed; cooldown prevents repeated restarts".into());
+            snapshot.last_result =
+                Some("Local health failed; cooldown prevents repeated restarts".into());
         }
     }
     engine.store.save(&key(id), &json!(snapshot))?;
@@ -132,13 +172,19 @@ pub fn spawn(engine: &Arc<Engine>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(CHECK_EVERY)).await;
-            let Some(engine) = weak.upgrade() else { return; };
-            let Ok(sites) = engine.store.sites() else { continue; };
+            let Some(engine) = weak.upgrade() else {
+                return;
+            };
+            let Ok(sites) = engine.store.sites() else {
+                continue;
+            };
             for site in sites {
                 // Check the current opt-in state each time; never cache a stale
                 // permission or operate on a deleted site.
                 if let Ok(state) = load(&engine, &site.id) {
-                    if state.enabled { let _ = check(&engine, &site.id).await; }
+                    if state.enabled {
+                        let _ = check(&engine, &site.id).await;
+                    }
                 }
             }
         }
@@ -152,22 +198,25 @@ mod tests {
     fn guardian_never_restarts_stopped_or_unconsenting_sites() {
         let mut s = GuardianSnapshot::default();
         s.consecutive_failures = 5;
-        assert_eq!(decision(&s,"running",true,100), Decision::Skip);
+        assert_eq!(decision(&s, "running", true, 100), Decision::Skip);
         s.enabled = true;
-        assert_eq!(decision(&s,"stopped",true,100), Decision::Skip);
-        assert_eq!(decision(&s,"running",false,100), Decision::Skip);
-        assert_eq!(decision(&s,"starting",true,100), Decision::Skip);
-        assert_eq!(decision(&s,"error",true,100), Decision::Recover);
+        assert_eq!(decision(&s, "stopped", true, 100), Decision::Skip);
+        assert_eq!(decision(&s, "running", false, 100), Decision::Skip);
+        assert_eq!(decision(&s, "starting", true, 100), Decision::Skip);
+        assert_eq!(decision(&s, "error", true, 100), Decision::Recover);
     }
     #[test]
     fn requires_repeated_failures_and_cooldown() {
-        let mut s = GuardianSnapshot { enabled:true, ..Default::default() };
-        assert_eq!(decision(&s,"running",true,1000), Decision::Observe);
+        let mut s = GuardianSnapshot {
+            enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(decision(&s, "running", true, 1000), Decision::Observe);
         s.consecutive_failures = 3;
-        assert_eq!(decision(&s,"running",true,1000), Decision::Recover);
+        assert_eq!(decision(&s, "running", true, 1000), Decision::Recover);
         s.last_restart_unix = Some(1000);
-        assert_eq!(decision(&s,"running",true,1001), Decision::Cooldown);
-        assert_eq!(decision(&s,"running",true,1899), Decision::Cooldown);
-        assert_eq!(decision(&s,"running",true,1900), Decision::Recover);
+        assert_eq!(decision(&s, "running", true, 1001), Decision::Cooldown);
+        assert_eq!(decision(&s, "running", true, 1899), Decision::Cooldown);
+        assert_eq!(decision(&s, "running", true, 1900), Decision::Recover);
     }
 }

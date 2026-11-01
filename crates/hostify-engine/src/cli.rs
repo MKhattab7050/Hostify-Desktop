@@ -80,7 +80,9 @@ fn task_arguments(root: &Path) -> String {
 }
 pub fn service_install(install: bool, root: &Path) -> Result<()> {
     if install {
-        anyhow::bail!("Windows Service hosting is disabled until Node.js and PHP workers use restricted execution accounts. Use the per-user login task.");
+        anyhow::bail!(
+            "Windows Service hosting is disabled until Node.js and PHP workers use restricted execution accounts. Use the per-user login task."
+        );
     }
     let manager = ServiceManager::local_computer(
         None::<&str>,
@@ -132,7 +134,9 @@ pub async fn run(
 ) -> Result<()> {
     // LocalSystem services must never spawn dynamic customer workloads.
     if service {
-        anyhow::bail!("Service mode cannot safely host Node.js/PHP applications as LocalSystem. Use per-user hosting.");
+        anyhow::bail!(
+            "Service mode cannot safely host Node.js/PHP applications as LocalSystem. Use per-user hosting."
+        );
     }
     let _instance = crate::windows::single_instance()?;
     let store = crate::state::Store::open(root)?;

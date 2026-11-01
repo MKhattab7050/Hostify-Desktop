@@ -16,14 +16,14 @@ pub mod runtimes;
 pub mod vault;
 
 pub mod app_config;
-pub mod project;
-pub mod snapshots;
-pub mod network;
-pub mod device_identity;
 pub mod catalog;
+pub mod device_identity;
+pub mod diagnostics;
 pub mod doctor;
 pub mod github_webhooks;
-pub mod diagnostics;
+pub mod network;
+pub mod project;
+pub mod snapshots;
 
 pub mod network_auth;
 

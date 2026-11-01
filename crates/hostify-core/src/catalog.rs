@@ -2,10 +2,10 @@
 //! Templates are small, original, immutable code samples. No remote downloads,
 //! npm install scripts, external shell execution, or silent trust grants.
 use serde::Serialize;
-use std::{fs,io,path::Path};
+use std::{fs, io, path::Path};
 use thiserror::Error;
 
-#[derive(Debug,Error)]
+#[derive(Debug, Error)]
 pub enum CatalogError {
     #[error("unknown or unsupported template")]
     Unknown,
@@ -13,8 +13,8 @@ pub enum CatalogError {
     Io(#[from] io::Error),
 }
 
-#[derive(Clone,Debug,Serialize)]
-#[serde(rename_all="camelCase")]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Template {
     pub id: &'static str,
     pub name: &'static str,
@@ -87,64 +87,99 @@ h1{font-size:clamp(2rem,6vw,4rem)}
 <p>Start building by editing <code>index.php</code> in this generated project folder.</p>
 </body></html>"#;
 
-const TEMPLATES: [Template;4] = [
-    Template{id:"portfolio",name:"Portfolio",kind:"static",framework:"HTML/CSS",
-        description:"Responsive personal portfolio with no dependencies.",requires_trust:false,requires_database:false},
-    Template{id:"restaurant",name:"Restaurant Landing",kind:"static",framework:"HTML/CSS",
-        description:"A responsive restaurant landing page, ready to customize.",requires_trust:false,requires_database:false},
-    Template{id:"node-api",name:"Node.js API",kind:"node",framework:"Node.js 24",
-        description:"Small built-in HTTP API with a health endpoint and no dependencies.",requires_trust:true,requires_database:false},
-    Template{id:"php-starter",name:"PHP Starter",kind:"php",framework:"PHP 8.4",
-        description:"Minimal PHP page without external packages.",requires_trust:true,requires_database:false},
+const TEMPLATES: [Template; 4] = [
+    Template {
+        id: "portfolio",
+        name: "Portfolio",
+        kind: "static",
+        framework: "HTML/CSS",
+        description: "Responsive personal portfolio with no dependencies.",
+        requires_trust: false,
+        requires_database: false,
+    },
+    Template {
+        id: "restaurant",
+        name: "Restaurant Landing",
+        kind: "static",
+        framework: "HTML/CSS",
+        description: "A responsive restaurant landing page, ready to customize.",
+        requires_trust: false,
+        requires_database: false,
+    },
+    Template {
+        id: "node-api",
+        name: "Node.js API",
+        kind: "node",
+        framework: "Node.js 24",
+        description: "Small built-in HTTP API with a health endpoint and no dependencies.",
+        requires_trust: true,
+        requires_database: false,
+    },
+    Template {
+        id: "php-starter",
+        name: "PHP Starter",
+        kind: "php",
+        framework: "PHP 8.4",
+        description: "Minimal PHP page without external packages.",
+        requires_trust: true,
+        requires_database: false,
+    },
 ];
 
-pub fn list()->Vec<Template>{ TEMPLATES.to_vec() }
-pub fn get(id:&str)->Result<Template,CatalogError>{
-    list().into_iter().find(|t|t.id==id).ok_or(CatalogError::Unknown)
+pub fn list() -> Vec<Template> {
+    TEMPLATES.to_vec()
 }
-pub fn materialize(id:&str,target:&Path)->Result<Template,CatalogError>{
-    let template=get(id)?;
-    let files:&[(&str,&str)]=match id {
-        "portfolio"=> &[("index.html",PORTFOLIO)],
-        "restaurant"=> &[("index.html",RESTAURANT)],
-        "node-api"=> &[("package.json",NODE_PACKAGE),("server.cjs",NODE_SERVER)],
-        "php-starter"=> &[("index.php",PHP_INDEX)],
-        _ => return Err(CatalogError::Unknown)
+pub fn get(id: &str) -> Result<Template, CatalogError> {
+    list()
+        .into_iter()
+        .find(|t| t.id == id)
+        .ok_or(CatalogError::Unknown)
+}
+pub fn materialize(id: &str, target: &Path) -> Result<Template, CatalogError> {
+    let template = get(id)?;
+    let files: &[(&str, &str)] = match id {
+        "portfolio" => &[("index.html", PORTFOLIO)],
+        "restaurant" => &[("index.html", RESTAURANT)],
+        "node-api" => &[("package.json", NODE_PACKAGE), ("server.cjs", NODE_SERVER)],
+        "php-starter" => &[("index.php", PHP_INDEX)],
+        _ => return Err(CatalogError::Unknown),
     };
     // create_dir refuses to overwrite an existing project. All paths are
     // literal vetted filename constants, never input from the user or network.
     fs::create_dir(target)?;
-    let result=(||->Result<(),CatalogError>{
-        for (name,content) in files {
-            let path=target.join(name);
-            fs::write(path,content.as_bytes())?;
+    let result = (|| -> Result<(), CatalogError> {
+        for (name, content) in files {
+            let path = target.join(name);
+            fs::write(path, content.as_bytes())?;
         }
         Ok(())
     })();
-    if result.is_err(){let _=fs::remove_dir_all(target);}
+    if result.is_err() {
+        let _ = fs::remove_dir_all(target);
+    }
     result?;
     Ok(template)
 }
 #[cfg(test)]
-mod tests{
+mod tests {
     use super::*;
     #[test]
-    fn templates_are_offline_and_do_not_install_or_run_code(){
-        let root=tempfile::tempdir().unwrap();
-        for template in list(){
-            let target=root.path().join(template.id);
-            let result=materialize(template.id,&target).unwrap();
-            assert_eq!(result.id,template.id);
+    fn templates_are_offline_and_do_not_install_or_run_code() {
+        let root = tempfile::tempdir().unwrap();
+        for template in list() {
+            let target = root.path().join(template.id);
+            let result = materialize(template.id, &target).unwrap();
+            assert_eq!(result.id, template.id);
             assert!(!target.join(".env").exists());
             assert!(!target.join("node_modules").exists());
-            if template.kind=="node"{
-                let package=fs::read_to_string(target.join("package.json")).unwrap();
+            if template.kind == "node" {
+                let package = fs::read_to_string(target.join("package.json")).unwrap();
                 assert!(!package.contains("postinstall"));
                 assert!(!package.contains("dependencies"));
                 assert!(package.contains("node server.cjs"));
             }
         }
-        assert!(materialize("unknown",&root.path().join("evil")).is_err());
-        assert!(materialize("portfolio",&root.path().join("portfolio")).is_err());
+        assert!(materialize("unknown", &root.path().join("evil")).is_err());
+        assert!(materialize("portfolio", &root.path().join("portfolio")).is_err());
     }
 }

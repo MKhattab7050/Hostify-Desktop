@@ -144,7 +144,11 @@ async fn rejected_untrusted_start_does_not_patch_files_or_allocate_database() {
     let source = temp.path().join("source");
     std::fs::create_dir_all(source.join("config")).unwrap();
     std::fs::write(source.join("server.js"), "console.log('untrusted')").unwrap();
-    std::fs::write(source.join("package.json"), r#"{"scripts":{"start":"node server.js"}}"#).unwrap();
+    std::fs::write(
+        source.join("package.json"),
+        r#"{"scripts":{"start":"node server.js"}}"#,
+    )
+    .unwrap();
     std::fs::write(source.join(".env"), "DB_HOST=external.example\nPORT=4400\n").unwrap();
     let legacy = "module.exports = { user: 'root', database: 'final-db' };";
     std::fs::write(source.join("config/db.js"), legacy).unwrap();
@@ -153,9 +157,15 @@ async fn rejected_untrusted_start_does_not_patch_files_or_allocate_database() {
     let store = Store::open(temp.path().join("data")).unwrap();
     let supervisor = Supervisor::new(store.clone()).unwrap();
     let engine = Engine::production(store.clone(), supervisor.clone(), false);
-    let site = engine.dispatch("add_site", json!({
-        "name":"Untrusted", "sourcePath":source, "kind":"directory", "siteKind":"node",
-    })).await.unwrap();
+    let site = engine
+        .dispatch(
+            "add_site",
+            json!({
+                "name":"Untrusted", "sourcePath":source, "kind":"directory", "siteKind":"node",
+            }),
+        )
+        .await
+        .unwrap();
     let id = site["id"].as_str().unwrap();
     let cfg = store.app_config(id).unwrap();
     let release = cfg.pending_release.clone().unwrap();
@@ -165,10 +175,18 @@ async fn rejected_untrusted_start_does_not_patch_files_or_allocate_database() {
     assert!(!copied.join(".env").exists());
     let before_db = std::fs::read(copied.join("config/db.js")).unwrap();
 
-    let preflight = engine.dispatch("publish_preflight", json!({"siteId":id})).await.unwrap();
+    let preflight = engine
+        .dispatch("publish_preflight", json!({"siteId":id}))
+        .await
+        .unwrap();
     assert_eq!(preflight["ready"], false);
-    assert!(preflight["blocked"].as_array().unwrap().iter().any(|m|
-        m.as_str().unwrap_or("").contains("Trust and build")));
+    assert!(
+        preflight["blocked"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m.as_str().unwrap_or("").contains("Trust and build"))
+    );
 
     assert!(supervisor.start_site(id).await.is_err());
     let after = store.app_config(id).unwrap();
@@ -176,35 +194,56 @@ async fn rejected_untrusted_start_does_not_patch_files_or_allocate_database() {
     assert!(after.built_release.is_none());
     assert_eq!(std::fs::read(source.join(".env")).unwrap(), before_env);
     assert!(!copied.join(".env").exists());
-    assert_eq!(std::fs::read(copied.join("config/db.js")).unwrap(), before_db);
-    assert!(store.db().unwrap().query_row(
-        "SELECT COUNT(*) FROM managed_databases", [], |r| r.get::<_, i64>(0)
-    ).unwrap() == 0);
+    assert_eq!(
+        std::fs::read(copied.join("config/db.js")).unwrap(),
+        before_db
+    );
+    assert!(
+        store
+            .db()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM managed_databases", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap()
+            == 0
+    );
     engine.shutdown().await;
 }
 
 #[tokio::test]
 async fn built_in_node_template_is_imported_but_cannot_run_without_trust() {
-    let temp=tempfile::tempdir().unwrap();
-    let store=Store::open(temp.path().join("data")).unwrap();
-    let supervisor=Supervisor::new(store.clone()).unwrap();
-    let engine=Engine::production(store.clone(),supervisor,false);
-    let templates=engine.dispatch("list_app_templates",json!({})).await.unwrap();
-    assert_eq!(templates.as_array().unwrap().len(),4);
-    let site=engine.dispatch("create_site_from_template",json!({
-        "templateId":"node-api","name":"Secure Starter"})).await.unwrap();
-    let id=site["id"].as_str().unwrap();
-    let config=store.app_config(id).unwrap();
-    assert_eq!(site["kind"],"node");
-    assert_eq!(site["status"],"stopped");
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("data")).unwrap();
+    let supervisor = Supervisor::new(store.clone()).unwrap();
+    let engine = Engine::production(store.clone(), supervisor, false);
+    let templates = engine
+        .dispatch("list_app_templates", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(templates.as_array().unwrap().len(), 4);
+    let site = engine
+        .dispatch(
+            "create_site_from_template",
+            json!({
+        "templateId":"node-api","name":"Secure Starter"}),
+        )
+        .await
+        .unwrap();
+    let id = site["id"].as_str().unwrap();
+    let config = store.app_config(id).unwrap();
+    assert_eq!(site["kind"], "node");
+    assert_eq!(site["status"], "stopped");
     assert!(config.pending_release.is_some());
     assert!(config.built_release.is_none());
     assert!(config.trusted_release.is_none());
-    let source=std::path::PathBuf::from(site["sourcePath"].as_str().unwrap());
+    let source = std::path::PathBuf::from(site["sourcePath"].as_str().unwrap());
     assert!(source.join("server.cjs").exists());
     assert!(!source.join(".env").exists());
-    let blocked=engine.dispatch("build_app",json!({"siteId":id,"trustAcknowledged":false}))
-        .await.unwrap_err().to_string();
-    assert!(blocked.contains("trust"),"{blocked}");
+    let blocked = engine
+        .dispatch("build_app", json!({"siteId":id,"trustAcknowledged":false}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(blocked.contains("trust"), "{blocked}");
     engine.shutdown().await;
 }

@@ -303,7 +303,9 @@ pub fn diagnose_crash(
 ) -> CrashDiagnostic {
     let lines = tail_logs(log_path, 30).unwrap_or_default();
     let text = lines.join("\n");
-    let exit_code_str = exit_code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into());
+    let exit_code_str = exit_code
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "unknown".into());
 
     let mut headline = String::new();
     let mut location = None;
@@ -321,7 +323,10 @@ pub fn diagnose_crash(
         {
             headline = trimmed.to_string();
         }
-        if (trimmed.contains(".js:") || trimmed.contains(".cjs:") || trimmed.contains(".mjs:") || trimmed.contains(".php:"))
+        if (trimmed.contains(".js:")
+            || trimmed.contains(".cjs:")
+            || trimmed.contains(".mjs:")
+            || trimmed.contains(".php:"))
             && (trimmed.contains("node_modules") || trimmed.contains('\\') || trimmed.contains('/'))
             && location.is_none()
         {
@@ -329,18 +334,33 @@ pub fn diagnose_crash(
         }
     }
 
-    if text.contains("buffer-equal-constant-time") || (text.contains("Cannot read properties of undefined") && text.contains("SlowBuffer")) {
+    if text.contains("buffer-equal-constant-time")
+        || (text.contains("Cannot read properties of undefined") && text.contains("SlowBuffer"))
+    {
         issue = Some("Node.js 26 removed the deprecated SlowBuffer class, which is required by buffer-equal-constant-time (used by jsonwebtoken / jwa).".to_string());
         action = Some("Switch this website to Node.js 24 LTS, which fully supports SlowBuffer and constant-time buffer comparisons.".to_string());
-    } else if text.contains("NODE_MODULE_VERSION") || text.contains("was compiled against a different Node.js") {
+    } else if text.contains("NODE_MODULE_VERSION")
+        || text.contains("was compiled against a different Node.js")
+    {
         issue = Some("Native module ABI mismatch: a compiled dependency was built for a different Node.js version.".to_string());
-        action = Some("Rebuild dependencies with 'npm rebuild' or switch to the matching Node.js runtime.".to_string());
+        action = Some(
+            "Rebuild dependencies with 'npm rebuild' or switch to the matching Node.js runtime."
+                .to_string(),
+        );
     } else if text.contains("EADDRINUSE") {
         issue = Some("Port conflict: another application or process is already listening on the required port.".to_string());
-        action = Some("Stop the conflicting process or restart the website to allocate a new port.".to_string());
+        action = Some(
+            "Stop the conflicting process or restart the website to allocate a new port."
+                .to_string(),
+        );
     } else if text.contains("MODULE_NOT_FOUND") || text.contains("Cannot find module") {
-        issue = Some("Missing dependency: required module is not installed in node_modules.".to_string());
-        action = Some("Run 'npm install' to ensure all dependencies in package.json are installed.".to_string());
+        issue = Some(
+            "Missing dependency: required module is not installed in node_modules.".to_string(),
+        );
+        action = Some(
+            "Run 'npm install' to ensure all dependencies in package.json are installed."
+                .to_string(),
+        );
     } else if text.contains("Visual C++") || exit_code == Some(-1073741515) {
         issue = Some("Missing Microsoft Visual C++ Redistributable.".to_string());
         action = Some("Install Microsoft's Visual C++ Redistributable for x64 from https://aka.ms/vs/17/release/vc_redist.x64.exe.".to_string());
@@ -842,7 +862,10 @@ impl Supervisor {
                                 && (spec.site.is_some() || spec.role == Role::Service)
                                 && !(spec.role == Role::Caddy && retained_static(&store, &spec))
                             {
-                                let diag_summary = diag.as_ref().map(|d| format!("\n{}", d.summary)).unwrap_or_default();
+                                let diag_summary = diag
+                                    .as_ref()
+                                    .map(|d| format!("\n{}", d.summary))
+                                    .unwrap_or_default();
                                 let message = format!(
                                     "{} stopped after five exits within 30 seconds of starting ({last_exit}). Start the website manually to try again.{diag_summary}",
                                     spec.label()
@@ -1121,10 +1144,19 @@ impl Supervisor {
     async fn auto_heal_site(&self, id: &str) -> Result<(), String> {
         let site = self.store.site(id).map_err(|e| e.to_string())?;
         if site.kind == "static" {
-            let current_index = self.store.root.join("sites").join(id).join("current/index.html");
+            let current_index = self
+                .store
+                .root
+                .join("sites")
+                .join(id)
+                .join("current/index.html");
             let source_path = Path::new(&site.source_path);
             if !current_index.is_file() && source_path.exists() {
-                let src_kind = if source_path.is_dir() { "directory" } else { "zip" };
+                let src_kind = if source_path.is_dir() {
+                    "directory"
+                } else {
+                    "zip"
+                };
                 let _ = hostify_core::import::import(
                     source_path,
                     src_kind,
@@ -1138,16 +1170,31 @@ impl Supervisor {
         }
 
         let config = self.store.app_config(id).map_err(|e| e.to_string())?;
-        if site.kind == "node" && site.runtime_version.as_deref().is_some_and(|v| v.starts_with("26.")) {
+        if site.kind == "node"
+            && site
+                .runtime_version
+                .as_deref()
+                .is_some_and(|v| v.starts_with("26."))
+        {
             // Diagnose a known incompatible dependency; never change runtime_version silently.
-            if let Some(release) = config.built_release.as_ref().or(config.active_release.as_ref()) {
+            if let Some(release) = config
+                .built_release
+                .as_ref()
+                .or(config.active_release.as_ref())
+            {
                 let root = self.release_root(id, release)?;
                 let cwd = hostify_core::app_config::inside(&root, &config.working_dir)?;
                 let incompatible = cwd.join("node_modules/buffer-equal-constant-time").is_dir()
-                    || [cwd.join("package-lock.json"), root.join("package-lock.json")]
-                        .iter().any(|p| std::fs::read_to_string(p)
+                    || [
+                        cwd.join("package-lock.json"),
+                        root.join("package-lock.json"),
+                    ]
+                    .iter()
+                    .any(|p| {
+                        std::fs::read_to_string(p)
                             .map(|s| s.contains("buffer-equal-constant-time"))
-                            .unwrap_or(false));
+                            .unwrap_or(false)
+                    });
                 if incompatible {
                     return Err("Node.js 26 is incompatible with this application's buffer-equal-constant-time dependency. Select the installed Node.js 24 LTS runtime in Hostify, rebuild the release, and retry. No application files were changed.".into());
                 }
@@ -1156,7 +1203,9 @@ impl Supervisor {
 
         // Only restart a database the user *already linked* to this site.
         if let Some(name) = self.mysql.linked_database(id).map_err(|e| e.to_string())? {
-            self.mysql_start().await.map_err(|e| format!("Database {name} could not start: {e}"))?;
+            self.mysql_start()
+                .await
+                .map_err(|e| format!("Database {name} could not start: {e}"))?;
             // Never overwrite user environment settings during startup. Credentials are
             // injected only after an explicit link action and updated on password rotation.
         }
@@ -1242,7 +1291,11 @@ impl SiteRuntime for Supervisor {
         let previous_config = std::fs::read_to_string(&path).ok();
         let changed = previous_config.as_deref() != Some(config.as_str());
         let key = format!("site:{id}");
-        let was_running = self.workers.lock().await.get(&key)
+        let was_running = self
+            .workers
+            .lock()
+            .await
+            .get(&key)
             .is_some_and(|w| !w.task.is_finished());
         // Static sites must also reload when their hostname changes while
         // Caddy is already active. Never restart another website's server.
@@ -1476,8 +1529,18 @@ mod tests {
         let diag = diagnose_crash(&log, Some(1), Some("26.13.0"), "node");
         assert_eq!(diag.exit_code, Some(1));
         assert_eq!(diag.runtime_version.as_deref(), Some("26.13.0"));
-        assert!(diag.compatibility_issue.as_ref().unwrap().contains("SlowBuffer"));
-        assert!(diag.suggested_action.as_ref().unwrap().contains("Node.js 24 LTS"));
+        assert!(
+            diag.compatibility_issue
+                .as_ref()
+                .unwrap()
+                .contains("SlowBuffer")
+        );
+        assert!(
+            diag.suggested_action
+                .as_ref()
+                .unwrap()
+                .contains("Node.js 24 LTS")
+        );
         assert!(diag.summary.contains("TypeError"));
         assert!(diag.summary.contains("SlowBuffer"));
     }
@@ -1968,8 +2031,11 @@ impl Supervisor {
         if app_running {
             // A deployment may add the public hostname after the local Node
             // process is already running. Refresh Caddy, not the application.
-            let port = config.internal_port.ok_or("Running Node application has no assigned internal port.")?;
-            self.start_proxy(id, hostify_core::caddy::Backend::Proxy { port }).await?;
+            let port = config
+                .internal_port
+                .ok_or("Running Node application has no assigned internal port.")?;
+            self.start_proxy(id, hostify_core::caddy::Backend::Proxy { port })
+                .await?;
             return Ok(false);
         }
         if config.internal_port.is_none_or(|p| !port_available(p)) {
@@ -2025,7 +2091,9 @@ impl Supervisor {
                 let entry_cand = inside(&root, &format!("{}/{}", config.working_dir, argv[0]))
                     .or_else(|_| inside(&root, &argv[0]))
                     .or_else(|_| {
-                        if let Some(file_name) = Path::new(&argv[0]).file_name().and_then(|s| s.to_str()) {
+                        if let Some(file_name) =
+                            Path::new(&argv[0]).file_name().and_then(|s| s.to_str())
+                        {
                             inside(&root, &format!("{}/{}", config.working_dir, file_name))
                                 .or_else(|_| inside(&root, file_name))
                         } else {
@@ -2126,7 +2194,9 @@ impl Supervisor {
         let prefix = format!("php:{id}:");
         let php_running = {
             let workers = self.workers.lock().await;
-            workers.iter().any(|(k, w)| k.starts_with(&prefix) && !w.task.is_finished())
+            workers
+                .iter()
+                .any(|(k, w)| k.starts_with(&prefix) && !w.task.is_finished())
         };
         if php_running {
             // Keep already-running PHP workers; ensure Caddy knows the public
@@ -2135,10 +2205,14 @@ impl Supervisor {
             if config.php_ports.is_empty() {
                 return Err("Running PHP application has no configured FastCGI ports.".into());
             }
-            self.start_proxy(id, hostify_core::caddy::Backend::Php {
-                root: cwd,
-                upstreams: config.php_ports.clone(),
-            }).await?;
+            self.start_proxy(
+                id,
+                hostify_core::caddy::Backend::Php {
+                    root: cwd,
+                    upstreams: config.php_ports.clone(),
+                },
+            )
+            .await?;
             return Ok(false);
         }
         let site = self.store.site(id).map_err(|e| e.to_string())?;
@@ -2322,7 +2396,11 @@ impl Supervisor {
         let previous_config = std::fs::read_to_string(&path).ok();
         let changed = previous_config.as_deref() != std::fs::read_to_string(&temp).ok().as_deref();
         let key = format!("site:{id}");
-        let was_running = self.workers.lock().await.get(&key)
+        let was_running = self
+            .workers
+            .lock()
+            .await
+            .get(&key)
             .is_some_and(|w| !w.task.is_finished());
         // Caddy's admin API is disabled. Restart only this site's Caddy when
         // its approved Host allowlist changes; keep Node/PHP workers alive.
@@ -2442,8 +2520,20 @@ impl Supervisor {
             Err(error) => {
                 // If this is an already-running release, a routing refresh
                 // failure must not terminate the previously healthy app.
-                if !promoting && self.store.site(id).map(|site| site.status == "running").unwrap_or(false) {
-                    let _ = self.store.activity("error", Some(id), &format!("Website routing refresh failed; previous release preserved: {error}"));
+                if !promoting
+                    && self
+                        .store
+                        .site(id)
+                        .map(|site| site.status == "running")
+                        .unwrap_or(false)
+                {
+                    let _ = self.store.activity(
+                        "error",
+                        Some(id),
+                        &format!(
+                            "Website routing refresh failed; previous release preserved: {error}"
+                        ),
+                    );
                     return Err(error);
                 }
                 self.stop_site(id).await?;
@@ -2655,12 +2745,29 @@ mod safe_startup_regression_tests {
     #[test]
     fn no_automatic_source_or_schema_rewrites_on_startup() {
         let code = include_str!("supervisor.rs");
-        let f = code.split("async fn auto_heal_site(").nth(1).expect("startup");
-        let f = f.split("pub fn detect_nested_node_dir(").next().expect("startup end");
-        for forbidden in ["clean_sql_for_mysql8", "UPDATE websites SET runtime_version",
-            "trusted_release = Some", "built_release = Some",
-            "bcrypt.orig.js", "config/db.js", "schema.sql", "create_database", "link_database"] {
-            assert!(!f.contains(forbidden), "startup must not perform {forbidden}");
+        let f = code
+            .split("async fn auto_heal_site(")
+            .nth(1)
+            .expect("startup");
+        let f = f
+            .split("pub fn detect_nested_node_dir(")
+            .next()
+            .expect("startup end");
+        for forbidden in [
+            "clean_sql_for_mysql8",
+            "UPDATE websites SET runtime_version",
+            "trusted_release = Some",
+            "built_release = Some",
+            "bcrypt.orig.js",
+            "config/db.js",
+            "schema.sql",
+            "create_database",
+            "link_database",
+        ] {
+            assert!(
+                !f.contains(forbidden),
+                "startup must not perform {forbidden}"
+            );
         }
     }
 }

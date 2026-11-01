@@ -556,7 +556,9 @@ impl Engine {
             }
         });
         {
-            let mut tasks = self.background.lock()
+            let mut tasks = self
+                .background
+                .lock()
                 .map_err(|_| anyhow!("Background tasks unavailable"))?;
             tasks.push(retry);
             if self.supervisor.is_some() {
@@ -727,29 +729,31 @@ impl Engine {
         match method {
             "list_app_templates" => Ok(json!(hostify_core::catalog::list())),
             "create_site_from_template" => {
-                let template_id=arg(&p,"templateId")?;
-                let name=arg(&p,"name")?.trim();
-                if name.is_empty() || name.len()>200 {bail!("Enter a website name of 1 to 200 characters.");}
-                let template=hostify_core::catalog::get(template_id)?;
+                let template_id = arg(&p, "templateId")?;
+                let name = arg(&p, "name")?.trim();
+                if name.is_empty() || name.len() > 200 {
+                    bail!("Enter a website name of 1 to 200 characters.");
+                }
+                let template = hostify_core::catalog::get(template_id)?;
                 // This source folder is retained for user edits and future
                 // updates; it is not the production release directory.
-                let parent=s.root.join("template-sources");
+                let parent = s.root.join("template-sources");
                 std::fs::create_dir_all(&parent)?;
-                let folder=parent.join(uuid::Uuid::new_v4().to_string());
-                hostify_core::catalog::materialize(template_id,&folder)?;
-                let request=json!({"name":name,"sourcePath":folder.to_string_lossy(),
+                let folder = parent.join(uuid::Uuid::new_v4().to_string());
+                hostify_core::catalog::materialize(template_id, &folder)?;
+                let request = json!({"name":name,"sourcePath":folder.to_string_lossy(),
                     "kind":"directory","siteKind":template.kind});
                 // Reuse the existing importer, port allocation and release
                 // trust guards instead of building a parallel site creator.
-                let site=Box::pin(self.dispatch("add_site",request)).await;
+                let site = Box::pin(self.dispatch("add_site", request)).await;
                 match site {
-                    Ok(value)=>{
+                    Ok(value) => {
                         s.activity("info",value["id"].as_str(),
                             "Built-in catalog project imported. Dynamic projects require explicit trust and build.")?;
                         Ok(value)
                     }
-                    Err(error)=>{
-                        let _=std::fs::remove_dir_all(&folder);
+                    Err(error) => {
+                        let _ = std::fs::remove_dir_all(&folder);
                         Err(error)
                     }
                 }
@@ -807,10 +811,7 @@ impl Engine {
                 }
                 config.auto_heal(&release_path, &site.kind);
                 config
-                    .validate_kind(
-                        &release_path,
-                        &site.kind,
-                    )
+                    .validate_kind(&release_path, &site.kind)
                     .map_err(|e| anyhow!(e))?;
                 let version = p
                     .get(if site.kind == "php" {
@@ -843,9 +844,9 @@ impl Engine {
                 )
             }
             "github_source_status" => {
-                let id=arg(&p,"siteId")?;
+                let id = arg(&p, "siteId")?;
                 s.site(id)?;
-                let db=s.db()?;
+                let db = s.db()?;
                 let source:Option<(String,String,bool)>=db.query_row(
                     "SELECT repository,branch,enabled FROM github_site_sources WHERE site_id=?1",
                     [id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))
@@ -857,23 +858,23 @@ impl Engine {
                     } else {Err(error)}
                 })?;
                 Ok(match source {
-                    Some((repository,branch,enabled))=>json!({"repository":repository,
+                    Some((repository, branch, enabled)) => json!({"repository":repository,
                         "branch":branch,"enabled":enabled}),
-                    None=>json!({"repository":"","branch":"main","enabled":false})
+                    None => json!({"repository":"","branch":"main","enabled":false}),
                 })
             }
             "github_configure_source" => {
-                let id=arg(&p,"siteId")?;
+                let id = arg(&p, "siteId")?;
                 s.site(id)?;
-                let policy=hostify_core::github_webhooks::SourcePolicy{
-                    site_id:id.to_owned(),
-                    repository:arg(&p,"repository")?.to_owned(),
-                    branch:arg(&p,"branch")?.to_owned(),
-                    enabled:boolean(&p,"enabled")?,
+                let policy = hostify_core::github_webhooks::SourcePolicy {
+                    site_id: id.to_owned(),
+                    repository: arg(&p, "repository")?.to_owned(),
+                    branch: arg(&p, "branch")?.to_owned(),
+                    enabled: boolean(&p, "enabled")?,
                 };
                 {
-                    let mut db=s.db()?;
-                    hostify_core::github_webhooks::configure_source(&mut db,&policy)?;
+                    let mut db = s.db()?;
+                    hostify_core::github_webhooks::configure_source(&mut db, &policy)?;
                 }
                 // Activity writes also acquire Store's SQLite mutex.
                 s.activity("info",Some(id),if policy.enabled {
@@ -881,61 +882,74 @@ impl Engine {
                 } else {
                     "GitHub source review disabled and outstanding pushes rejected."
                 })?;
-                Ok(json!({"repository":policy.repository,"branch":policy.branch,"enabled":policy.enabled}))
+                Ok(
+                    json!({"repository":policy.repository,"branch":policy.branch,"enabled":policy.enabled}),
+                )
             }
             "github_pending_pushes" => {
-                let id=arg(&p,"siteId")?;
+                let id = arg(&p, "siteId")?;
                 s.site(id)?;
-                let db=s.db()?;
-                Ok(json!(hostify_core::github_webhooks::pending_pushes(&db,id)?))
+                let db = s.db()?;
+                Ok(json!(hostify_core::github_webhooks::pending_pushes(
+                    &db, id
+                )?))
             }
             "github_reject_push" => {
-                let id=arg(&p,"siteId")?;
+                let id = arg(&p, "siteId")?;
                 s.site(id)?;
-                let delivery=arg(&p,"deliveryId")?;
-                let rejected={
-                    let mut db=s.db()?;
-                    hostify_core::github_webhooks::reject_pending_push(&mut db,id,delivery)?
+                let delivery = arg(&p, "deliveryId")?;
+                let rejected = {
+                    let mut db = s.db()?;
+                    hostify_core::github_webhooks::reject_pending_push(&mut db, id, delivery)?
                 };
                 if rejected {
-                    s.activity("info",Some(id),"A pending GitHub push was rejected without running code.")?;
+                    s.activity(
+                        "info",
+                        Some(id),
+                        "A pending GitHub push was rejected without running code.",
+                    )?;
                 }
                 Ok(json!({"rejected":rejected}))
             }
-            "site_snapshot_schedule" => {
-                Ok(json!(crate::time_machine::schedule(self,arg(&p,"siteId")?)?))
-            }
-            "set_site_snapshot_schedule" => {
-                crate::time_machine::configure_schedule(self,arg(&p,"siteId")?,
-                    boolean(&p,"enabled")?,number(&p,"everyHours",168)? as u32)
-            }
-            "create_site_snapshot" => {
-                crate::time_machine::create(self, arg(&p,"siteId")?).await
-            }
-            "list_site_snapshots" => {
-                crate::time_machine::list(self, arg(&p,"siteId")?).await
-            }
+            "site_snapshot_schedule" => Ok(json!(crate::time_machine::schedule(
+                self,
+                arg(&p, "siteId")?
+            )?)),
+            "set_site_snapshot_schedule" => crate::time_machine::configure_schedule(
+                self,
+                arg(&p, "siteId")?,
+                boolean(&p, "enabled")?,
+                number(&p, "everyHours", 168)? as u32,
+            ),
+            "create_site_snapshot" => crate::time_machine::create(self, arg(&p, "siteId")?).await,
+            "list_site_snapshots" => crate::time_machine::list(self, arg(&p, "siteId")?).await,
             "verify_site_snapshot" => {
-                crate::time_machine::verify(self, arg(&p,"siteId")?,arg(&p,"snapshotId")?).await
+                crate::time_machine::verify(self, arg(&p, "siteId")?, arg(&p, "snapshotId")?).await
             }
             "export_site_snapshot" => {
-                crate::time_machine::export(self,arg(&p,"siteId")?,
-                    arg(&p,"snapshotId")?,arg(&p,"destination")?).await
+                crate::time_machine::export(
+                    self,
+                    arg(&p, "siteId")?,
+                    arg(&p, "snapshotId")?,
+                    arg(&p, "destination")?,
+                )
+                .await
             }
             "restore_site_snapshot" => {
-                crate::time_machine::restore(self, arg(&p,"siteId")?,arg(&p,"snapshotId")?,
-                    arg(&p,"confirmName")?).await
+                crate::time_machine::restore(
+                    self,
+                    arg(&p, "siteId")?,
+                    arg(&p, "snapshotId")?,
+                    arg(&p, "confirmName")?,
+                )
+                .await
             }
-            "guardian_status" => {
-                Ok(json!(crate::guardian::load(self, arg(&p, "siteId")?)?))
-            }
+            "guardian_status" => Ok(json!(crate::guardian::load(self, arg(&p, "siteId")?)?)),
             "guardian_enable" => {
                 let id = arg(&p, "siteId")?;
                 crate::guardian::enable(self, id, boolean(&p, "enabled")?)
             }
-            "guardian_check_now" => {
-                crate::guardian::check(self, arg(&p, "siteId")?).await
-            }
+            "guardian_check_now" => crate::guardian::check(self, arg(&p, "siteId")?).await,
             "publish_preflight" => {
                 let id = arg(&p, "siteId")?;
                 let site = s.site(id)?;
@@ -945,35 +959,55 @@ impl Engine {
                 let dynamic = matches!(site.kind.as_str(), "node" | "php");
                 if dynamic {
                     let config = s.app_config(id)?;
-                    let trusted = config.trusted_release.as_ref().is_some_and(|r|
+                    let trusted = config.trusted_release.as_ref().is_some_and(|r| {
                         config.built_release.as_ref() == Some(r)
-                        && (config.pending_release.as_ref() == Some(r) || config.active_release.as_ref() == Some(r)));
+                            && (config.pending_release.as_ref() == Some(r)
+                                || config.active_release.as_ref() == Some(r))
+                    });
                     checks.push(json!({"key":"trusted-build","passed":trusted,
                         "detail":if trusted {"Release was explicitly trusted and built."}
                         else {"Trust and build this release before publishing."}}));
-                    if !trusted { blocked.push("Trust and build this application release first.".into()); }
-                    let runtime = site.runtime_version.as_deref().and_then(|v|
-                        s.runtimes.resolve(&site.kind, v).ok());
+                    if !trusted {
+                        blocked.push("Trust and build this application release first.".into());
+                    }
+                    let runtime = site
+                        .runtime_version
+                        .as_deref()
+                        .and_then(|v| s.runtimes.resolve(&site.kind, v).ok());
                     let installed = runtime.is_some();
                     checks.push(json!({"key":"runtime","passed":installed,
                         "detail":if installed {"Compatible runtime is installed."} else {"Install an approved runtime before publishing."}}));
-                    if !installed { blocked.push("The selected runtime is not installed.".into()); }
+                    if !installed {
+                        blocked.push("The selected runtime is not installed.".into());
+                    }
                 }
                 if self.service && dynamic {
-                    blocked.push("Dynamic applications cannot run under the privileged Windows service.".into());
+                    blocked.push(
+                        "Dynamic applications cannot run under the privileged Windows service."
+                            .into(),
+                    );
                 }
                 let caddy = s.detection.caddy_ready().await;
                 checks.push(json!({"key":"caddy","passed":caddy,"detail":if caddy {"Caddy ready."} else {"Install Caddy."}}));
-                if !caddy { blocked.push("Caddy is unavailable.".into()); }
+                if !caddy {
+                    blocked.push("Caddy is unavailable.".into());
+                }
                 let status = site.status.as_str();
                 let healthy = status == "running";
                 checks.push(json!({"key":"local-site","passed":healthy,
                     "detail":if healthy {"Local service reports running."}
                     else {"Start the website and verify the actual local HTTP response."}}));
-                if !healthy { blocked.push("The website is not running and healthy.".into()); }
-                let diagnostic = site.status_detail.as_deref().map(hostify_core::diagnostics::classify);
-                Ok(json!({"ready":blocked.is_empty(),"checks":checks,"blocked":blocked,
-                    "diagnostic":diagnostic,"mode":"shared"}))
+                if !healthy {
+                    blocked.push("The website is not running and healthy.".into());
+                }
+                let diagnostic = site
+                    .status_detail
+                    .as_deref()
+                    .map(hostify_core::diagnostics::classify);
+                Ok(
+                    json!({"ready":blocked.is_empty(),"checks":checks,"blocked":blocked,
+                    "diagnostic":diagnostic,"mode":"shared"}),
+                )
             }
             "publish_record_event" => {
                 let id = arg(&p, "siteId")?;
@@ -999,21 +1033,25 @@ impl Engine {
                 }
                 let severity = if outcome == "failed" { "error" } else { "info" };
                 // Persist only fixed descriptions, never project-provided text, tokens or secrets.
-                s.activity(severity, Some(id), &format!("Fast Publish: {event} ({outcome})"))?;
+                s.activity(
+                    severity,
+                    Some(id),
+                    &format!("Fast Publish: {event} ({outcome})"),
+                )?;
                 Ok(Value::Null)
             }
             "security_posture" => crate::security_center::gather(self),
             "doctor_analyze" => {
-                let id=arg(&p,"siteId")?;
-                let site=s.site(id)?;
-                let logs=["app.log","build.log","process.log","log"]
+                let id = arg(&p, "siteId")?;
+                let site = s.site(id)?;
+                let logs = ["app.log", "build.log", "process.log", "log"]
                     .iter()
                     .flat_map(|suffix| {
-                        let path=s.root.join("logs").join(format!("{id}.{suffix}"));
-                        crate::supervisor::tail_logs(&path,150).unwrap_or_default()
+                        let path = s.root.join("logs").join(format!("{id}.{suffix}"));
+                        crate::supervisor::tail_logs(&path, 150).unwrap_or_default()
                     })
                     .collect::<Vec<_>>();
-                let report=hostify_core::doctor::analyze(&logs,&site.kind,&site.status);
+                let report = hostify_core::doctor::analyze(&logs, &site.kind, &site.status);
                 Ok(json!(report))
             }
             "publish_diagnosis" => {
@@ -1022,7 +1060,10 @@ impl Engine {
                 let latest_error: Option<String> = s.db()?.query_row(
                     "SELECT json_extract(snapshot_json,'$.error') FROM deployments WHERE site_id=?1 ORDER BY rowid DESC LIMIT 1",
                     [id], |r| r.get(0)).ok().flatten();
-                let error = site.status_detail.or(latest_error).unwrap_or_else(|| "No error reported.".into());
+                let error = site
+                    .status_detail
+                    .or(latest_error)
+                    .unwrap_or_else(|| "No error reported.".into());
                 Ok(json!(hostify_core::diagnostics::classify(&error)))
             }
             "build_app" => crate::build::begin(self, &p).await,
@@ -1284,9 +1325,7 @@ impl Engine {
                         hostify_core::import::import_release(Path::new(source), kind, &site_dir)?;
                     let release_path = site_dir.join("app").join(&release);
                     config.auto_heal(&release_path, &site_kind);
-                    if let Err(e) =
-                        config.validate_kind(&release_path, &site_kind)
-                    {
+                    if let Err(e) = config.validate_kind(&release_path, &site_kind) {
                         // Leave no refused import behind; add_site's folder is brand new.
                         let _ = std::fs::remove_dir_all(if method == "add_site" {
                             site_dir.clone()
@@ -1599,9 +1638,11 @@ impl Engine {
                         bail!("Dynamic publishing is disabled in privileged service mode.");
                     }
                     let config = s.app_config(&id)?;
-                    let trusted = config.trusted_release.as_ref().is_some_and(|r|
+                    let trusted = config.trusted_release.as_ref().is_some_and(|r| {
                         config.built_release.as_ref() == Some(r)
-                        && (config.pending_release.as_ref() == Some(r) || config.active_release.as_ref() == Some(r)));
+                            && (config.pending_release.as_ref() == Some(r)
+                                || config.active_release.as_ref() == Some(r))
+                    });
                     if !trusted {
                         bail!("Trust and build the release before publishing.");
                     }
