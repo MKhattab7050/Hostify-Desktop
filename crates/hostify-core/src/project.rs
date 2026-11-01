@@ -116,7 +116,7 @@ fn files(path: &Path, kind: &str) -> Result<ProjectFiles, String> {
         let mut root = false;
         for i in 0..z.len() {
             let f = z.by_index(i).map_err(|e| e.to_string())?;
-            let p = safe_name(f.name()).map_err(|e| e.to_string())?;
+            let p = safe_name(&f.name().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
             if f.unix_mode()
                 .is_some_and(|m| !matches!(m & 0o170000, 0 | 0o100000 | 0o040000))
             {

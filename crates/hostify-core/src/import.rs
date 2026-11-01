@@ -236,7 +236,7 @@ fn extract_zip(
     let mut root_file = false;
     for i in 0..archive.len() {
         let file = archive.by_index(i)?;
-        let path = safe_name(file.name())?;
+        let path = safe_name(&file.name()?)?;
         if let Some(mode) = file.unix_mode() {
             let kind = mode & 0o170000;
             if kind != 0 && kind != 0o100000 && kind != 0o040000 {
