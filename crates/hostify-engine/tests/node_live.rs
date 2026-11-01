@@ -400,7 +400,7 @@ async fn live_grandchild_loopback_explicit_exposure_esm_and_crash_loop() {
     );
     f.stop(&id).await;
     // ESM and listen(port, callback) use the same preload without changing module format.
-    let esm = "import http from 'node:http';http.createServer((q,s)=>{s.statusCode=404;s.end('esm');}).listen(Number(process.env.PORT),()=>console.log('ready'));";
+    let esm = "import http from 'node:http';http.createServer((q,s)=>{s.statusCode=200;s.end('esm');}).listen(Number(process.env.PORT),()=>console.log('ready'));";
     std::fs::write(f.source.join("server.mjs"), esm).unwrap();
     f.update(&id, "import('./server.mjs')", "console.log('ok')")
         .await;

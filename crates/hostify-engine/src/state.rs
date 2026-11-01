@@ -797,6 +797,14 @@ impl Engine {
                     .or(config.active_release.as_ref())
                     .ok_or_else(|| anyhow!("Import a release first."))?;
                 let release_path = s.root.join("sites").join(id).join("app").join(release);
+                // Auto-detection may repair missing folders, but must not turn
+                // an unsafe caller-supplied path into a silently accepted one.
+                for path in [&config.working_dir, &config.document_root] {
+                    let relative = hostify_core::app_config::relative(path).map_err(|e| anyhow!(e))?;
+                    if release_path.join(relative).exists() {
+                        hostify_core::app_config::inside(&release_path, path).map_err(|e| anyhow!(e))?;
+                    }
+                }
                 config.auto_heal(&release_path, &site.kind);
                 config
                     .validate_kind(

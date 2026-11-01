@@ -77,7 +77,7 @@ pub fn generate_ini(runtime: &Path, root: &Path, port: u16) -> Result<String> {
         bail!("MySQL needs a nonzero port.")
     }
     Ok(format!(
-        "[mysqld]\nbasedir={}\ndatadir={}\nport={port}\nbind-address=127.0.0.1\nmysqlx=OFF\nlocal_infile=OFF\nskip-name-resolve=ON\nlog-error={}\nenable-named-pipe=OFF\nshared-memory=OFF\ninnodb_buffer_pool_size=128M\nperformance_schema=OFF\nmax_connections=100\ncharacter-set-server=utf8mb4\nsecure-file-priv=NULL\n",
+        "[mysqld]\nbasedir={}\ndatadir={}\nport={port}\nbind-address=127.0.0.1\nmysqlx=OFF\nlocal_infile=OFF\nskip-name-resolve=ON\nlog-error={}\nnamed-pipe=OFF\nshared-memory=OFF\ninnodb_buffer_pool_size=128M\nperformance_schema=OFF\nmax_connections=100\ncharacter-set-server=utf8mb4\nsecure-file-priv=NULL\n",
         quote(runtime)?,
         quote(&root.join("mysql/data"))?,
         quote(&root.join("logs/mysql-error.log"))?
@@ -1310,6 +1310,7 @@ mod tests {
             "port=3307",
             "bind-address=127.0.0.1",
             "mysqlx=OFF",
+            "named-pipe=OFF",
             "local_infile=OFF",
             "secure-file-priv=NULL",
             "performance_schema=OFF",

@@ -30,6 +30,12 @@ async fn node_import_only_allocates_ports_and_requires_trust() {
     assert!(config.active_release.is_none());
     assert!(config.trusted_release.is_none());
     assert!(config.built_release.is_none());
+    for invalid in ["..\\outside", "C:\\outside", "../outside"] {
+        let mut bad = config.clone();
+        bad.working_dir = invalid.into();
+        assert!(engine.dispatch("set_app_config", json!({"siteId":id,"config":bad})).await.is_err());
+    }
+    assert_eq!(store.app_config(id).unwrap().working_dir, config.working_dir);
     assert_ne!(
         config.internal_port.unwrap(),
         site["localPort"].as_u64().unwrap() as u16
