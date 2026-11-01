@@ -192,7 +192,10 @@ pub fn find_best_node_sub(root: &Path) -> Option<String> {
         let pkg_path = path.join("package.json");
         if pkg_path.is_file() {
             let mut score = 1;
-            if path.join("server.js").is_file() || path.join("app.js").is_file() || path.join("index.js").is_file() {
+            if path.join("server.js").is_file()
+                || path.join("app.js").is_file()
+                || path.join("index.js").is_file()
+            {
                 score += 10;
             }
             if path.join(".env").is_file() {
@@ -207,7 +210,10 @@ pub fn find_best_node_sub(root: &Path) -> Option<String> {
             if best.as_ref().is_none_or(|(b, _)| score > *b) {
                 best = Some((score, name.to_owned()));
             }
-        } else if path.join("server.js").is_file() || path.join("app.js").is_file() || path.join("index.js").is_file() {
+        } else if path.join("server.js").is_file()
+            || path.join("app.js").is_file()
+            || path.join("index.js").is_file()
+        {
             let score = 5;
             if best.as_ref().is_none_or(|(b, _)| score > *b) {
                 best = Some((score, name.to_owned()));
@@ -310,7 +316,11 @@ impl AppConfig {
 
         if kind == "node" {
             let cwd_ok = inside(&root, &self.working_dir)
-                .map(|p| p.join("package.json").is_file() || p.join("server.js").is_file() || p.join("app.js").is_file())
+                .map(|p| {
+                    p.join("package.json").is_file()
+                        || p.join("server.js").is_file()
+                        || p.join("app.js").is_file()
+                })
                 .unwrap_or(false);
 
             if !cwd_ok {
@@ -319,7 +329,10 @@ impl AppConfig {
                         self.working_dir = sub.clone();
                         changed = true;
                     }
-                    if self.document_root == "." || self.document_root.is_empty() || !root.join(&self.document_root).is_dir() {
+                    if self.document_root == "."
+                        || self.document_root.is_empty()
+                        || !root.join(&self.document_root).is_dir()
+                    {
                         self.document_root = sub;
                         changed = true;
                     }
@@ -336,7 +349,9 @@ impl AppConfig {
                                 *entry_arg = stripped.to_string();
                                 changed = true;
                             }
-                        } else if let Some(file_name) = Path::new(&*entry_arg).file_name().and_then(|s| s.to_str()) {
+                        } else if let Some(file_name) =
+                            Path::new(&*entry_arg).file_name().and_then(|s| s.to_str())
+                        {
                             if cwd.join(file_name).is_file() {
                                 *entry_arg = file_name.to_string();
                                 changed = true;

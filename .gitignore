@@ -27,5 +27,6 @@ dist-ssr
 /vendor/
 /.cargo/
 /target/
+**/target/
 
 /.dev-data/

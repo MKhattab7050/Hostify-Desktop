@@ -1,15 +1,15 @@
 //! Headless Hostify engine and its per-user control protocol.
 #[cfg(windows)]
 pub mod cli;
+pub mod guardian;
 pub mod mysql;
 mod php;
 #[cfg(windows)]
 pub mod pipe;
-pub mod state;
-pub mod guardian;
-pub mod time_machine;
 pub mod security_center;
+pub mod state;
 pub mod supervisor;
+pub mod time_machine;
 #[cfg(windows)]
 pub mod windows;
 use serde::Deserialize;
