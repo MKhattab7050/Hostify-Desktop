@@ -13,12 +13,13 @@ export function TimeMachineCard({ sites }: { sites: Site[] }) {
   const [error, setError] = useState<string>();
   const [success, setSuccess] = useState<string>();
 
+  const siteIds = JSON.stringify(sites.map((site) => site.id));
   useEffect(() => {
     let active = true;
-    void Promise.all(sites.map(async (site) => ({
-      id:site.id,
-      snapshots:await api.listSiteSnapshots(site.id),
-      schedule:await api.siteSnapshotSchedule(site.id),
+    void Promise.all((JSON.parse(siteIds) as string[]).map(async (id) => ({
+      id,
+      snapshots:await api.listSiteSnapshots(id),
+      schedule:await api.siteSnapshotSchedule(id),
     })))
       .then((results) => { if (active) {
         setRecords(Object.fromEntries(results.map(({id,snapshots})=>[id,snapshots])));
@@ -26,7 +27,7 @@ export function TimeMachineCard({ sites }: { sites: Site[] }) {
       } })
       .catch((e) => { if (active) setError((e as Error).message); });
     return () => { active = false; };
-  }, [sites.map((s) => s.id).join("|")]);
+  }, [siteIds]);
 
   async function schedule(site: Site, enabled: boolean, everyHours: 24 | 72 | 168) {
     setError(undefined); setBusy(site.id);
