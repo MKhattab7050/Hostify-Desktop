@@ -235,7 +235,7 @@ pub struct DeployRequest {
     pub consent_dns: bool,
 }
 #[derive(Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct Resources {
     unpublishing: bool,
     nonce: Option<String>,
@@ -1070,8 +1070,21 @@ impl Deployer {
         d.state = "failed".into();
         self.save(&d, &r)?;
         self.cleanup(&q, &mut r, &d, false).await?;
+        // Cleanup keeps the shared tunnel and local website alive. Their
+        // historical references are not outstanding deployment ownership.
+        if !r.dns_intent && !r.dns_update_pending && !r.ingress_pending {
+            r.site_started = false;
+            r.connector_started = false;
+            r.tunnel_created = false;
+            r.tunnel_id = None;
+            r.tunnel_intent = None;
+        }
         d.state = "rolled_back".into();
         self.emit(&d, &r, callback)?;
+        if !r.dns_intent && !r.dns_update_pending && !r.ingress_pending {
+            r.unpublishing = false;
+            self.save(&d, &r)?;
+        }
         Ok(())
     }
     pub async fn recover_interrupted(

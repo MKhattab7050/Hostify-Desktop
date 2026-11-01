@@ -158,6 +158,20 @@ async fn test_1_setup_and_security_audit() {
     let f = Fixture::new();
     f.setup_mysql().await;
 
+    assert_eq!(f.mysql().sql("SELECT @@named_pipe;").unwrap().trim(), "0");
+    // Existing installations may still contain the old legacy option.
+    // The launch-time override must keep it disabled without rewriting data.
+    f.call("mysql_stop", json!({})).await;
+    let ini_path = f.engine.store.root.join("mysql/my.ini");
+    let ini = std::fs::read_to_string(&ini_path).unwrap();
+    std::fs::write(
+        &ini_path,
+        ini.replace("named-pipe=OFF", "enable-named-pipe=OFF"),
+    )
+    .unwrap();
+    f.call("mysql_start", json!({})).await;
+    assert_eq!(f.mysql().sql("SELECT @@named_pipe;").unwrap().trim(), "0");
+
     let status = f.call("mysql_status", json!({})).await;
     let port = status["port"].as_u64().unwrap() as u16;
 

@@ -1192,10 +1192,62 @@ async fn all_evidence_failures_have_specific_classes_states_and_ordered_checks()
     }
 }
 #[tokio::test]
+async fn unpublish_preserves_unknown_resource_journals() {
+    let f = setup(99, false, true).await;
+    let d = f.deployer.deploy(f.q.clone(), &|_| {}).await.unwrap();
+    let raw: String = {
+        let db = f.deployer.db.lock().unwrap();
+        let raw: String = db
+            .query_row(
+                "SELECT created_resources_json FROM deployments WHERE id=?1",
+                [&d.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut resources: Value = serde_json::from_str(&raw).unwrap();
+        resources["future_resource"] = json!(true);
+        let raw = resources.to_string();
+        db.execute(
+            "UPDATE deployments SET created_resources_json=?1 WHERE id=?2",
+            params![raw, d.id],
+        )
+        .unwrap();
+        raw
+    };
+    assert!(f.deployer.unpublish(&d.id, &|_| {}).await.is_err());
+    let saved: String = f
+        .deployer
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT created_resources_json FROM deployments WHERE id=?1",
+            [&d.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(saved, raw, "Unrecognized resources must not be discarded");
+}
+#[tokio::test]
 async fn unpublishing_is_not_reported_as_a_failed_publish() {
     let f = setup(99, false, true).await;
     let d = f.deployer.deploy(f.q.clone(), &|_| {}).await.unwrap();
     f.deployer.unpublish(&d.id, &|_| {}).await.unwrap();
+    let raw: String = f
+        .deployer
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT created_resources_json FROM deployments WHERE id=?1",
+            [&d.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        !crate::db::resources_needed(&raw),
+        "Successful unpublish must allow local removal"
+    );
     let db = f.deployer.db.lock().unwrap();
     let mut query = db
         .prepare("SELECT message FROM activity_logs ORDER BY id")

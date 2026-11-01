@@ -32,12 +32,15 @@ pub(crate) fn generate(
         }
         ini.push_str(&format!("extension={name}\n"));
     }
-    ini.push_str("cgi.fix_pathinfo=0\ncgi.force_redirect=0\nfastcgi.logging=0\nexpose_php=Off\ndisplay_errors=Off\ndisplay_startup_errors=Off\nlog_errors=On\nallow_url_include=Off\nallow_url_fopen=Off\nsession.cookie_httponly=1\nsession.use_strict_mode=1\nuser_ini.filename=\ndate.timezone=UTC\nvariables_order=GPCS\n");
+    ini.push_str("cgi.fix_pathinfo=0\ncgi.force_redirect=0\nfastcgi.logging=0\nexpose_php=Off\ndisplay_errors=Off\ndisplay_startup_errors=Off\nlog_errors=On\nallow_url_include=Off\nallow_url_fopen=Off\nsession.cookie_httponly=1\nsession.use_strict_mode=1\nuser_ini.filename=\ndate.timezone=UTC\nvariables_order=GPCS\nopcache.file_cache_fallback=1\n");
     for (key, value) in [
         ("error_log", log.to_path_buf()),
         ("session.save_path", run.join("sessions")),
         ("upload_tmp_dir", run.join("tmp")),
         ("sys_temp_dir", run.join("tmp")),
+        // PHP's built-in OPcache can fail to attach shared memory under
+        // Windows ASLR. A site-specific file cache provides its fallback.
+        ("opcache.file_cache", run.join("opcache")),
     ] {
         ini.push_str(&format!("{key}={}\n", quote(&value)?));
     }
@@ -60,7 +63,12 @@ pub(crate) fn write(
         &run,
         &log,
     )?;
-    for dir in [run.join("sessions"), run.join("tmp"), data.join("logs")] {
+    for dir in [
+        run.join("sessions"),
+        run.join("tmp"),
+        run.join("opcache"),
+        data.join("logs"),
+    ] {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let path = run.join("php.ini");
@@ -90,6 +98,7 @@ mod tests {
         .unwrap();
         assert!(ini.contains("extension_dir=\"C:/PHP/ext\""));
         assert!(ini.contains("user_ini.filename=\n"));
+        assert!(ini.contains("opcache.file_cache=\"D:/run/site/opcache\""));
         assert!(!ini.contains("open_basedir"));
         c.php_settings
             .insert("memory_limit".into(), "128M\nextension=evil".into());

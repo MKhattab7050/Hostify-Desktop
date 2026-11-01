@@ -30,7 +30,16 @@ if ($service -and $service.PathName -match '^(?:"([^"]+)"|([^ ]+))') {
 $running = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='hostify-engine.exe'" |
     Where-Object { $_.ExecutablePath -and [string]::Equals([System.IO.Path]::GetFullPath($_.ExecutablePath), $expected, [StringComparison]::OrdinalIgnoreCase) })
 foreach ($process in $running) {
-    Stop-Process -Id $process.ProcessId -ErrorAction Stop
-    Wait-Process -Id $process.ProcessId -Timeout 10 -ErrorAction Stop
+    try {
+        Stop-Process -Id $process.ProcessId -ErrorAction Stop
+        Wait-Process -Id $process.ProcessId -Timeout 10 -ErrorAction Stop
+    } catch {
+        # A fast exit between Stop-Process and Wait-Process is success.
+        # Preserve genuine errors when this installation's process still exists.
+        $remaining = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$($process.ProcessId)" -ErrorAction Stop
+        if ($remaining -and $remaining.ExecutablePath -and
+            [string]::Equals([System.IO.Path]::GetFullPath($remaining.ExecutablePath), $expected, [StringComparison]::OrdinalIgnoreCase)) { throw }
+        if ($remaining -and !$remaining.ExecutablePath) { throw }
+    }
 }
 exit 0

@@ -599,7 +599,7 @@ fn extract(zip: &Path, stage: &Path, p: &Pin, progress: &Progress) -> Result<()>
     let mut bytes = 0u64;
     for i in 0..archive.len() {
         let entry = archive.by_index(i).map_err(err)?;
-        let path = crate::import::safe_name(entry.name()).map_err(err)?;
+        let path = crate::import::safe_name(&entry.name().map_err(err)?).map_err(err)?;
         if entry
             .unix_mode()
             .is_some_and(|mode| mode & 0o170000 == 0o120000)

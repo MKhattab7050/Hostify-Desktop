@@ -12,13 +12,14 @@ export function GithubSourcesCard({ sites }: { sites: Site[] }) {
   const [loading,setLoading]=useState(true);
   const [error,setError]=useState<string>();
   const [notice,setNotice]=useState<string>();
+  const siteIds = JSON.stringify(sites.map((site) => site.id));
   useEffect(()=>{
     let active=true;
     setLoading(true);
-    void Promise.all(sites.map(async (site)=>({
-      id:site.id,
-      source:await api.githubSourceStatus(site.id),
-      pushes:await api.githubPendingPushes(site.id),
+    void Promise.all((JSON.parse(siteIds) as string[]).map(async (id)=>({
+      id,
+      source:await api.githubSourceStatus(id),
+      pushes:await api.githubPendingPushes(id),
     }))).then((results)=>{
       if(!active)return;
       setSources(Object.fromEntries(results.map(x=>[x.id,x.source])));
@@ -26,7 +27,7 @@ export function GithubSourcesCard({ sites }: { sites: Site[] }) {
       setLoading(false);
     }).catch((e)=>{if(active){setError((e as Error).message);setLoading(false);}});
     return ()=>{active=false;};
-  },[sites.map(s=>s.id).join("|")]);
+  },[siteIds]);
   const update=(id:string,patch:Partial<GithubSource>)=>
     setSources(prev=>({...prev,[id]:{...(prev[id]??defaultSource),...patch}}));
   async function save(site:Site,enabled:boolean){

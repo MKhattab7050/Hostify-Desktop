@@ -8,14 +8,15 @@ export function GuardianCard({ sites }: { sites: Site[] }) {
   const [states, setStates] = useState<Record<string, GuardianStatus>>({});
   const [working, setWorking] = useState<string>();
   const [error, setError] = useState<string>();
+  const siteIds = JSON.stringify(sites.map((site) => site.id));
   useEffect(() => {
     let alive = true;
-    void Promise.all(sites.map((site) =>
-      api.guardianStatus(site.id).then((status) => ({ id: site.id, status }))))
+    void Promise.all((JSON.parse(siteIds) as string[]).map((id) =>
+      api.guardianStatus(id).then((status) => ({ id, status }))))
       .then((results) => { if (alive) setStates(Object.fromEntries(results.map(({ id, status }) => [id, status]))); })
       .catch((e) => { if (alive) setError((e as Error).message); });
     return () => { alive = false; };
-  }, [sites.map((s) => s.id).join("|")]);
+  }, [siteIds]);
 
   async function action(site: Site, type: "enable" | "check") {
     setWorking(site.id); setError(undefined);

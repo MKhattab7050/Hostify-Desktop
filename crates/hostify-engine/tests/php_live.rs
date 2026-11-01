@@ -512,7 +512,8 @@ async fn persistent_paths_promote_copy_failure_preserves_running_and_bad_health_
     f.engine.shutdown().await;
 }
 async fn wait_build_failed(f: &Fixture, id: &str) {
-    for _ in 0..400 {
+    // A failed health check may wait up to 60 seconds before rollback.
+    for _ in 0..1200 {
         let status = f.call("get_build_status", json!({"siteId":id})).await;
         if status["state"] == "failed" {
             tokio::time::sleep(Duration::from_millis(200)).await;

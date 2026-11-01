@@ -72,6 +72,12 @@ pub fn spawn_engine() -> Result<(), String> {
         beside
     };
     std::process::Command::new(&path)
+        .arg("--data-dir")
+        .arg(
+            super::paths::HostifyPaths::discover()
+                .map_err(|e| e.to_string())?
+                .root,
+        )
         .creation_flags(0x08000000 | 0x00000200) // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
