@@ -803,14 +803,9 @@ impl Engine {
                 let release_path = s.root.join("sites").join(id).join("app").join(release);
                 // Auto-detection may repair missing folders, but must not turn
                 // an unsafe caller-supplied path into a silently accepted one.
-                for path in [&config.working_dir, &config.document_root] {
-                    let relative =
-                        hostify_core::app_config::relative(path).map_err(|e| anyhow!(e))?;
-                    if release_path.join(relative).exists() {
-                        hostify_core::app_config::inside(&release_path, path)
-                            .map_err(|e| anyhow!(e))?;
-                    }
-                }
+                config
+                    .validate_auto_heal_paths(&release_path)
+                    .map_err(|e| anyhow!(e))?;
                 config.auto_heal(&release_path, &site.kind);
                 config
                     .validate_kind(&release_path, &site.kind)
@@ -1326,8 +1321,14 @@ impl Engine {
                     let (report, release) =
                         hostify_core::import::import_release(Path::new(source), kind, &site_dir)?;
                     let release_path = site_dir.join("app").join(&release);
-                    config.auto_heal(&release_path, &site_kind);
-                    if let Err(e) = config.validate_kind(&release_path, &site_kind) {
+                    let validation =
+                        config
+                            .validate_auto_heal_paths(&release_path)
+                            .and_then(|()| {
+                                config.auto_heal(&release_path, &site_kind);
+                                config.validate_kind(&release_path, &site_kind)
+                            });
+                    if let Err(e) = validation {
                         // Leave no refused import behind; add_site's folder is brand new.
                         let _ = std::fs::remove_dir_all(if method == "add_site" {
                             site_dir.clone()

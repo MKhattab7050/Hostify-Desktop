@@ -307,6 +307,16 @@ impl AppConfig {
         }
         Ok(())
     }
+    /// Reject unsafe paths before auto-detection can replace them.
+    pub fn validate_auto_heal_paths(&self, release: &Path) -> Result<(), String> {
+        for path in [&self.working_dir, &self.document_root] {
+            let rel = relative(path)?;
+            if release.join(rel).exists() {
+                inside(release, path)?;
+            }
+        }
+        Ok(())
+    }
     pub fn auto_heal(&mut self, release: &Path, kind: &str) -> bool {
         let mut changed = false;
         let root = match release.canonicalize() {

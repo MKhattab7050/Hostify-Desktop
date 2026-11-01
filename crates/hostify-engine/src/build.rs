@@ -178,6 +178,9 @@ pub(crate) async fn begin(engine: &Arc<Engine>, p: &Value) -> Result<Value> {
         .join(&id)
         .join("app")
         .join(&release);
+    config
+        .validate_auto_heal_paths(&root)
+        .map_err(|e| anyhow!(e))?;
     if config.auto_heal(&root, &site.kind) {
         let _ = engine.store.save_app_config(&id, &config);
     }

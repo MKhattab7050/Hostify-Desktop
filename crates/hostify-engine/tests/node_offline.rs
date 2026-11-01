@@ -65,6 +65,14 @@ async fn node_import_only_allocates_ports_and_requires_trust() {
             .to_string()
             .contains("Runtimes")
     );
+    let refused = engine
+        .dispatch(
+            "add_site",
+            json!({"name":"bad PHP","sourcePath":source,
+        "kind":"directory","siteKind":"php","config":{"documentRoot":"../outside"}}),
+        )
+        .await;
+    assert!(refused.is_err());
     let php = engine
         .dispatch(
             "add_site",
